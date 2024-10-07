@@ -10,7 +10,7 @@ class VisionModelWrapper:
     This wrapper class adapts vision models so that they can be slotted into the mlx_lm generation engine
     Defines `__getattr__` and `__setattr__` to allow the model properties to be set/get as if it were a text model
 
-    Models are evaluated in `mlx_lm` with the `__call__` method, so define that method to do call the vision model
+    Models are evaluated in `mlx_lm` with the `__call__` method, so define a custom `__call__` method to forward calls to the vision model
     """
 
     def __init__(self, model, image_processor):
