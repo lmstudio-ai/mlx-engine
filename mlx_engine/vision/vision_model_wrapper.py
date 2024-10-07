@@ -6,9 +6,9 @@ import PIL.Image
 
 class VisionModelWrapper:
     """
-    Wrapper class for the vision models
+    Wrapper class for Vision Models support
     This wrapper class adapts vision models so that they can be slotted into the mlx_lm generation engine
-    This wrapper defines `__getattr__` and `__setattr__` to allow the model properties to be set/get as if it were a text model
+    Defines `__getattr__` and `__setattr__` to allow the model properties to be set/get as if it were a text model
 
     Models are evaluated in `mlx_lm` with the `__call__` method, so define that method to do call the vision model
     """

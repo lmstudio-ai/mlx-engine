@@ -1,5 +1,5 @@
 """
-Set the cache dir for outlines.
+Set the cache dir for Outlines.
 
 Outlines reads this environment variable to determine where to read/write
 its cache files
