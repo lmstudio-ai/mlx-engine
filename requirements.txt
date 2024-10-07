@@ -1,0 +1,6 @@
+mlx==0.18.0
+mlx-lm==0.19.0
+mlx-vlm==0.0.13
+sentencepiece==0.2.0
+outlines==0.0.46
+torch==2.4.0
