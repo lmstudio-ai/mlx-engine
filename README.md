@@ -8,7 +8,7 @@ To run a demo of model load and inference:
 git clone git@github.com:lmstudio-ai/mlx-engine.git
 cd mlx-engine
 ```
-2. Create a virutal environment (optional)
+2. Create a virtual environment (optional)
 ```
  python -m venv myenv
  source myenv/bin/activate
