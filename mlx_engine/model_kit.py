@@ -35,7 +35,7 @@ class ModelKit:
         self, prompt_tokens, img_b64, prompt_progress_callback, generate_args
     ) -> mx.array:
         """
-        This method processes the prompt and adding its tokens to the cache history
+        This method processes the prompt, adding its tokens to the cache history
 
         Call this before starting evaluation
 
