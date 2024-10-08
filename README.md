@@ -11,12 +11,22 @@
 # mlx-engine
 MLX engine for LM Studio
 
+<br/>
+
 ## Built with
 - [mlx-lm](https://github.com/ml-explore/mlx-examples) - Apple MLX inference engine (MIT)
 - [Outlines](https://github.com/dottxt-ai/outlines) - Structured output for LLMs (Apache 2.0)
 - [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) - Vision model inferencing for MLX (MIT)
 
-## Demo
+<br/>
+
+## How to use in LM Studio
+LM Studio 0.3.4 and newer for Mac ships pre-bundled with mlx-engine.
+Download LM Studio from [here](https://lmstudio.ai/download?os=mac)
+
+<br/>
+
+## Standalone Demo
 To run a demo of model load and inference:
 1. Clone the repository
 ```
@@ -36,7 +46,3 @@ pip install -r requirements.txt
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
 ```
-
-## How to use in LM Studio
-LM Studio 0.3.4 and newer for Mac ships pre-bundled with mlx-engine.
-Download LM Studio from [here](lmstudio.ai/download?os=mac)
