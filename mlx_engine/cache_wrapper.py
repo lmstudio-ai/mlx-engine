@@ -52,7 +52,7 @@ class CacheWrapper:
         elif not mx.all(y[: len(self.tokens)] == self.tokens):
             reset = True
             reason = (
-                "Begginning sequence of passed token list does not match cached tokens"
+                "Beginning sequence of passed token list does not match cached tokens"
             )
 
         if reset:
