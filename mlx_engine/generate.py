@@ -49,19 +49,20 @@ def create_generator(
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
 
-    for token_info in itertools.islice(
-        mlx_lm.utils.generate_step(generate_step_input, model_kit.model, **generate_args),
-        max_tokens
-    ):
-        token = token_info[0]
-        if token == tokenizer.eos_token_id:
-            break
-        detokenizer.add_token(token)
-        # Yield the last segment if streaming
+    try:
+        for token_info in itertools.islice(
+            mlx_lm.utils.generate_step(generate_step_input, model_kit.model, **generate_args),
+            max_tokens
+        ):
+            token = token_info[0]
+            if token == tokenizer.eos_token_id:
+                break
+            detokenizer.add_token(token)
+            # Yield the last segment if streaming
+            yield detokenizer.last_segment
+    finally:
+        detokenizer.finalize()
         yield detokenizer.last_segment
-
-    detokenizer.finalize()
-    yield detokenizer.last_segment
 
 def tokenize(prompt: str) -> List[int]:
     return MODEL_KIT.tokenize(prompt)
