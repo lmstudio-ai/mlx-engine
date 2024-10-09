@@ -2,26 +2,22 @@ from typing import Callable, Iterator, List, Optional
 import random
 import json
 from pathlib import Path
-
+import itertools
 import mlx.core as mx
 import mlx_lm
-
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.outlines_logits_processor import OutlinesLogitsProcessor
 
 MODEL_KIT = None
 
-
 def load_model(model_path: str, max_kv_size: int, trust_remote_code: bool) -> None:
     global MODEL_KIT
     config_json = json.loads((Path(model_path) / "config.json").read_text())
-
     if "vision_config" in config_json:
         MODEL_KIT = VisionModelKit(model_path, trust_remote_code)
     else:
         MODEL_KIT = ModelKit(model_path, max_kv_size)
-
 
 # Adapted from mlx_lm.utils.stream_generate
 def create_generator(
@@ -53,22 +49,19 @@ def create_generator(
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
 
-    for (token, _), n in zip(
-        mlx_lm.utils.generate_step(
-            generate_step_input, model_kit.model, **generate_args
-        ),
-        range(max_tokens),
+    for token_info in itertools.islice(
+        mlx_lm.utils.generate_step(generate_step_input, model_kit.model, **generate_args),
+        max_tokens
     ):
+        token = token_info[0]
         if token == tokenizer.eos_token_id:
             break
         detokenizer.add_token(token)
-
         # Yield the last segment if streaming
         yield detokenizer.last_segment
 
     detokenizer.finalize()
     yield detokenizer.last_segment
-
 
 def tokenize(prompt: str) -> List[int]:
     return MODEL_KIT.tokenize(prompt)
