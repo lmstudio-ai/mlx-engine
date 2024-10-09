@@ -30,7 +30,7 @@ Download LM Studio from [here](https://lmstudio.ai/download?os=mac)
 To run a demo of model load and inference:
 1. Clone the repository
 ```
-git clone git@github.com:lmstudio-ai/mlx-engine.git
+git clone https://github.com/lmstudio-ai/mlx-engine.git
 cd mlx-engine
 ```
 2. Create a virtual environment (optional)
