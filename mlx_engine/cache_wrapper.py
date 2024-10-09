@@ -1,10 +1,10 @@
 import time
 from typing import Callable, List, Optional, Tuple
+from collections import Counter
 
 from mlx_lm.utils import make_kv_caches, RotatingKVCache
 import mlx.core as mx
 import mlx.nn as nn
-
 
 class CacheWrapper:
     """
@@ -26,6 +26,9 @@ class CacheWrapper:
         self.model = model
         self.max_kv_size = max_kv_size
         self.verbose = verbose
+        # Cache hit and miss counters
+        self.cache_hits = Counter()
+        self.cache_misses = Counter()
 
     def _reset_cache_if_necessary(self, tokens: List[int]) -> bool:
         """
@@ -60,9 +63,11 @@ class CacheWrapper:
                 print(f"Resetting cache with reason: {reason}", flush=True)
             self.cache = make_kv_caches(self.model, self.max_kv_size)
             self.tokens = None
+            self.cache_misses['reset'] += 1
         else:
             if self.verbose:
                 print("Cache is valid with passed tokens", flush=True)
+            self.cache_hits['valid'] += 1
 
         return reset
 
@@ -75,14 +80,17 @@ class CacheWrapper:
         """
         # no tokens yet, so should process all
         if self.tokens is None:
+            self.cache_misses['new'] += 1
             return tokens
         # if y is shorter than self.tokens, throw an error
         elif len(tokens) < len(self.tokens):
+            self.cache_misses['short'] += 1
             raise RuntimeError(
                 "Passed tokens list cannot be shorter than cached tokens"
             )
         # if start of y is not the same as self.tokens, throw an error
         elif not mx.all(tokens[: len(self.tokens)] == self.tokens):
+            self.cache_misses['mismatch'] += 1
             raise RuntimeError(
                 "Passed tokens list does not start with previously cached tokens, cannot safely "
                 "process new tokens continguously into cache"
@@ -90,9 +98,12 @@ class CacheWrapper:
         # figure out which tokens are new
         else:
             new_tokens = tokens[len(self.tokens) :]
+            if len(new_tokens) > 0:
+                self.cache_hits['partial'] += 1
+            else:
+                self.cache_hits['full'] += 1
             return new_tokens
 
-    # adapted from https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/cache_prompt.py#L121-L137
     def _process_tokens_into_cache(
         self,
         tokens_to_process: mx.array,
@@ -171,8 +182,6 @@ class CacheWrapper:
 
         return self._to_cache_history(), uncached_tokens
 
-    # adapted from https://github.com/ml-explore/mlx-examples/blob/6c2369e4b97f49fb5906ec46033497b39931b25d/llms/mlx_lm/cache_prompt.py#L140-L143
-    # and https://github.com/ml-explore/mlx-examples/blob/6c2369e4b97f49fb5906ec46033497b39931b25d/llms/mlx_lm/generate.py#L139-L149
     def _to_cache_history(self) -> List[Tuple[mx.array, mx.array]]:
         """
         Convert the current cache to a cache history format.
@@ -191,3 +200,32 @@ class CacheWrapper:
             cache_history.append((keys, values))
 
         return cache_history
+
+    def get_cache_stats(self):
+        """
+        Return the current cache hit and miss statistics.
+
+        Returns:
+            dict: A dictionary containing cache hit and miss counts.
+        """
+        return {
+            'hits': dict(self.cache_hits),
+            'misses': dict(self.cache_misses),
+            'total_hits': sum(self.cache_hits.values()),
+            'total_misses': sum(self.cache_misses.values()),
+        }
+
+    def print_cache_stats(self):
+        """
+        Print the current cache hit and miss statistics.
+        """
+        stats = self.get_cache_stats()
+        print("Cache Statistics:")
+        print(f"Total Hits: {stats['total_hits']}")
+        print(f"Total Misses: {stats['total_misses']}")
+        print("Hit Types:")
+        for hit_type, count in stats['hits'].items():
+            print(f"  {hit_type}: {count}")
+        print("Miss Types:")
+        for miss_type, count in stats['misses'].items():
+            print(f"  {miss_type}: {count}")
