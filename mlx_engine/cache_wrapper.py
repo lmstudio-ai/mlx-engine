@@ -134,7 +134,11 @@ class CacheWrapper:
                 progress_callback(percentage)
 
     def update_cache(
-        self, prompt_tokens: mx.array, num_tokens_to_exclude, progress_callback=None, step_size: int = 512, 
+        self,
+        prompt_tokens: mx.array,
+        num_tokens_to_exclude,
+        progress_callback=None,
+        step_size: int = 512,
     ) -> Tuple[List[Tuple[mx.array, mx.array]], mx.array]:
         """
         Update the cache by filling it with the prompt tokens in a way that:
@@ -153,11 +157,11 @@ class CacheWrapper:
         """
         if len(prompt_tokens) == 0:
             return prompt_tokens
-        
+
         # first, reset the cache if the full prompt tokens do not match the start of the cache
         # we need to see the whole prompt so that if the cache is not valid for it, we can reset it
         self._reset_cache_if_necessary(prompt_tokens)
-        
+
         tokens_to_cache = mx.array(prompt_tokens[:-num_tokens_to_exclude])
         uncached_tokens = mx.array(prompt_tokens[-num_tokens_to_exclude:])
 

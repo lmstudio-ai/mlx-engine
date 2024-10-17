@@ -1,6 +1,6 @@
 mlx==0.18.0
 mlx-lm==0.19.0
-mlx-vlm==0.0.13
+mlx-vlm @ https://github.com/Blaizzy/mlx-vlm/archive/51b0e7c84e8925dc690bb6da8517288be2acc5c0.zip
 sentencepiece==0.2.0
 outlines==0.0.46
 torch==2.4.0

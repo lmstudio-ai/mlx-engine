@@ -19,8 +19,8 @@ class ModelKit:
     detokenizer: StreamingDetokenizer = None
     cache_wrapper: Optional[CacheWrapper] = None
 
-    def __init__(self, model_path, max_kv_size):
-        self.model_path = Path(model_path)
+    def __init__(self, model_path: Path, max_kv_size: int):
+        self.model_path = model_path
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(self.model, max_kv_size, verbose=False)
@@ -54,7 +54,7 @@ class ModelKit:
         repetition_context_size = generate_args["repetition_context_size"]
 
         cache_history, generate_step_input = self.cache_wrapper.update_cache(
-            prompt_tokens, 
+            prompt_tokens,
             num_tokens_to_exclude=repetition_context_size,
             progress_callback=prompt_progress_callback,
         )

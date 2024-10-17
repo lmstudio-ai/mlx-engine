@@ -1,11 +1,9 @@
-from typing import Union
+from typing import Union, Optional, List
 
 from mlx_engine.model_kit import ModelKit
 from .vision_model_wrapper import VisionModelWrapper
 
-import PIL
 from io import BytesIO
-import base64
 import mlx_vlm
 from pathlib import Path
 import mlx.core as mx
@@ -25,10 +23,10 @@ class VisionModelKit(ModelKit):
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
 
-    def __init__(self, model_path: str, trust_remote_code: bool):
+    def __init__(self, model_path: Path, trust_remote_code: bool):
         self.config = mlx_vlm.utils.load_config(model_path)
         self.trust_remote_code = trust_remote_code
-        self.model_path = Path(model_path)
+        self.model_path = model_path
         self._initializer()
 
     def _initializer(self):
@@ -48,7 +46,11 @@ class VisionModelKit(ModelKit):
         self._initializer()
 
     def process_prompt(
-        self, prompt_tokens, img_b64, prompt_progress_callback, generate_args
+        self,
+        prompt_tokens,
+        images_b64: Optional[List[str]],
+        prompt_progress_callback,
+        generate_args,
     ) -> mx.array:
         """
         Call this before starting evaluation
@@ -60,15 +62,8 @@ class VisionModelKit(ModelKit):
         if self.has_processed_prompt:
             self._reset()
 
-        image = PIL.Image.open(BytesIO(base64.b64decode(img_b64))) if img_b64 else None
-        try:
-            image_token_format = get_message_json(self.config["model_type"], "")[
-                "content"
-            ]
-        except:
-            raise ValueError("Model type is not supported")
-        self.model.process_prompt_with_image(
-            image, prompt_tokens, self.processor, self.detokenizer, image_token_format
+        self.model.process_prompt_with_images(
+            images_b64, prompt_tokens, self.processor, self.detokenizer
         )
         self.has_processed_prompt = True
 
