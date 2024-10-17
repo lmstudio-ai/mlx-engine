@@ -58,7 +58,7 @@ python demo.py --model ~/.cache/lm-studio/models/mlx-community/DeepSeek-Coder-V2
 ```
 [mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx](https://model.lmstudio.ai/download/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx) - 8.84 GB
 
-### Vision Demo
+### Vision Model Demo
 Run the `demo.py` script with an MLX vision model:
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/pixtral-12b-4bit --prompt "<s>[INST]Compare these images[IMG][IMG][/INST]" --images demo-data/chameleon.webp demo-data/toucan.jpeg
