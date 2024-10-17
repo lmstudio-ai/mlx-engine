@@ -1,7 +1,8 @@
 import argparse
+import base64
 
 from mlx_engine.generate import load_model, create_generator, tokenize
-from pathlib import Path
+
 
 DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
 
@@ -23,18 +24,42 @@ def setup_arg_parser():
         type=str,
         help="Message to be processed by the model",
     )
+    parser.add_argument(
+        "--images",
+        type=str,
+        nargs="+",
+        help="Path of the images to process",
+    )
     return parser
 
+def image_to_base64(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
 if __name__ == "__main__":
+    # Parse arguments
     parser = setup_arg_parser()
     args = parser.parse_args()
+    if isinstance(args.images, str):
+        args.images = [args.images]
 
+    # Load the model
     model_path = args.model
-    load_model(str(model_path), max_kv_size=4096, trust_remote_code=False)
+    model_kit = load_model(str(model_path), max_kv_size=4096, trust_remote_code=False)
 
+    # Tokenize the prompt
     prompt = args.prompt
-    prompt_tokens = tokenize(prompt)
-    generator = create_generator(prompt_tokens, None, None, {"max_tokens": 1024})
+    prompt_tokens = tokenize(model_kit, prompt)
+
+    # Handle optional images
+    images_base64 = []
+    if args.images:
+        if isinstance(args.images, str):
+            args.images = [args.images]
+        images_base64 = [image_to_base64(img_path) for img_path in args.images]
+
+    # Generate the response
+    generator = create_generator(model_kit, prompt_tokens, None, images_base64, {"max_tokens": 1024})
     for token in generator:
         print(token, end="", flush=True)
     print()

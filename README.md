@@ -27,6 +27,8 @@ Download LM Studio from [here](https://lmstudio.ai/download?os=mac)
 <br/>
 
 ## Standalone Demo
+
+### Install Steps
 To run a demo of model load and inference:
 1. Clone the repository
 ```
@@ -42,7 +44,23 @@ cd mlx-engine
 ```
 pip install -r requirements.txt
 ```
-4. Run the `demo.py` script
+
+### Text Model Demo
+Run the `demo.py` script with an MLX text model:
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
 ```
+
+### Vision Demo
+Run the `demo.py` script with an MLX vision model:
+```
+python demo.py --model ~/.cache/lm-studio/models/mlx-community/pixtral-12b-4bit --prompt "<s>[INST]Compare these images[IMG][IMG][/INST]" --images demo-data/chameleon.webp demo-data/toucan.jpeg
+```
+Currently supported vision models:
+ - Pixtral
+   - [12B](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit) - 7.15GB
+ - Qwen2-VL
+   - [2B](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-2B-4bit) - 1.26GB
+   - [7B](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit) - 4.68GB
+ - Llava-v1.6
+   - [7B](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit) - 4.26GB

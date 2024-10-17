@@ -13,7 +13,9 @@ class OutlinesLogitsProcessor:
         json.loads(json_schema)
 
         self.logits_processor = JSONLogitsProcessor(
-            json_schema, TransformerTokenizer(model_kit.tokenizer._tokenizer)
+            json_schema,
+            TransformerTokenizer(model_kit.tokenizer._tokenizer),
+            whitespace_pattern="",
         )
 
     def __call__(self, tokens: mx.array, logits: mx.array):
@@ -23,6 +25,8 @@ class OutlinesLogitsProcessor:
             else []
         )
 
+        if logits.dtype == mx.bfloat16:
+            logits = logits.astype(mx.float32)
         logits_1d = logits.reshape(-1)
         logits_1d = self.logits_processor(generated_tokens, logits_1d)
         logits = logits_1d.reshape(1, -1)
