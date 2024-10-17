@@ -50,13 +50,13 @@ Run the `demo.py` script with an MLX text model:
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
 ```
-[Llama-3.1 8B model download link](https://model.lmstudio.ai/download/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit)
+[mlx-community/Meta-Llama-3.1-8B-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit) - 4.53 GB
 
 This command will use a default prompt that is formatted for Llama-3.1. For other models, add a custom `--prompt` argument with the correct prompt formatting:
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx --prompt "<｜begin▁of▁sentence｜>User: How long will it take an apple to fall from a 10m tree?Assistant:"
 ```
-[DeepSeek-Coder-V2-Lite model download link](https://model.lmstudio.ai/download/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx)
+[mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx](https://model.lmstudio.ai/download/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx) - 8.84 GB
 
 ### Vision Demo
 Run the `demo.py` script with an MLX vision model:
@@ -65,9 +65,9 @@ python demo.py --model ~/.cache/lm-studio/models/mlx-community/pixtral-12b-4bit 
 ```
 Currently supported vision models and download links:
  - Pixtral
-   - [12B](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit) - 7.15GB
+   - [mlx-community/pixtral-12b-4bit](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit) - 7.15 GB
  - Qwen2-VL
-   - [2B](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-2B-4bit) - 1.26GB
-   - [7B](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit) - 4.68GB
+   - [mlx-community/Qwen2-VL-2B-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-2B-4bit) - 1.26 GB
+   - [mlx-community/Qwen2-VL-7B-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit) - 4.68 GB
  - Llava-v1.6
-   - [7B](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit) - 4.26GB
+   - [mlx-community/llava-v1.6-mistral-7b-4bit](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit) - 4.26 GB
