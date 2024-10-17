@@ -50,13 +50,20 @@ Run the `demo.py` script with an MLX text model:
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
 ```
+[Llama-3.1 8B model download link](https://model.lmstudio.ai/download/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit)
+
+This command will use a default prompt that is formatted for Llama-3.1. For other models, add a custom `--prompt` argument with the correct prompt formatting:
+```
+python demo.py --model ~/.cache/lm-studio/models/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx --prompt "<｜begin▁of▁sentence｜>User: How long will it take an apple to fall from a 10m tree?Assistant:"
+```
+[DeepSeek-Coder-V2-Lite model download link](https://model.lmstudio.ai/download/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx)
 
 ### Vision Demo
 Run the `demo.py` script with an MLX vision model:
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/pixtral-12b-4bit --prompt "<s>[INST]Compare these images[IMG][IMG][/INST]" --images demo-data/chameleon.webp demo-data/toucan.jpeg
 ```
-Currently supported vision models:
+Currently supported vision models and download links:
  - Pixtral
    - [12B](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit) - 7.15GB
  - Qwen2-VL
