@@ -71,3 +71,12 @@ Currently supported vision models and download links:
    - [mlx-community/Qwen2-VL-7B-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit) - 4.68 GB
  - Llava-v1.6
    - [mlx-community/llava-v1.6-mistral-7b-4bit](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit) - 4.26 GB
+
+### BitNet Model Demo
+Run the `demo.py` script with a BitNet model:
+```
+python demo.py --model ~/.cache/lm-studio/models/bitnet/BitNet-b1.58 --model-type bitnet
+```
+[bitnet/BitNet-b1.58](https://model.lmstudio.ai/download/bitnet/BitNet-b1.58) - 2.34 GB
+
+This command will use a default prompt that is formatted for BitNet models. For other models, add a custom `--prompt` argument with the correct prompt formatting.

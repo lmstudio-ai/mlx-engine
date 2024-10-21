@@ -6,6 +6,7 @@ from mlx_engine.cache_wrapper import CacheWrapper
 from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
+import bitnet
 
 
 class ModelKit:
@@ -66,3 +67,30 @@ class ModelKit:
     @property
     def language_model(self):
         return self.model
+
+
+class BitNetModelKit(ModelKit):
+    """
+    Collection of objects and methods that are needed for operating a BitNet model
+    """
+
+    def __init__(self, model_path: Path):
+        self.model_path = model_path
+        self.model, self.tokenizer = bitnet.load(self.model_path)
+        self.detokenizer = self.tokenizer.detokenizer
+
+    def process_prompt(
+        self, prompt_tokens, img_b64, prompt_progress_callback, generate_args
+    ) -> mx.array:
+        """
+        This method processes the prompt for BitNet models
+
+        Call this before starting evaluation
+
+        Returns the uncached tokens as input for the `generate_step` function
+        """
+        if len(prompt_tokens) == 0:
+            raise ValueError("Prompt tokens must be non-empty")
+
+        # BitNet models do not use cache, so we directly return the prompt tokens
+        return mx.array(prompt_tokens)

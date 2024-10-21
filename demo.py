@@ -2,6 +2,7 @@ import argparse
 import base64
 
 from mlx_engine.generate import load_model, create_generator, tokenize
+from mlx_engine.model_kit import BitNetModelKit
 
 
 DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
@@ -30,6 +31,13 @@ def setup_arg_parser():
         nargs="+",
         help="Path of the images to process",
     )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        choices=["mlx", "bitnet"],
+        default="mlx",
+        help="Specify the type of model to use: 'mlx' or 'bitnet'.",
+    )
     return parser
 
 def image_to_base64(image_path):
@@ -45,7 +53,10 @@ if __name__ == "__main__":
 
     # Load the model
     model_path = args.model
-    model_kit = load_model(str(model_path), max_kv_size=4096, trust_remote_code=False)
+    if args.model_type == "bitnet":
+        model_kit = BitNetModelKit(model_path)
+    else:
+        model_kit = load_model(str(model_path), max_kv_size=4096, trust_remote_code=False)
 
     # Tokenize the prompt
     prompt = args.prompt
