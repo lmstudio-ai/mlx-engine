@@ -1,7 +1,7 @@
 import time
 from typing import Callable, List, Optional, Tuple
 
-from mlx_lm.utils import make_kv_caches, RotatingKVCache
+from mlx_lm.models.cache import make_prompt_cache, RotatingKVCache
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -22,7 +22,7 @@ class CacheWrapper:
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
         # will always be a list of RotatingKVCache objects since we pass max_kv_size
-        self.cache: List[RotatingKVCache] = make_kv_caches(model, max_kv_size)
+        self.cache: List[RotatingKVCache] = make_prompt_cache(model, max_kv_size)
         self.model = model
         self.max_kv_size = max_kv_size
         self.verbose = verbose
