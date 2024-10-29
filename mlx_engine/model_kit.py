@@ -59,7 +59,7 @@ class ModelKit:
             progress_callback=prompt_progress_callback,
         )
 
-        generate_args["cache_history"] = cache_history
+        generate_args["prompt_cache"] = cache_history
 
         return generate_step_input
 
