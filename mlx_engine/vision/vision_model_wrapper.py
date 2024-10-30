@@ -28,6 +28,7 @@ class VisionModelWrapper:
             "pixel_values": None,
             "mask": None,
             "first_call": False,
+            "language_model_kwargs": {},
         }
 
     def __getattr__(self, name):
@@ -63,16 +64,39 @@ class VisionModelWrapper:
         """
         if self.pixel_values is not None and not self.first_call:
             self.first_call = True
-            return self.vision_model(
+            outputs = self.vision_model(
                 self.input_ids,
                 self.pixel_values,
                 mask=self.mask,
                 image_grid_thw=self.image_grid_thw,
                 image_sizes=self.image_sizes,
+                aspect_ratio_ids=self.aspect_ratio_ids,
+                aspect_ratio_mask=self.aspect_ratio_mask,
+                cross_attention_mask=self.cross_attention_mask,
                 **kwargs,
             )
+
+            # taken from here https://github.com/Blaizzy/mlx-vlm/blob/904023515d06543be28e3cfe4dd73fa2fe89cac9/mlx_vlm/utils.py#L916-L924
+            if outputs.cross_attention_states is not None:
+                self.language_model_kwargs = {
+                    k: v
+                    for k, v in zip(
+                        ["cross_attention_states"], [outputs.cross_attention_states]
+                    )
+                }
         else:
-            return self.vision_model.language_model(*args, mask=self.mask, **kwargs)
+            try:
+                outputs = self.vision_model.language_model(
+                    *args, mask=self.mask, **kwargs, **self.language_model_kwargs
+                )
+            except ValueError as e:
+                # Create a friendly error message if a user tries to use mllama without images
+                if "Cross attention states must be provided for layer" in str(e):
+                    raise ValueError(
+                        "Using this model without any images attached is not supported yet."
+                    )
+                raise e
+        return outputs.logits
 
     def process_prompt_with_images(
         self,
@@ -98,6 +122,9 @@ class VisionModelWrapper:
             self.mask,
             self.image_grid_thw,
             self.image_sizes,
+            self.aspect_ratio_ids,
+            self.aspect_ratio_mask,
+            self.cross_attention_mask,
         ) = self._prepare_inputs(images_b64, prompt, processor)
 
     def _prepare_inputs(self, images_b64: list, prompt: str, processor):
@@ -111,8 +138,12 @@ class VisionModelWrapper:
         mask = None
         image_grid_thw = None
         image_sizes = None
+        aspect_ratio_ids = None
+        aspect_ratio_mask = None
+        cross_attention_mask = None
         if len(images_b64) == 0:
-            return mx.array(processor(prompt).input_ids), None, None, None, None
+            return (mx.array(processor(text=prompt).input_ids), *(None,) * 7)
+
         if self.image_processor is not None:
             processor.pad_token = processor.eos_token
             text_chunks = [
@@ -147,9 +178,31 @@ class VisionModelWrapper:
             input_ids = mx.array(inputs["input_ids"])
             mask = mx.array(inputs["attention_mask"])
             image_sizes = inputs.get("image_sizes", None)
+            if image_sizes is not None:
+                image_sizes = mx.array(image_sizes)
             image_grid_thw = inputs.get("image_grid_thw", None)
+            if image_grid_thw is not None:
+                image_grid_thw = mx.array(image_grid_thw)
+            aspect_ratio_ids = inputs.get("aspect_ratio_ids", None)
+            if aspect_ratio_ids is not None:
+                aspect_ratio_ids = mx.array(aspect_ratio_ids)
+            aspect_ratio_mask = inputs.get("aspect_ratio_mask", None)
+            if aspect_ratio_mask is not None:
+                aspect_ratio_mask = mx.array(aspect_ratio_mask)
+            cross_attention_mask = inputs.get("cross_attention_mask", None)
+            if cross_attention_mask is not None:
+                cross_attention_mask = mx.array(cross_attention_mask)
 
-        return input_ids, pixel_values, mask, image_grid_thw, image_sizes
+        return (
+            input_ids,
+            pixel_values,
+            mask,
+            image_grid_thw,
+            image_sizes,
+            aspect_ratio_ids,
+            aspect_ratio_mask,
+            cross_attention_mask,
+        )
 
     def _convert_to_pil(self, images_b64: List[str]):
         """Convert a list of base64 strings to PIL Images"""

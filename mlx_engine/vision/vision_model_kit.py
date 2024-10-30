@@ -39,6 +39,7 @@ class VisionModelKit(ModelKit):
         self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = None
+        mx.metal.clear_cache()
 
     def _reset(self):
         # it's a shortcoming that the only way to reset the model is to reload it
@@ -72,6 +73,9 @@ class VisionModelKit(ModelKit):
 
         generate_step_input = self.model.input_ids[0]
         return generate_step_input
+
+    def record_generated_token(self, token: int) -> None:
+        pass
 
     @property
     def language_model(self):
