@@ -1,4 +1,4 @@
-from typing import Callable, Iterator, List, Literal, NamedTuple, Optional
+from typing import Callable, Iterator, List, NamedTuple, Optional
 import random
 import json
 from pathlib import Path

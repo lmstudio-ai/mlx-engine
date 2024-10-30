@@ -1,7 +1,6 @@
 from typing import List, Optional, Any
 
 from mlx_lm.models.cache import (
-    RotatingKVCache,
     make_prompt_cache,
     trim_prompt_cache,
     can_trim_prompt_cache,

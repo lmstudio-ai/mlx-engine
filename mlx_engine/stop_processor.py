@@ -1,5 +1,4 @@
-import sys
-from typing import List, Literal, NamedTuple, Optional, Sequence, Union
+from typing import List, Literal, NamedTuple, Optional, Sequence
 
 
 StopReason = Literal["eos_token", "stop_string"]

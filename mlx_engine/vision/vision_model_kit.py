@@ -3,11 +3,9 @@ from typing import Union, Optional, List
 from mlx_engine.model_kit import ModelKit
 from .vision_model_wrapper import VisionModelWrapper
 
-from io import BytesIO
 import mlx_vlm
 from pathlib import Path
 import mlx.core as mx
-from mlx_vlm.prompt_utils import get_message_json
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 
