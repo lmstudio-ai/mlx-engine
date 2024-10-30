@@ -1,4 +1,4 @@
-from typing import Callable, Iterator, List, NamedTuple, Optional
+from typing import Callable, Iterator, List, Literal, NamedTuple, Optional
 import random
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ import mlx_lm
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.outlines_logits_processor import OutlinesLogitsProcessor
-from mlx_engine.stop_utils import stopping_criteria, sequence_overlap, StoppingCriteriaResult, StopReason
+from mlx_engine.stop_processor import StopProcessor, StopReason
 
 
 class GenerationStopCondition(NamedTuple):
@@ -40,7 +40,7 @@ def create_generator(
         prompt_tokens: List[int],
         prompt_progress_callback: Optional[Callable[[float], None]],
         images_b64: Optional[List[str]],
-        stop_id_sequences: List[List[int]],
+        stop_sequences: List[List[int]],
         generate_args: dict,
 ) -> Iterator[GenerationResult]:
     generate_step_input = model_kit.process_prompt(
@@ -65,41 +65,29 @@ def create_generator(
     tokenizer = model_kit.tokenizer
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
-    tokens_to_check_for_stopping = []
-    stopping_criteria_result: StoppingCriteriaResult = None
-    stop_sequence_suffix = None
+
+    stop_processor = StopProcessor(tokenizer, stop_sequences)
+    stop_processor_result = None
 
     for (token, _), n in zip(
-            mlx_lm.utils.generate_step(
-                generate_step_input, model_kit.model, **generate_args
-            ),
-            range(max_tokens),
+        mlx_lm.utils.generate_step(
+            generate_step_input, model_kit.model, **generate_args
+        ),
+        range(max_tokens),
     ):
         model_kit.record_generated_token(token)
         detokenizer.add_token(token)
-        tokens_to_check_for_stopping.append(token)
+        
+        stop_processor_result = stop_processor.process_token(token)
 
-        stopping_criteria_result = stopping_criteria(
-            tokens_to_check_for_stopping,
-            stop_id_sequences,
-            tokenizer,
-        )
-        if stopping_criteria_result.stop_reason is not None:
-            if stopping_criteria_result.stop_tokens:
-                trim_length = len(stopping_criteria_result.stop_tokens)
-                stop_sequence_suffix = tokenizer.decode(
-                    tokens_to_check_for_stopping[-trim_length :]
-                )
+        if stop_processor_result.status == "full_stop":
+            sys.stderr.write(f"[mlx-engine] Full stop criteria match found: {stop_processor_result.stop_reason}\n")
             break
-
         # If we currently have generated a partial match with a stop sequence, generate new
         # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
-        if stopping_criteria_result.is_partial_match:
+        if stop_processor_result.status == "partial_match":
             sys.stderr.write("[mlx-engine] Partial stop criteria match found, buffering output\n")
             continue
-        else:
-            # if no partial match possible, clear the tokens_to_check_for_stopping
-            tokens_to_check_for_stopping = []
 
         new_text = detokenizer.last_segment
         if new_text:
@@ -113,27 +101,24 @@ def create_generator(
     detokenizer.finalize()
     last_segment = detokenizer.last_segment
     if last_segment:
-        if stop_sequence_suffix is not None:
-            last_segment = last_segment[: -len(stop_sequence_suffix)]
+        if stop_processor.stop_sequence_suffix is not None:
+            last_segment = last_segment[: -len(stop_processor.stop_sequence_suffix)]
 
-    # build up the final stop condition safely, although currently it
-    # should always be non-None
-    final_stop_condition = None
-    if stopping_criteria_result.stop_reason is not None:
-        stop_string = ""
-        stop_tokens = []
-        if stopping_criteria_result.stop_tokens:
-            stop_tokens = stopping_criteria_result.stop_tokens
-            stop_string = tokenizer.decode(stopping_criteria_result.stop_tokens)
-        final_stop_condition = GenerationStopCondition(
-            stop_reason=stopping_criteria_result.stop_reason,
+    # build up the final generation stop condition safely, although stop_processor_result
+    # should always be set at this point
+    generation_stop_condition = None
+    if stop_processor_result and stop_processor_result.stop_reason:
+        stop_tokens = stop_processor_result.stop_tokens or []
+        stop_string = tokenizer.decode(stop_tokens) if stop_tokens else ""
+        generation_stop_condition = GenerationStopCondition(
+            stop_reason=stop_processor_result.stop_reason,
             stop_string=stop_string,
             stop_tokens=stop_tokens,
         )
     yield GenerationResult(
         text=last_segment,
         tokens=tokenize(model_kit, last_segment),
-        stop_condition=final_stop_condition,
+        stop_condition=generation_stop_condition,
     )
 
 
