@@ -44,7 +44,8 @@ def create_generator(
     # Add outlines logits processor if json_schema is provided
     logits_processor = []
     json_schema = generate_args.pop("json_schema", None)
-    if json_schema is not None:
+    is_structured_output_request = json_schema is not None
+    if is_structured_output_request:
         logits_processor.append(OutlinesLogitsProcessor(model_kit, json_schema))
     generate_args["logits_processor"] = logits_processor
 
@@ -59,11 +60,15 @@ def create_generator(
         ),
         range(max_tokens),
     ):
+        model_kit.record_generated_token(token)
         if token == tokenizer.eos_token_id:
             break
         detokenizer.add_token(token)
 
         # Yield the last segment if streaming
+        # Yield strings token-by-token, except for structured output case
+        if not is_structured_output_request:
+            detokenizer.finalize()
         yield detokenizer.last_segment
 
     detokenizer.finalize()

@@ -15,7 +15,6 @@ class OutlinesLogitsProcessor:
         self.logits_processor = JSONLogitsProcessor(
             json_schema,
             TransformerTokenizer(model_kit.tokenizer._tokenizer),
-            whitespace_pattern="",
         )
 
     def __call__(self, tokens: mx.array, logits: mx.array):
