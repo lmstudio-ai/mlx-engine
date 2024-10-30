@@ -33,6 +33,12 @@ def setup_arg_parser():
         nargs="+",
         help="Path of the images to process",
     )
+    parser.add_argument(
+        "--stop-strings",
+        type=str,
+        nargs="+",
+        help="Strings that will stop the generation",
+    )
     return parser
 
 
@@ -56,6 +62,11 @@ if __name__ == "__main__":
     prompt = args.prompt
     prompt_tokens = tokenize(model_kit, prompt)
 
+    # Tokenize the stop strings
+    stop_sequences = [
+        tokenize(model_kit, stop_string) for stop_string in args.stop_strings or []
+    ]
+
     # Handle optional images
     images_base64 = []
     if args.images:
@@ -65,8 +76,13 @@ if __name__ == "__main__":
 
     # Generate the response
     generator = create_generator(
-        model_kit, prompt_tokens, None, images_base64, {"max_tokens": 1024}
+        model_kit,
+        prompt_tokens,
+        None,
+        images_base64,
+        stop_sequences,
+        {"max_tokens": 1024},
     )
-    for token in generator:
-        print(token, end="", flush=True)
+    for generation_result in generator:
+        print(generation_result.text, end="", flush=True)
     print()
