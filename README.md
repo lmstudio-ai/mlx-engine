@@ -54,9 +54,9 @@ python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B
 
 This command will use a default prompt that is formatted for Llama-3.1. For other models, add a custom `--prompt` argument with the correct prompt formatting:
 ```
-python demo.py --model ~/.cache/lm-studio/models/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx --prompt "<｜begin▁of▁sentence｜>User: How long will it take an apple to fall from a 10m tree?Assistant:"
+python demo.py --model ~/.cache/lm-studio/models/mlx-community/Mistral-Small-Instruct-2409-4bit --prompt "<s> [INST] How long will it take for an apple to fall from a 10m tree? [/INST]"
 ```
-[mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx](https://model.lmstudio.ai/download/mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx) - 8.84 GB
+[mlx-community/Mistral-Small-Instruct-2409-4bit](https://model.lmstudio.ai/download/mlx-community/Mistral-Small-Instruct-2409-4bit) - 12.52 GB
 
 ### Vision Model Demo
 Run the `demo.py` script with an MLX vision model:
