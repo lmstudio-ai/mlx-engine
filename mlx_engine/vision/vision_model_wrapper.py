@@ -99,11 +99,11 @@ class VisionModelWrapper:
         return outputs.logits
 
     def process_prompt_with_images(
-            self,
-            images_b64: Optional[List[str]],
-            prompt_tokens: mx.array,
-            processor,
-            detokenizer,
+        self,
+        images_b64: Optional[List[str]],
+        prompt_tokens: mx.array,
+        processor,
+        detokenizer,
     ):
         """
         This method generates the input_ids, pixel_values, and mask for the vision model
@@ -156,7 +156,7 @@ class VisionModelWrapper:
             input_ids = []
             for chunks in text_chunks:
                 ids = (
-                        chunks[0] + [self.vision_model.config.image_token_index] + chunks[1]
+                    chunks[0] + [self.vision_model.config.image_token_index] + chunks[1]
                 )
                 padding = [processor.pad_token_id] * (max_length - len(ids))
                 input_ids.append(mx.array(ids + padding))
@@ -238,7 +238,9 @@ class VisionModelWrapper:
             original_size = (img.width, img.height)
             aspect_ratio = img.width / img.height
 
-            sys.stderr.write(f"[mlx-engine] Image {i+1}: Original size {original_size}\n")
+            sys.stderr.write(
+                f"[mlx-engine] Image {i+1}: Original size {original_size}\n"
+            )
 
             if img.width > max_size[0] or img.height > max_size[1]:
                 if img.width > img.height:
@@ -248,7 +250,9 @@ class VisionModelWrapper:
                     new_height = max_size[1]
                     new_width = int(new_height * aspect_ratio)
                 img = img.resize((new_width, new_height), PIL.Image.LANCZOS)
-                sys.stderr.write(f"[mlx-engine] Image {i+1}: Resized to {img.width}x{img.height}\n")
+                sys.stderr.write(
+                    f"[mlx-engine] Image {i+1}: Resized to {img.width}x{img.height}\n"
+                )
             else:
                 sys.stderr.write(f"[mlx-engine] Image {i+1}: No resize needed\n")
 

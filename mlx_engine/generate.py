@@ -18,13 +18,15 @@ class GenerationStopCondition(NamedTuple):
     stop_string: str
     stop_tokens: List[int]
 
+
 class GenerationResult(NamedTuple):
     text: str
     tokens: List[int]
     stop_condition: Optional[GenerationStopCondition]
 
+
 def load_model(
-        model_path: str | Path, max_kv_size: int, trust_remote_code: bool
+    model_path: str | Path, max_kv_size: int, trust_remote_code: bool
 ) -> ModelKit | VisionModelKit:
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
@@ -34,14 +36,15 @@ def load_model(
     else:
         return ModelKit(model_path, max_kv_size)
 
+
 # Adapted from mlx_lm.utils.stream_generate
 def create_generator(
-        model_kit: ModelKit | VisionModelKit,
-        prompt_tokens: List[int],
-        prompt_progress_callback: Optional[Callable[[float], None]],
-        images_b64: Optional[List[str]],
-        stop_sequences: List[List[int]],
-        generate_args: dict,
+    model_kit: ModelKit | VisionModelKit,
+    prompt_tokens: List[int],
+    prompt_progress_callback: Optional[Callable[[float], None]],
+    images_b64: Optional[List[str]],
+    stop_sequences: List[List[int]],
+    generate_args: dict,
 ) -> Iterator[GenerationResult]:
     generate_step_input = model_kit.process_prompt(
         prompt_tokens, images_b64, prompt_progress_callback, generate_args
@@ -77,16 +80,20 @@ def create_generator(
     ):
         model_kit.record_generated_token(token)
         detokenizer.add_token(token)
-        
+
         stop_processor_result = stop_processor.process_token(token)
 
         if stop_processor_result.status == "full_stop":
-            sys.stderr.write(f"[mlx-engine] Full stop criteria match found: {stop_processor_result.stop_reason}\n")
+            sys.stderr.write(
+                f"[mlx-engine] Full stop criteria match found: {stop_processor_result.stop_reason}\n"
+            )
             break
         # If we currently have generated a partial match with a stop sequence, generate new
         # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
         if stop_processor_result.status == "partial_match":
-            sys.stderr.write("[mlx-engine] Partial stop criteria match found, buffering output\n")
+            sys.stderr.write(
+                "[mlx-engine] Partial stop criteria match found, buffering output\n"
+            )
             continue
 
         new_text = detokenizer.last_segment
