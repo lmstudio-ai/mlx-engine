@@ -96,6 +96,7 @@ def create_generator(
             )
             continue
 
+        # only yield a generation result the detokenizer has a segment to yield
         new_text = detokenizer.last_segment
         if new_text:
             yield GenerationResult(
