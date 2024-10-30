@@ -2,7 +2,6 @@ from typing import Callable, Iterator, List, NamedTuple, Optional
 import random
 import json
 from pathlib import Path
-import sys
 
 import mlx.core as mx
 import mlx_lm
@@ -84,16 +83,10 @@ def create_generator(
         stop_processor_result = stop_processor.process_token(token)
 
         if stop_processor_result.status == "full_stop":
-            sys.stderr.write(
-                f"[mlx-engine] Full stop criteria match found: {stop_processor_result.stop_reason}\n"
-            )
             break
         # If we currently have generated a partial match with a stop sequence, generate new
         # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
         if stop_processor_result.status == "partial_match":
-            sys.stderr.write(
-                "[mlx-engine] Partial stop criteria match found, buffering output\n"
-            )
             continue
 
         # only yield a generation result the detokenizer has a segment to yield

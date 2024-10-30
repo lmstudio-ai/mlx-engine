@@ -85,4 +85,10 @@ if __name__ == "__main__":
     )
     for generation_result in generator:
         print(generation_result.text, end="", flush=True)
+        if generation_result.stop_condition:
+            print(
+                f"\n\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
+            )
+            if generation_result.stop_condition.stop_string:
+                print(f"Stop string: {generation_result.stop_condition.stop_string}")
     print()
