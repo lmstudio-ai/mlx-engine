@@ -9,9 +9,12 @@ DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
 Explain the rules of sudoku<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 """
 
+
 def setup_arg_parser():
     """Set up and return the argument parser."""
-    parser = argparse.ArgumentParser(description="LM Studio mlx-engine inference script")
+    parser = argparse.ArgumentParser(
+        description="LM Studio mlx-engine inference script"
+    )
     parser.add_argument(
         "--model",
         required=True,
@@ -30,11 +33,19 @@ def setup_arg_parser():
         nargs="+",
         help="Path of the images to process",
     )
+    parser.add_argument(
+        "--stop-strings",
+        type=str,
+        nargs="+",
+        help="Strings that will stop the generation",
+    )
     return parser
+
 
 def image_to_base64(image_path):
     with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
 
 if __name__ == "__main__":
     # Parse arguments
@@ -59,7 +70,20 @@ if __name__ == "__main__":
         images_base64 = [image_to_base64(img_path) for img_path in args.images]
 
     # Generate the response
-    generator = create_generator(model_kit, prompt_tokens, None, images_base64, {"max_tokens": 1024})
-    for token in generator:
-        print(token, end="", flush=True)
+    generator = create_generator(
+        model_kit,
+        prompt_tokens,
+        None,
+        images_base64,
+        args.stop_strings,
+        {"max_tokens": 1024},
+    )
+    for generation_result in generator:
+        print(generation_result.text, end="", flush=True)
+        if generation_result.stop_condition:
+            print(
+                f"\n\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
+            )
+            if generation_result.stop_condition.stop_string:
+                print(f"Stop string: {generation_result.stop_condition.stop_string}")
     print()

@@ -1,4 +1,4 @@
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, NamedTuple, Optional
 import random
 import json
 from pathlib import Path
@@ -9,6 +9,13 @@ import mlx_lm
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.outlines_logits_processor import OutlinesLogitsProcessor
+from mlx_engine.stop_processor import StopProcessor, GenerationStopCondition
+
+
+class GenerationResult(NamedTuple):
+    text: str
+    tokens: List[int]
+    stop_condition: Optional[GenerationStopCondition]
 
 
 def load_model(
@@ -29,8 +36,9 @@ def create_generator(
     prompt_tokens: List[int],
     prompt_progress_callback: Optional[Callable[[float], None]],
     images_b64: Optional[List[str]],
+    stop_strings: Optional[List[str]],
     generate_args: dict,
-) -> Iterator[str]:
+) -> Iterator[GenerationResult]:
     generate_step_input = model_kit.process_prompt(
         prompt_tokens, images_b64, prompt_progress_callback, generate_args
     )
@@ -53,6 +61,12 @@ def create_generator(
     tokenizer = model_kit.tokenizer
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
+    # keep track of tokens buffered by detokenizer to yield accurate generation results
+    token_buffer: List[int] = []
+
+    stop_sequences = [tokenize(model_kit, sequence) for sequence in (stop_strings or [])]
+    stop_processor = StopProcessor(tokenizer, stop_sequences)
+    stop_processor_result = None
 
     for (token, _), n in zip(
         mlx_lm.utils.generate_step(
@@ -61,18 +75,39 @@ def create_generator(
         range(max_tokens),
     ):
         model_kit.record_generated_token(token)
-        if token == tokenizer.eos_token_id:
-            break
         detokenizer.add_token(token)
+        token_buffer.append(token)
 
-        # Yield the last segment if streaming
-        # Yield strings token-by-token, except for structured output case
-        if not is_structured_output_request:
-            detokenizer.finalize()
-        yield detokenizer.last_segment
+        stop_processor_result = stop_processor.process_token(token)
 
+        if stop_processor_result.status == "full_stop":
+            break
+        # If we currently have generated a partial match with a stop sequence, generate new
+        # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
+        if stop_processor_result.status == "partial_match":
+            continue
+
+        # only yield a generation result the detokenizer has a segment to yield
+        new_text = detokenizer.last_segment
+        if new_text:
+            yield GenerationResult(
+                text=new_text,
+                tokens=token_buffer,
+                stop_condition=None,
+            )
+            token_buffer = []
+
+    # check is there any remaining text to send
     detokenizer.finalize()
-    yield detokenizer.last_segment
+    last_segment = detokenizer.last_segment
+    last_segment, generation_stop_condition = stop_processor.finalize(
+        last_segment, stop_processor_result
+    )
+    yield GenerationResult(
+        text=last_segment,
+        tokens=token_buffer,
+        stop_condition=generation_stop_condition,
+    )
 
 
 def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
