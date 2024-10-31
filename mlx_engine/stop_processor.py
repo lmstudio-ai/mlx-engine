@@ -1,6 +1,6 @@
 """Module for processing and handling stop sequences in token generation."""
 
-from typing import List, Literal, NamedTuple, Optional, Sequence
+from typing import List, Literal, NamedTuple, Optional, Sequence, Tuple
 
 
 StopReason = Literal["eos_token", "stop_string"]
@@ -14,6 +14,12 @@ class StopProcessorResult(NamedTuple):
     status: StopProcessorStatus
     stop_reason: Optional[StopReason]
     stop_tokens: Optional[List[int]]
+
+
+class GenerationStopCondition(NamedTuple):
+    stop_reason: StopReason
+    stop_string: str
+    stop_tokens: List[int]
 
 
 class StopProcessor:
@@ -65,6 +71,26 @@ class StopProcessor:
             # if no partial match, can clear the buffer of tokens we need to check for stopping
             self.tokens_to_check_for_stopping = []
             return StopProcessorResult("no_match", None, None)
+
+    def finalize(
+        self, last_segment: str, stop_processor_result: StopProcessorResult
+    ) -> Tuple[str, Optional[GenerationStopCondition]]:
+        if last_segment:
+            if self.stop_sequence_suffix is not None:
+                last_segment = last_segment[: -len(self.stop_sequence_suffix)]
+
+        # build up the final generation stop condition safely, although stop_processor_result
+        # should always be set at this point
+        generation_stop_condition = None
+        if stop_processor_result and stop_processor_result.stop_reason:
+            stop_tokens = stop_processor_result.stop_tokens or []
+            stop_string = self.tokenizer.decode(stop_tokens) if stop_tokens else ""
+            generation_stop_condition = GenerationStopCondition(
+                stop_reason=stop_processor_result.stop_reason,
+                stop_string=stop_string,
+                stop_tokens=stop_tokens,
+            )
+        return last_segment, generation_stop_condition
 
 
 # Adapted from mlx_lm.utils.server.py

@@ -62,11 +62,6 @@ if __name__ == "__main__":
     prompt = args.prompt
     prompt_tokens = tokenize(model_kit, prompt)
 
-    # Tokenize the stop strings
-    stop_sequences = [
-        tokenize(model_kit, stop_string) for stop_string in args.stop_strings or []
-    ]
-
     # Handle optional images
     images_base64 = []
     if args.images:
@@ -80,7 +75,7 @@ if __name__ == "__main__":
         prompt_tokens,
         None,
         images_base64,
-        stop_sequences,
+        args.stop_strings,
         {"max_tokens": 1024},
     )
     for generation_result in generator:

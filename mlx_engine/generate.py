@@ -9,13 +9,7 @@ import mlx_lm
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.outlines_logits_processor import OutlinesLogitsProcessor
-from mlx_engine.stop_processor import StopProcessor, StopReason
-
-
-class GenerationStopCondition(NamedTuple):
-    stop_reason: StopReason
-    stop_string: str
-    stop_tokens: List[int]
+from mlx_engine.stop_processor import StopProcessor, GenerationStopCondition
 
 
 class GenerationResult(NamedTuple):
@@ -42,7 +36,7 @@ def create_generator(
     prompt_tokens: List[int],
     prompt_progress_callback: Optional[Callable[[float], None]],
     images_b64: Optional[List[str]],
-    stop_sequences: List[List[int]],
+    stop_strings: Optional[List[str]],
     generate_args: dict,
 ) -> Iterator[GenerationResult]:
     generate_step_input = model_kit.process_prompt(
@@ -70,6 +64,7 @@ def create_generator(
     # keep track of tokens buffered by detokenizer to yield accurate generation results
     token_buffer: List[int] = []
 
+    stop_sequences = [tokenize(model_kit, sequence) for sequence in (stop_strings or [])]
     stop_processor = StopProcessor(tokenizer, stop_sequences)
     stop_processor_result = None
 
@@ -105,21 +100,9 @@ def create_generator(
     # check is there any remaining text to send
     detokenizer.finalize()
     last_segment = detokenizer.last_segment
-    if last_segment:
-        if stop_processor.stop_sequence_suffix is not None:
-            last_segment = last_segment[: -len(stop_processor.stop_sequence_suffix)]
-
-    # build up the final generation stop condition safely, although stop_processor_result
-    # should always be set at this point
-    generation_stop_condition = None
-    if stop_processor_result and stop_processor_result.stop_reason:
-        stop_tokens = stop_processor_result.stop_tokens or []
-        stop_string = tokenizer.decode(stop_tokens) if stop_tokens else ""
-        generation_stop_condition = GenerationStopCondition(
-            stop_reason=stop_processor_result.stop_reason,
-            stop_string=stop_string,
-            stop_tokens=stop_tokens,
-        )
+    last_segment, generation_stop_condition = stop_processor.finalize(
+        last_segment, stop_processor_result
+    )
     yield GenerationResult(
         text=last_segment,
         tokens=token_buffer,
