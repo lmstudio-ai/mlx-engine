@@ -67,6 +67,8 @@ def create_generator(
     tokenizer = model_kit.tokenizer
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
+    # keep track of tokens buffered by detokenizer to yield accurate generation results
+    token_buffer: List[int] = []
 
     stop_processor = StopProcessor(tokenizer, stop_sequences)
     stop_processor_result = None
@@ -79,6 +81,7 @@ def create_generator(
     ):
         model_kit.record_generated_token(token)
         detokenizer.add_token(token)
+        token_buffer.append(token)
 
         stop_processor_result = stop_processor.process_token(token)
 
@@ -94,9 +97,10 @@ def create_generator(
         if new_text:
             yield GenerationResult(
                 text=new_text,
-                tokens=tokenize(model_kit, new_text),
+                tokens=token_buffer,
                 stop_condition=None,
             )
+            token_buffer = []
 
     # check is there any remaining text to send
     detokenizer.finalize()
@@ -118,7 +122,7 @@ def create_generator(
         )
     yield GenerationResult(
         text=last_segment,
-        tokens=tokenize(model_kit, last_segment),
+        tokens=token_buffer,
         stop_condition=generation_stop_condition,
     )
 
