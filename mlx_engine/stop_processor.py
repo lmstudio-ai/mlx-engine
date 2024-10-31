@@ -94,10 +94,7 @@ def stopping_criteria(
     for stop_ids in stop_id_sequences:
         if len(tokens) >= len(stop_ids) and tokens[-len(stop_ids) :] == stop_ids:
             return StopProcessorResult(
-                status="full_stop",
-                stop_reason="stop_string",
-                stop_tokens=stop_ids,
-                is_partial_match=False,
+                status="full_stop", stop_reason="stop_string", stop_tokens=stop_ids
             )
 
     # Check for full matches in decoded text
