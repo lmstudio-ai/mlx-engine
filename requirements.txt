@@ -1,4 +1,4 @@
-mlx>=0.19.3
+mlx>=0.19.3,<0.20.0
 mlx-lm==0.19.2
 mlx-vlm @ https://github.com/Blaizzy/mlx-vlm/archive/f0812b5c7d6ec2b83512bfda176d9ddee59ed26a.zip
 sentencepiece==0.2.0
