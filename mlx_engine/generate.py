@@ -1,15 +1,14 @@
 from typing import Callable, Iterator, List, NamedTuple, Optional
-import random
 import json
 from pathlib import Path
 
-import mlx.core as mx
 import mlx_lm
 
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.stop_processor import StopProcessor, GenerationStopCondition
+from mlx_engine.utils.set_seed import set_seed
 
 
 class GenerationResult(NamedTuple):
@@ -39,15 +38,12 @@ def create_generator(
     stop_strings: Optional[List[str]],
     generate_args: dict,
 ) -> Iterator[GenerationResult]:
+    set_seed(generate_args.pop("seed", None))
+
+    # Process prompt
     generate_step_input = model_kit.process_prompt(
         prompt_tokens, images_b64, prompt_progress_callback, generate_args
     )
-
-    # Generate a random seed if not provided or if seed was explicitly set to -1
-    seed = generate_args.pop("seed", -1)
-    if seed == -1:
-        seed = random.randint(0, 2**32 - 1)
-    mx.random.seed(seed)
 
     # Add outlines logits processor if json_schema is provided
     logits_processor = []
@@ -64,7 +60,9 @@ def create_generator(
     # keep track of tokens buffered by detokenizer to yield accurate generation results
     token_buffer: List[int] = []
 
-    stop_sequences = [tokenize(model_kit, sequence) for sequence in (stop_strings or [])]
+    stop_sequences = [
+        tokenize(model_kit, sequence) for sequence in (stop_strings or [])
+    ]
     stop_processor = StopProcessor(tokenizer, stop_sequences)
     stop_processor_result = None
 
