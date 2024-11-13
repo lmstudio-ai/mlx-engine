@@ -28,6 +28,13 @@ Download LM Studio from [here](https://lmstudio.ai/download?os=mac)
 
 ## Standalone Demo
 
+### Prerequisites
+
+- macOS 14.0 (Sonoma) or greater.
+- python3.11
+  - The requirements.txt file is compiled specifically for python3.11
+  - `brew install python@3.11` is a quick way to add python3.11 to your path that doesn't break your default python setup
+
 ### Install Steps
 To run a demo of model load and inference:
 1. Clone the repository
@@ -37,7 +44,7 @@ cd mlx-engine
 ```
 2. Create a virtual environment (optional)
 ```
- python -m venv .venv
+ python3.11 -m venv .venv
  source .venv/bin/activate
 ```
 3. Install the required dependency packages
