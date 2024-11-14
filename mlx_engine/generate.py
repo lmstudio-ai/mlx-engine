@@ -6,15 +6,19 @@ import mlx_lm
 
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
-from mlx_engine.outlines_logits_processor import OutlinesLogitsProcessor
+from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
+from mlx_engine.processors.logprobs_processor import summarize_top_logprobs, TokenLogprob
 from mlx_engine.stop_processor import StopProcessor, GenerationStopCondition
 from mlx_engine.utils.set_seed import set_seed
 
+
+MAX_TOP_LOGPROBS = 10
 
 class GenerationResult(NamedTuple):
     text: str
     tokens: List[int]
     stop_condition: Optional[GenerationStopCondition]
+    top_logprobs: List[List[TokenLogprob]]
 
 
 def load_model(
@@ -37,6 +41,7 @@ def create_generator(
     images_b64: Optional[List[str]],
     stop_strings: Optional[List[str]],
     generate_args: dict,
+    top_logprobs: Optional[int] = None,
 ) -> Iterator[GenerationResult]:
     set_seed(generate_args.pop("seed", None))
 
@@ -53,12 +58,18 @@ def create_generator(
         logits_processor.append(OutlinesLogitsProcessor(model_kit, json_schema))
     generate_args["logits_processor"] = logits_processor
 
+    if top_logprobs is None:
+        top_logprobs = 0
+    if top_logprobs > MAX_TOP_LOGPROBS:
+        raise ValueError(f"top_logprobs must be less than or equal to {MAX_TOP_LOGPROBS}")
+
     max_tokens = generate_args.pop("max_tokens")
     tokenizer = model_kit.tokenizer
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
     # keep track of tokens buffered by detokenizer to yield accurate generation results
     token_buffer: List[int] = []
+    top_logprobs_buffer: List[List[TokenLogprob]] = []
 
     stop_sequences = [
         tokenize(model_kit, sequence) for sequence in (stop_strings or [])
@@ -66,7 +77,7 @@ def create_generator(
     stop_processor = StopProcessor(tokenizer, stop_sequences)
     stop_processor_result = None
 
-    for (token, _), n in zip(
+    for (token, logprobs), n in zip(
         mlx_lm.utils.generate_step(
             generate_step_input, model_kit.model, **generate_args
         ),
@@ -75,7 +86,8 @@ def create_generator(
         model_kit.record_generated_token(token)
         detokenizer.add_token(token)
         token_buffer.append(token)
-
+        if top_logprobs:
+            top_logprobs_buffer.append(summarize_top_logprobs(tokenizer, logprobs, top_logprobs))
         stop_processor_result = stop_processor.process_token(token)
 
         if stop_processor_result.status == "full_stop":
@@ -92,8 +104,10 @@ def create_generator(
                 text=new_text,
                 tokens=token_buffer,
                 stop_condition=None,
+                top_logprobs=top_logprobs_buffer,
             )
             token_buffer = []
+            top_logprobs_buffer = []
 
     # check is there any remaining text to send
     detokenizer.finalize()
@@ -105,6 +119,7 @@ def create_generator(
         text=last_segment,
         tokens=token_buffer,
         stop_condition=generation_stop_condition,
+        top_logprobs=top_logprobs_buffer,
     )
 
 
