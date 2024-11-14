@@ -32,7 +32,7 @@ Download LM Studio from [here](https://lmstudio.ai/download?os=mac)
 
 - macOS 14.0 (Sonoma) or greater.
 - python3.11
-  - The requirements.txt file is compiled specifically for python3.11
+  - The requirements.txt file is compiled specifically for python3.11. python3.11 is the python version bundled within the LM Studio MLX runtime
   - `brew install python@3.11` is a quick way to add python3.11 to your path that doesn't break your default python setup
 
 ### Install Steps
