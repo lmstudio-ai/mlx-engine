@@ -4,7 +4,7 @@ import mlx.core as mx
 
 
 class TokenLogprob(NamedTuple):
-    text: int
+    text: str
     logprob: float
 
 
