@@ -2,11 +2,15 @@ from typing import NamedTuple
 
 import mlx.core as mx
 
+
 class TokenLogprob(NamedTuple):
     text: int
     logprob: float
 
-def summarize_top_logprobs(tokenizer, logprobs: mx.array, top_logprobs: int) -> list[TokenLogprob]:
+
+def summarize_top_logprobs(
+    tokenizer, logprobs: mx.array, top_logprobs: int
+) -> list[TokenLogprob]:
     # find the sorted indicies (in descending order) of the logprobs
     sorted_indices = mx.argsort(-logprobs)
 

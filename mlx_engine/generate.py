@@ -7,23 +7,40 @@ import mlx_lm
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
-from mlx_engine.processors.logprobs_processor import summarize_top_logprobs, TokenLogprob
+from mlx_engine.utils.top_logprobs import summarize_top_logprobs, TokenLogprob
 from mlx_engine.stop_processor import StopProcessor, GenerationStopCondition
 from mlx_engine.utils.set_seed import set_seed
 
 
 MAX_TOP_LOGPROBS = 10
 
+
 class GenerationResult(NamedTuple):
     text: str
     tokens: List[int]
-    stop_condition: Optional[GenerationStopCondition]
     top_logprobs: List[List[TokenLogprob]]
+    stop_condition: Optional[GenerationStopCondition]
 
 
 def load_model(
     model_path: str | Path, max_kv_size: int, trust_remote_code: bool
 ) -> ModelKit | VisionModelKit:
+    """
+    Load a language model or vision-language model from the specified path.
+
+    Args:
+        model_path (str | Path): Path to the model directory containing model files and config.json
+        max_kv_size (int): Maximum key-value cache size for the model
+        trust_remote_code (bool): Whether to trust and load remote code during model initialization
+
+    Returns:
+        ModelKit | VisionModelKit: An instance of either ModelKit for language models or
+            VisionModelKit for vision-language models, depending on the model type
+
+    Raises:
+        FileNotFoundError: If config.json is not found in the model path
+        json.JSONDecodeError: If config.json is not valid JSON
+    """
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
 
@@ -43,6 +60,34 @@ def create_generator(
     generate_args: dict,
     top_logprobs: Optional[int] = None,
 ) -> Iterator[GenerationResult]:
+    """
+    Create a generator that streams text generation results from the model.
+
+    Args:
+        model_kit (ModelKit | VisionModelKit): The model to use for generation
+        prompt_tokens (List[int]): List of token IDs representing the input prompt
+        prompt_progress_callback (Optional[Callable[[float], None]]): Optional callback function
+            that receives generation progress as a float between 0 and 1
+        images_b64 (Optional[List[str]]): Optional list of base64-encoded images for
+            vision-language models
+        stop_strings (Optional[List[str]]): Optional list of strings that will stop generation
+            when encountered
+        generate_args (dict): Dictionary of generation parameters that are passed to `mlx_lm`
+            Full list of parameters:
+            https://github.com/ml-explore/mlx-examples/blob/bd6d910/llms/mlx_lm/utils.py#L158
+        top_logprobs (Optional[int]): Number of top token probabilities to return per token.
+            Must be <= MAX_TOP_LOGPROBS
+
+    Yields:
+        GenerationResult: Named tuple containing:
+            - text: Generated text segment
+            - tokens: List of generated token IDs
+            - top_logprobs: Token probability information if requested
+            - stop_condition: Information about why generation stopped, if applicable
+
+    Raises:
+        ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS
+    """
     set_seed(generate_args.pop("seed", None))
 
     # Process prompt
@@ -61,7 +106,9 @@ def create_generator(
     if top_logprobs is None:
         top_logprobs = 0
     if top_logprobs > MAX_TOP_LOGPROBS:
-        raise ValueError(f"top_logprobs must be less than or equal to {MAX_TOP_LOGPROBS}")
+        raise ValueError(
+            f"top_logprobs must be less than or equal to {MAX_TOP_LOGPROBS}"
+        )
 
     max_tokens = generate_args.pop("max_tokens")
     tokenizer = model_kit.tokenizer
@@ -87,7 +134,9 @@ def create_generator(
         detokenizer.add_token(token)
         token_buffer.append(token)
         if top_logprobs:
-            top_logprobs_buffer.append(summarize_top_logprobs(tokenizer, logprobs, top_logprobs))
+            top_logprobs_buffer.append(
+                summarize_top_logprobs(tokenizer, logprobs, top_logprobs)
+            )
         stop_processor_result = stop_processor.process_token(token)
 
         if stop_processor_result.status == "full_stop":
@@ -124,4 +173,14 @@ def create_generator(
 
 
 def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
+    """
+    Convert a text prompt into a list of token IDs using the model's tokenizer.
+
+    Args:
+        model_kit (ModelKit | VisionModelKit): The model kit containing the tokenizer
+        prompt (str): The text prompt to tokenize
+
+    Returns:
+        List[int]: List of token IDs representing the tokenized prompt
+    """
     return model_kit.tokenize(prompt)
