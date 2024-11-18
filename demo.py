@@ -6,7 +6,7 @@ from mlx_engine.generate import load_model, create_generator, tokenize
 
 DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
 
-Explain the rules of sudoku<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+Explain the rules of chess in one sentence.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 """
 
 
@@ -39,6 +39,12 @@ def setup_arg_parser():
         nargs="+",
         help="Strings that will stop the generation",
     )
+    parser.add_argument(
+        "--top-logprobs",
+        type=int,
+        default=0,
+        help="Number of top logprobs to return",
+    )
     return parser
 
 
@@ -69,6 +75,9 @@ if __name__ == "__main__":
             args.images = [args.images]
         images_base64 = [image_to_base64(img_path) for img_path in args.images]
 
+    # Record top logprobs
+    logprobs_list = []
+
     # Generate the response
     generator = create_generator(
         model_kit,
@@ -77,13 +86,16 @@ if __name__ == "__main__":
         images_base64,
         args.stop_strings,
         {"max_tokens": 1024},
+        top_logprobs=args.top_logprobs,
     )
     for generation_result in generator:
         print(generation_result.text, end="", flush=True)
+        logprobs_list.extend(generation_result.top_logprobs)
         if generation_result.stop_condition:
             print(
                 f"\n\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
             )
             if generation_result.stop_condition.stop_string:
                 print(f"Stop string: {generation_result.stop_condition.stop_string}")
-    print()
+    if args.top_logprobs:
+        [print(x) for x in logprobs_list]
