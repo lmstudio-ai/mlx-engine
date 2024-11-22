@@ -115,7 +115,7 @@ def create_generator(
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
     # keep track of tokens buffered by detokenizer to yield accurate generation results
-    token_buffer: List[int, str, float] = []
+    token_buffer: List[TokenLogprob] = []
     top_logprobs_buffer: List[List[TokenLogprob]] = []
 
     stop_sequences = [
