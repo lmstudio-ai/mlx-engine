@@ -81,7 +81,7 @@ def create_generator(
     Yields:
         GenerationResult: Named tuple containing:
             - text: Generated text segment
-            - tokens: List of generated tokens, each with ID, text, and logprob
+            - tokens: List of generated tokens, as TokenLogprob named tuples
             - top_logprobs: Token probability information if requested
             - stop_condition: Information about why generation stopped, if applicable
 
