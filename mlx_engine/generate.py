@@ -1,4 +1,4 @@
-from typing import Callable, Iterator, List, NamedTuple, Optional
+from typing import Callable, Iterator, List, NamedTuple, Optional, Tuple
 import json
 from pathlib import Path
 
@@ -17,7 +17,7 @@ MAX_TOP_LOGPROBS = 10
 
 class GenerationResult(NamedTuple):
     text: str
-    tokens: List[int]
+    tokens: List[Tuple[int, str]]  # Each tuple contains (token_id, string token_piece)
     top_logprobs: List[List[TokenLogprob]]
     stop_condition: Optional[GenerationStopCondition]
 
@@ -81,7 +81,7 @@ def create_generator(
     Yields:
         GenerationResult: Named tuple containing:
             - text: Generated text segment
-            - tokens: List of generated token IDs
+            - tokens: List of generated token IDs and their corresponding string token pieces
             - top_logprobs: Token probability information if requested
             - stop_condition: Information about why generation stopped, if applicable
 
@@ -115,7 +115,7 @@ def create_generator(
     detokenizer = model_kit.detokenizer
     detokenizer.reset()
     # keep track of tokens buffered by detokenizer to yield accurate generation results
-    token_buffer: List[int] = []
+    token_buffer: List[int, str] = []
     top_logprobs_buffer: List[List[TokenLogprob]] = []
 
     stop_sequences = [
@@ -132,7 +132,7 @@ def create_generator(
     ):
         model_kit.record_generated_token(token)
         detokenizer.add_token(token)
-        token_buffer.append(token)
+        token_buffer.append([token, tokenizer.decode(token)])
         if top_logprobs:
             top_logprobs_buffer.append(
                 summarize_top_logprobs(tokenizer, logprobs, top_logprobs)
