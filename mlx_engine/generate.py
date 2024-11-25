@@ -50,7 +50,7 @@ def load_model(
     config_json = json.loads((model_path / "config.json").read_text())
 
     if "vision_config" in config_json:
-        return VisionModelKit(model_path, trust_remote_code)
+        return VisionModelKit(model_path, max_kv_size, trust_remote_code)
     else:
         return ModelKit(model_path, max_kv_size)
 
