@@ -13,9 +13,9 @@ def set_seed(seed: Optional[int]) -> None:
     PyTorch, and Python's built-in random module.
 
     Args:
-        seed: The seed value to initialize random number generators. If None, a seed will be 
-            automatically generated using the current nanosecond timestamp. The final seed 
-            value will be truncated to 32 bits for compatibility across all random number 
+        seed: The seed value to initialize random number generators. If None, a seed will be
+            automatically generated using the current nanosecond timestamp. The final seed
+            value will be truncated to 32 bits for compatibility across all random number
             generators.
 
     Raises:
@@ -33,8 +33,8 @@ def set_seed(seed: Optional[int]) -> None:
     """
     if seed is None:
         # Get nanosecond timestamp and use it as seed
-        seed = int(time.time_ns()) 
-    
+        seed = int(time.time_ns())
+
     if seed < 0:
         raise ValueError("Seed must be a non-negative integer.")
     seed = seed & (2**32 - 1)  # Ensure seed fits in 32 bits

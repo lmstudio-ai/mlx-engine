@@ -24,9 +24,11 @@ def summarize_top_logprobs(
 
     # decode the top indices
     text_list = [tokenizer.decode(index) for index in top_indices.tolist()]
-    
+
     # return list of TokenLogprob with id (int), text (str), and logprob (float)
     return [
-        TokenLogprob(int(idx), txt, float(prob)) 
-        for idx, txt, prob in zip(top_indices.tolist(), text_list, top_logprobs.tolist())
+        TokenLogprob(int(idx), txt, float(prob))
+        for idx, txt, prob in zip(
+            top_indices.tolist(), text_list, top_logprobs.tolist()
+        )
     ]

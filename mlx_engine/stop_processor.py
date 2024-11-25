@@ -75,10 +75,6 @@ class StopProcessor:
     def finalize(
         self, last_segment: str, stop_processor_result: StopProcessorResult
     ) -> Tuple[str, Optional[GenerationStopCondition]]:
-        if last_segment:
-            if self.stop_sequence_suffix is not None:
-                last_segment = last_segment[: -len(self.stop_sequence_suffix)]
-
         # build up the final generation stop condition safely, although stop_processor_result
         # should always be set at this point
         generation_stop_condition = None
