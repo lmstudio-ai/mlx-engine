@@ -236,7 +236,7 @@ def create_generator(
         detokenizer.finalize()
         text += detokenizer.last_segment
 
-        # Process stop string
+        # Process stop string by trimming text segment where it begins
         stop_string = stop_string_processor_result.stop_string
         stop_string_start_pos = text.find(stop_string)
 
