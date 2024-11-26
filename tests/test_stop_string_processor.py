@@ -57,17 +57,13 @@ class TestStopStringProcessor(unittest.TestCase):
         self.assertEqual(results[-1].stop_tokens, self.tokenizer.encode("Hello"))
 
     def test_stop_string_at_end(self):
-        results = self.process_tokens(
-            ["world"], "Hello world"
-        )
+        results = self.process_tokens(["world"], "Hello world")
         self.assertEqual(results[-1].status, "full_stop")
         self.assertEqual(results[-1].stop_string, "world")
         self.assertEqual(results[-1].stop_tokens, self.tokenizer.encode(" world"))
-    
+
     def test_case_sensitivity(self):
-        results = self.process_tokens(
-            ["Stop"], "This is a STOP sign"
-        )
+        results = self.process_tokens(["Stop"], "This is a STOP sign")
         self.assertEqual(results[-1].status, "no_match")
 
     def test_stop_string_with_special_characters(self):
@@ -77,10 +73,7 @@ class TestStopStringProcessor(unittest.TestCase):
         self.assertEqual(results[-1].stop_tokens, self.tokenizer.encode("\n"))
 
     def test_unicode_stop_strings(self):
-        results = self.process_tokens(
-            ["é", "ñ", "北京"],
-            "Hello 北京 é ñ"
-        )
+        results = self.process_tokens(["é", "ñ", "北京"], "Hello 北京 é ñ")
         self.assertEqual(results[-1].status, "full_stop")
         self.assertEqual(results[-1].stop_string, "北京")
         self.assertEqual(results[-1].stop_tokens, self.tokenizer.encode(" 北京"))
