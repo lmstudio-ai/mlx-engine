@@ -242,9 +242,11 @@ def create_generator(
                 if stop_string_start_pos != -1:
                     text = text[:stop_string_start_pos]
                 else:
+                    # Known to at least happen when a stop string is the eos token because stream_generate
+                    # breaks without adding the eos token to the detokenizer. Log for visibility.
                     sys.stderr.write(
                         f"[mlx-engine] Stop string '{stop_string}' not found in final text segment, "
-                        "even though a full stop was detected. This is unexpected."
+                        "even though a full stop was detected. Not trimming final segment."
                     )
                 # Build the stop condition
                 generation_stop_condition = GenerationStopCondition(
