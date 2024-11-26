@@ -29,7 +29,7 @@ class VisionModelWrapper:
             "pixel_values": None,
             "mask": None,
             "first_call": False,
-            "next_y": None,
+            "decoder_input_ids": None,
             "language_model_kwargs": {},
         }
 
@@ -109,19 +109,21 @@ class VisionModelWrapper:
                     )
                 }
             elif outputs.encoder_outputs is not None:
-                self.next_y = self.input_ids
+                self.decoder_input_ids = self.input_ids
                 self.language_model_kwargs = {
-                    "decoder_input_ids": self.next_y,
+                    "decoder_input_ids": self.decoder_input_ids,
                     "encoder_outputs": outputs.encoder_outputs,
                 }
             
+            # Add the cache we created here to the language model kwargs
             self.language_model_kwargs["cache"] = cache
         else:
             try:
                 del kwargs["cache"]  # Use the cache from self.language_model_kwargs
 
+                # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1009
                 if "decoder_input_ids" in self.language_model_kwargs:
-                    self.language_model_kwargs["decoder_input_ids"] = mx.array([self.next_y])
+                    self.language_model_kwargs["decoder_input_ids"] = mx.array([self.decoder_input_ids])
                     outputs = self.language_model(
                         **kwargs,
                         **self.language_model_kwargs,
@@ -146,7 +148,8 @@ class VisionModelWrapper:
         return outputs.logits
     
     def record_sampled_token(self, token) -> None:
-        self.next_y = token
+        # Adapted from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1064
+        self.decoder_input_ids = token
 
     def process_prompt_with_images(
         self,
