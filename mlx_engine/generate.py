@@ -159,7 +159,7 @@ def create_generator(
         }
     )
 
-    # Add pre-sampling record for vision models
+    # For vision models, immediately record the token once it's sampled
     if type(model_kit) is VisionModelKit:
         sampler_func = generate_args["sampler"]
         def sampler_func_wrapper(*args, **kwargs):
@@ -207,7 +207,7 @@ def create_generator(
     ):
         # Token processor
         token = generation_result.token
-        model_kit.record_generated_token(token)
+        model_kit.update_cache_wrapper(token)
 
         logprobs = generation_result.logprobs
         token_buffer.append(

@@ -62,7 +62,7 @@ class ModelKit:
 
         return prompt_tokens
 
-    def record_generated_token(self, token: int) -> None:
+    def update_cache_wrapper(self, token: int) -> None:
         self.cache_wrapper.record_generated_token(token)
 
     @property

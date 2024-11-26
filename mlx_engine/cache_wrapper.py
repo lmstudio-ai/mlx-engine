@@ -161,7 +161,7 @@ class CacheWrapper:
         non_prefill_tokens = prompt_tokens[-num_tokens_to_exclude:]
         return non_prefill_tokens
 
-    def record_generated_token(self, token):
+    def update_cache_wrapper(self, token):
         """
         Add the generated token to the token list, so that we can map the token to the KV cache.
         """

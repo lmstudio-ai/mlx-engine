@@ -75,7 +75,7 @@ class VisionModelKit(ModelKit):
         generate_step_input = self.model.input_ids[None]
         return generate_step_input
 
-    def record_generated_token(self, token: int) -> None:
+    def update_cache_wrapper(self, token: int) -> None:
         pass
 
     def record_sampled_token(self, token: int) -> None:

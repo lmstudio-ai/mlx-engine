@@ -127,7 +127,6 @@ class VisionModelWrapper:
                         **self.language_model_kwargs,
                     )
                 else:
-                    args = list(args)
                     outputs = self.language_model(
                         *args,
                         mask=self.mask,
