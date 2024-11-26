@@ -289,7 +289,7 @@ class VisionModelWrapper:
             PIL.Image.open(BytesIO(base64.b64decode(img))) for img in images_b64 or []
         ]
 
-    def _custom_resize(self, pil_images, max_size=(512, 512)):
+    def _custom_resize(self, pil_images, max_size=(1000, 1000)):
         """
         Resize and optionally pad a list of PIL images.
 
