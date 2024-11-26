@@ -8,7 +8,10 @@ from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs, TokenLogprob
-from mlx_engine.stop_processor import StopProcessor, GenerationStopCondition
+from mlx_engine.stop_string_processor import (
+    StopStringProcessor,
+    GenerationStopCondition,
+)
 from mlx_engine.utils.set_seed import set_seed
 
 
@@ -194,8 +197,8 @@ def create_generator(
     stop_sequences = [
         tokenize(model_kit, sequence) for sequence in (stop_strings or [])
     ]
-    stop_processor = StopProcessor(tokenizer, stop_sequences)
-    stop_processor_result = None
+    stop_string_processor = StopStringProcessor(tokenizer, stop_sequences)
+    stop_string_processor_result = None
     text = ""
 
     for generation_result in mlx_lm.utils.stream_generate(
@@ -219,39 +222,52 @@ def create_generator(
             )
 
         # Stop processor
-        stop_processor_result = stop_processor.process_token(token)
+        stop_string_processor_result = stop_string_processor.process_token(token)
         text += generation_result.text
-        if (
-            stop_processor_result.status == "full_stop"
-            and stop_processor_result.stop_reason != "eos_token"
-        ):
-            break
-        # If we currently have generated a partial match with a stop sequence, generate new
-        # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
-        if stop_processor_result.status == "partial_match":
-            continue
-
-        # Only yield a generation result the detokenizer has a segment to yield
-        if text:
+        if stop_string_processor_result.status == "full_stop":
+            # 1a. manually finalize the detokenizer
+            detokenizer = tokenizer.detokenizer
+            detokenizer.finalize()
+            text += detokenizer.last_segment
+            print(f"text after finalizing and adding last segment: {text}")
+            # 1b. finalize the stop processor
+            text, generation_stop_condition = stop_string_processor.finalize(
+                text, stop_string_processor_result
+            )
+            # 1c. yield the final generation result
+            print(f"yielding final generation result: {text}")
             yield GenerationResult(
                 text=text,
                 tokens=token_buffer,
-                stop_condition=None,
+                stop_condition=generation_stop_condition,
+                top_logprobs=top_logprobs_buffer,
+            )
+            break  # stop generation
+
+        # If we currently have generated a partial match with a stop sequence, generate new
+        # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
+        if stop_string_processor_result.status == "partial_match":
+            continue
+
+        # Standard yield - only yield when a non-empty text segment is available
+        if text:
+            # populate stop_condition if we hit an eos token
+            stop_condition = None
+            if token == tokenizer.eos_token_id:
+                stop_condition = GenerationStopCondition(
+                    stop_reason="eos_token",
+                    stop_string=tokenizer.decode(token),
+                    stop_tokens=[token],
+                )
+            yield GenerationResult(
+                text=text,
+                tokens=token_buffer,
+                stop_condition=stop_condition,
                 top_logprobs=top_logprobs_buffer,
             )
             token_buffer = []
             top_logprobs_buffer = []
             text = ""
-
-    text, generation_stop_condition = stop_processor.finalize(
-        text, stop_processor_result
-    )
-    yield GenerationResult(
-        text=text,
-        tokens=token_buffer,
-        stop_condition=generation_stop_condition,
-        top_logprobs=top_logprobs_buffer,
-    )
 
 
 def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
