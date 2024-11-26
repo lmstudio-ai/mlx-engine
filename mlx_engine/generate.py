@@ -24,6 +24,7 @@ StopReason = Literal["eos_token", "stop_string"]
 class GenerationStopCondition(NamedTuple):
     stop_reason: StopReason
     stop_string: str
+    # sequence of token ids that the stop string was found in
     stop_tokens: List[int]
 
 
@@ -242,6 +243,7 @@ def create_generator(
         if stop_string_start_pos != -1:
             text = text[:stop_string_start_pos]
         else:
+            # this is known to happen when the eos token is a stop string
             sys.stderr.write(
                 f"[mlx-engine] Stop string '{stop_string}' not found in final text segment, "
                 "even though a full stop was detected. Not trimming final segment."
