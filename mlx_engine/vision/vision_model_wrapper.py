@@ -4,6 +4,7 @@ import sys
 from io import BytesIO
 import base64
 import PIL
+from mlx_vlm.models.base import KVCache, SimpleKVCache
 
 from typing import List, Optional
 
@@ -28,6 +29,7 @@ class VisionModelWrapper:
             "pixel_values": None,
             "mask": None,
             "first_call": False,
+            "decoder_input_ids": None,
             "language_model_kwargs": {},
         }
 
@@ -64,6 +66,26 @@ class VisionModelWrapper:
         """
         if self.pixel_values is not None and not self.first_call:
             self.first_call = True
+
+            # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L987
+            if hasattr(self.language_model, "make_cache"):
+                cache = self.language_model.make_cache()
+            else:
+                kv_heads = (
+                    [self.language_model.n_kv_heads] * len(self.language_model.layers)
+                    if isinstance(self.language_model.n_kv_heads, int)
+                    else self.language_model.n_kv_heads
+                )
+                if self.vision_model.config.model_type == "florence2":
+                    cache = [
+                        (SimpleKVCache(), SimpleKVCache()) for n in self.language_model.layers
+                    ]
+                else:
+                    cache = [KVCache(self.language_model.head_dim, n) for n in kv_heads]
+
+            # Replace the mlx_lm cache with the one we created
+            kwargs["cache"] = cache
+
             outputs = self.vision_model(
                 self.input_ids,
                 self.pixel_values,
@@ -73,10 +95,12 @@ class VisionModelWrapper:
                 aspect_ratio_ids=self.aspect_ratio_ids,
                 aspect_ratio_mask=self.aspect_ratio_mask,
                 cross_attention_mask=self.cross_attention_mask,
+                image_input_idx=self.image_input_idx,
+                image_masks=self.image_masks,
                 **kwargs,
             )
 
-            # taken from here https://github.com/Blaizzy/mlx-vlm/blob/904023515d06543be28e3cfe4dd73fa2fe89cac9/mlx_vlm/utils.py#L916-L924
+            # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1045-L1056
             if outputs.cross_attention_states is not None:
                 self.language_model_kwargs = {
                     k: v
@@ -84,11 +108,35 @@ class VisionModelWrapper:
                         ["cross_attention_states"], [outputs.cross_attention_states]
                     )
                 }
+            elif outputs.encoder_outputs is not None:
+                self.decoder_input_ids = self.input_ids
+                self.language_model_kwargs = {
+                    "decoder_input_ids": self.decoder_input_ids,
+                    "encoder_outputs": outputs.encoder_outputs,
+                }
+            
+            # Add the cache we created here to the language model kwargs
+            self.language_model_kwargs["cache"] = cache
         else:
             try:
-                outputs = self.vision_model.language_model(
-                    *args, mask=self.mask, **kwargs, **self.language_model_kwargs
-                )
+                del kwargs["cache"]  # Use the cache from self.language_model_kwargs
+
+                # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1009
+                if "decoder_input_ids" in self.language_model_kwargs:
+                    self.language_model_kwargs["decoder_input_ids"] = mx.array([self.decoder_input_ids])
+                    outputs = self.language_model(
+                        **kwargs,
+                        **self.language_model_kwargs,
+                    )
+                else:
+                    outputs = self.language_model(
+                        *args,
+                        mask=self.mask,
+                        **kwargs,
+                        **self.language_model_kwargs,
+                    )
+
+
             except ValueError as e:
                 # Create a friendly error message if a user tries to use mllama without images
                 if "Cross attention states must be provided for layer" in str(e):
@@ -96,7 +144,12 @@ class VisionModelWrapper:
                         "Using this model without any images attached is not supported yet."
                     )
                 raise e
+
         return outputs.logits
+    
+    def record_sampled_token(self, token) -> None:
+        # Adapted from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1064
+        self.decoder_input_ids = token
 
     def process_prompt_with_images(
         self,
@@ -125,6 +178,8 @@ class VisionModelWrapper:
             self.aspect_ratio_ids,
             self.aspect_ratio_mask,
             self.cross_attention_mask,
+            self.image_input_idx,
+            self.image_masks,
         ) = self._prepare_inputs(images_b64, prompt, processor)
 
     def _prepare_inputs(self, images_b64: list, prompt: str, processor):
@@ -135,16 +190,21 @@ class VisionModelWrapper:
         pil_images = self._convert_to_pil(images_b64)
         resized_images = self._custom_resize(pil_images)
 
+        image_token_index = self.vision_model.config.image_token_index if hasattr(self.vision_model.config, "image_token_index") else None
+
         mask = None
         image_grid_thw = None
         image_sizes = None
         aspect_ratio_ids = None
         aspect_ratio_mask = None
         cross_attention_mask = None
+        image_input_idx = None
         if len(images_b64) == 0:
             return (mx.array(processor(text=prompt).input_ids), *(None,) * 7)
 
         if self.image_processor is not None:
+            if not isinstance(prompt, list):
+                prompt = [prompt]
             processor.pad_token = processor.eos_token
             text_chunks = [
                 [processor(chunk).input_ids for chunk in prompt.split("<image>")]
@@ -156,7 +216,7 @@ class VisionModelWrapper:
             input_ids = []
             for chunks in text_chunks:
                 ids = (
-                    chunks[0] + [self.vision_model.config.image_token_index] + chunks[1]
+                    chunks[0] + [image_token_index] + chunks[1]
                 )
                 padding = [processor.pad_token_id] * (max_length - len(ids))
                 input_ids.append(mx.array(ids + padding))
@@ -168,15 +228,32 @@ class VisionModelWrapper:
             ).astype(mx.int32)
         else:
             processor.tokenizer.pad_token = processor.tokenizer.eos_token
-            inputs = processor(
-                text=[prompt], images=resized_images, padding=True, return_tensors="mlx"
-            )
+            if hasattr(processor, "process"):
+                inputs = processor.process(
+                    text=prompt, images=resized_images, padding=True, return_tensors="mlx"
+                )
+            else:
+                inputs = processor(
+                    text=prompt, images=resized_images, padding=True, return_tensors="mlx"
+                )
+
+            if "images" in inputs:
+                inputs["pixel_values"] = inputs["images"]
+                inputs.pop("images")
             if isinstance(inputs["pixel_values"], list):
                 pixel_values = inputs["pixel_values"]
             else:
                 pixel_values = mx.array(inputs["pixel_values"])
             input_ids = mx.array(inputs["input_ids"])
-            mask = mx.array(inputs["attention_mask"])
+            mask = (
+                mx.array(inputs["attention_mask"]) if "attention_mask" in inputs else None
+            )
+            image_input_idx = inputs.get("image_input_idx", None)
+            if image_input_idx is not None:
+                image_input_idx = mx.array(image_input_idx)
+            image_masks = inputs.get("image_masks", None)
+            if image_masks is not None:
+                image_masks = mx.array(image_masks)
             image_sizes = inputs.get("image_sizes", None)
             if image_sizes is not None:
                 image_sizes = mx.array(image_sizes)
@@ -202,6 +279,8 @@ class VisionModelWrapper:
             aspect_ratio_ids,
             aspect_ratio_mask,
             cross_attention_mask,
+            image_input_idx,
+            image_masks,
         )
 
     def _convert_to_pil(self, images_b64: List[str]):

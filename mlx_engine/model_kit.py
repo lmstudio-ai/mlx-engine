@@ -18,12 +18,14 @@ class ModelKit:
     tokenizer: TokenizerWrapper = None
     detokenizer: StreamingDetokenizer = None
     cache_wrapper: Optional[CacheWrapper] = None
+    max_kv_size: int = None
 
     def __init__(self, model_path: Path, max_kv_size: int):
         self.model_path = model_path
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(self.model, max_kv_size)
+        self.max_kv_size = max_kv_size
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
@@ -32,7 +34,12 @@ class ModelKit:
         return ids
 
     def process_prompt(
-        self, prompt_tokens, img_b64, prompt_progress_callback, generate_args
+        self,
+        prompt_tokens,
+        img_b64,
+        prompt_progress_callback,
+        repetition_context_size,
+        generate_args,
     ) -> mx.array:
         """
         This method processes the prompt, adding its tokens to the cache history
@@ -45,12 +52,6 @@ class ModelKit:
         if len(prompt_tokens) == 0:
             raise ValueError("Prompt tokens must be non-empty")
 
-        if "repetition_context_size" not in generate_args:
-            generate_args["repetition_context_size"] = (
-                20  # default value for mlx_lm.utils.generate_step
-            )
-        repetition_context_size = generate_args["repetition_context_size"]
-
         # Check for common tokens with the previous cache and re-use the cache if possible
         prompt_tokens = self.cache_wrapper.update_cache(
             mx.array(prompt_tokens),
@@ -61,7 +62,7 @@ class ModelKit:
 
         return prompt_tokens
 
-    def record_generated_token(self, token: int) -> None:
+    def update_cache_wrapper(self, token: int) -> None:
         self.cache_wrapper.record_generated_token(token)
 
     @property

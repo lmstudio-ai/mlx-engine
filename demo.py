@@ -82,10 +82,9 @@ if __name__ == "__main__":
     generator = create_generator(
         model_kit,
         prompt_tokens,
-        None,
-        images_base64,
-        args.stop_strings,
-        {"max_tokens": 1024},
+        images_b64=images_base64,
+        stop_strings=args.stop_strings,
+        max_tokens=1024,
         top_logprobs=args.top_logprobs,
     )
     for generation_result in generator:

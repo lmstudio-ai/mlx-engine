@@ -17,14 +17,16 @@ class VisionModelKit(ModelKit):
     config: dict = None
     trust_remote_code: bool = False
     model_path: Path = None
+    max_kv_size: int = None
 
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
 
-    def __init__(self, model_path: Path, trust_remote_code: bool):
+    def __init__(self, model_path: Path, max_kv_size: int, trust_remote_code: bool):
         self.config = mlx_vlm.utils.load_config(model_path)
         self.trust_remote_code = trust_remote_code
         self.model_path = model_path
+        self.max_kv_size = max_kv_size
         self._initializer()
 
     def _initializer(self):
@@ -49,6 +51,7 @@ class VisionModelKit(ModelKit):
         prompt_tokens,
         images_b64: Optional[List[str]],
         prompt_progress_callback,
+        repetition_context_size,
         generate_args,
     ) -> mx.array:
         """
@@ -69,11 +72,14 @@ class VisionModelKit(ModelKit):
         # disable `prefill_step_size` prompt pre-processing in mlx_lm::generate_step
         generate_args["prefill_step_size"] = float("inf")
 
-        generate_step_input = self.model.input_ids[0]
+        generate_step_input = self.model.input_ids[None]
         return generate_step_input
 
-    def record_generated_token(self, token: int) -> None:
+    def update_cache_wrapper(self, token: int) -> None:
         pass
+
+    def record_sampled_token(self, token: int) -> None:
+        self.model.record_sampled_token(token)
 
     @property
     def language_model(self):
