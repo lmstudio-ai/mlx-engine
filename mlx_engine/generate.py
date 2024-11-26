@@ -23,7 +23,6 @@ class GenerationStopCondition(NamedTuple):
     stop_string: str
     stop_tokens: List[int]
 
-
 class GenerationResult(NamedTuple):
     text: str
     tokens: List[TokenLogprob]
@@ -264,9 +263,13 @@ def create_generator(
                 )
                 break
 
-            # If we currently have generated a partial match with a stop sequence, generate new
-            # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
-            if stop_string_processor_result.status == "partial_match":
+            # If we currently have generated a partial match with a stop sequence, or detected an
+            # in-progress multi-byte string, generate new tokens until we know if the stop sequence
+            # is hit or not (i.e., make sure not to yield yet)
+            if (
+                stop_string_processor_result.status == "partial_match"
+                or stop_string_processor_result.status == "multi_byte"
+            ):
                 continue
 
         # Standard yield - only yield when a non-empty text segment is available
