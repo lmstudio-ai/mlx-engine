@@ -22,7 +22,14 @@ class StopStringProcessor:
             stop_strings: List of strings that should stop generation if found
             tokenizer: Tokenizer instance for encoding token IDs to text
         """
+        # It is critical to calculate stop strings using both strings (for inter-token stop string detection)
+        # and token sequences (for multi-token strings). An example of a multi-token string for Llama-3.1 is
+        # "🌟" which is made up of the token sequence [9468, 234, 253]. If using only strings, partial matches
+        # can not be detected for multi-token strings.
         self.stop_strings = stop_strings
+        self.stop_token_sequences = [
+            tokenizer.encode(stop_string) for stop_string in stop_strings
+        ]
         self.tokenizer = tokenizer
         self.token_id_buffer = []
 
@@ -43,7 +50,9 @@ class StopStringProcessor:
         self.token_id_buffer.append(tokens)
 
         result = stopping_criteria(
+            token_sequence=self.token_id_buffer,
             string=self.tokenizer.decode(self.token_id_buffer),
+            stop_token_sequences=self.stop_token_sequences,
             stop_strings=self.stop_strings,
         )
 
@@ -77,24 +86,30 @@ class StoppingCriteriaResult(NamedTuple):
 
 def stopping_criteria(
     string: str,
+    token_sequence: List[int],
     stop_strings: List[str],
+    stop_token_sequences: List[List[int]],
 ) -> StoppingCriteriaResult:
-    """Check if stop_strings match or partially match the string.
+    """Check if stop strings/sequences match or partially match the input string/sequence.
 
     Args:
         string: The string to check for stop strings
+        token_sequence: List of token IDs to check for stop sequences
         stop_strings: List of strings that should stop generation if found
+        stop_token_sequences: List of token ID sequences corresponding to stop strings
 
     Returns:
-        StopStringProcessorResult indicating match status, and stop string if matched
+        StoppingCriteriaResult indicating match status and stop string if matched
 
-    Checks two stopping conditions in priority order:
+    Checks three stopping conditions in priority order:
     1. Exact stop string match
-    2. Partial stop string match
+    2. Partial token match (critical for multi-token characters)
+    3. Partial text match
     """
 
     result = (
         check_full_text_match(string, stop_strings)
+        or check_partial_token_match(token_sequence, stop_token_sequences)
         or check_partial_text_match(string, stop_strings)
         or StoppingCriteriaResult(status="no_match", stop_string=None)
     )
@@ -121,6 +136,16 @@ def check_full_text_match(
         return StoppingCriteriaResult(
             status="full_stop", stop_string=earliest_match["stop_string"]
         )
+    return None
+
+
+def check_partial_token_match(
+    token_sequence: List[int], stop_token_sequences: List[List[int]]
+) -> Optional[StoppingCriteriaResult]:
+    """Check for partial matches with any stop sequence."""
+    for stop_token_sequence in stop_token_sequences:
+        if sequence_overlap(token_sequence, stop_token_sequence):
+            return StoppingCriteriaResult(status="partial_match", stop_string=None)
     return None
 
 
