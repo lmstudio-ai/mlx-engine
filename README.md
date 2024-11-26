@@ -80,3 +80,10 @@ Currently supported vision models and download links:
    - [mlx-community/Qwen2-VL-7B-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit) - 4.68 GB
  - Llava-v1.6
    - [mlx-community/llava-v1.6-mistral-7b-4bit](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit) - 4.26 GB
+
+## Testing
+
+To run tests, run the following command from the root of this repo:
+```
+python -m unittest discover tests
+```
