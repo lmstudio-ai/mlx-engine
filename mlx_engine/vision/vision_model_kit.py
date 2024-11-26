@@ -72,11 +72,14 @@ class VisionModelKit(ModelKit):
         # disable `prefill_step_size` prompt pre-processing in mlx_lm::generate_step
         generate_args["prefill_step_size"] = float("inf")
 
-        generate_step_input = self.model.input_ids[0]
+        generate_step_input = self.model.input_ids[None]
         return generate_step_input
 
     def record_generated_token(self, token: int) -> None:
         pass
+
+    def record_sampled_token(self, token: int) -> None:
+        self.model.record_sampled_token(token)
 
     @property
     def language_model(self):

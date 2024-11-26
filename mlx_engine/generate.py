@@ -115,9 +115,9 @@ def create_generator(
     """
     set_seed(seed)
 
-    generate_args = {
-        "max_kv_size": model_kit.max_kv_size,
-    }
+    generate_args = {}
+    if type(model_kit) is not VisionModelKit:
+        generate_args["max_kv_size"] = model_kit.max_kv_size
 
     # Set up repetition penalty
     repetition_penalty_kwargs = {}
@@ -131,6 +131,7 @@ def create_generator(
         logit_bias=None,
         **repetition_penalty_kwargs,
     )
+
 
     # Process prompt
     stream_generate_input = model_kit.process_prompt(
@@ -157,6 +158,17 @@ def create_generator(
             if v is not None
         }
     )
+
+    # Add pre-sampling record for vision models
+    if type(model_kit) is VisionModelKit:
+        sampler_func = generate_args["sampler"]
+        def sampler_func_wrapper(*args, **kwargs):
+            token = sampler_func(*args, **kwargs)
+            model_kit.record_sampled_token(token)
+            return token
+        generate_args["sampler"] = sampler_func_wrapper
+        
+
 
     # Add outlines logits processor if json_schema is provided
     is_structured_output_request = json_schema is not None
