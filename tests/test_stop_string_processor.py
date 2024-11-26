@@ -16,6 +16,8 @@ class TestStopStringProcessor(unittest.TestCase):
             "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
         )
 
+    # followed pattern from mlx-examples
+    # https://github.com/ml-explore/mlx-examples/blob/cfc29c29f45372c78876335a44b0c99ab6565ae0/llms/tests/test_tokenizers.py#L17
     @staticmethod
     def download_tokenizer(repo):
         path = Path(
