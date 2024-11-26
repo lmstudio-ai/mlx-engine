@@ -9,9 +9,7 @@ from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs, TokenLogprob
-from mlx_engine.stop_string_processor import (
-    StopStringProcessor
-)
+from mlx_engine.stop_string_processor import StopStringProcessor
 from mlx_engine.utils.set_seed import set_seed
 
 
@@ -19,10 +17,12 @@ MAX_TOP_LOGPROBS = 10
 
 StopReason = Literal["eos_token", "stop_string"]
 
+
 class GenerationStopCondition(NamedTuple):
     stop_reason: StopReason
     stop_string: str
     stop_tokens: List[int]
+
 
 class GenerationResult(NamedTuple):
     text: str
@@ -198,13 +198,12 @@ def create_generator(
     token_buffer: List[TokenLogprob] = []
     top_logprobs_buffer: List[List[TokenLogprob]] = []
 
-    # Set up stop processor
     tokenizer = model_kit.tokenizer
-    stop_sequences = [
-        tokenize(model_kit, sequence) for sequence in (stop_strings or [])
-    ]
-    stop_string_processor = StopStringProcessor(tokenizer, stop_sequences)
-    stop_string_processor_result = None
+
+    # Set up stop string processor if non-empty stop_strings are provided
+    stop_string_processor = None
+    if stop_strings is not None and len(stop_strings) > 0:
+        stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
     text = ""
 
     for generation_result in mlx_lm.utils.stream_generate(
@@ -216,6 +215,7 @@ def create_generator(
     ):
         # Token processor
         token = generation_result.token
+        text += generation_result.text
         model_kit.update_cache_wrapper(token)
 
         logprobs = generation_result.logprobs
@@ -228,43 +228,44 @@ def create_generator(
             )
 
         # Stop processor
-        stop_string_processor_result = stop_string_processor.process_token(token)
-        text += generation_result.text
-        if stop_string_processor_result.status == "full_stop":
-            # Force the detokenizer to finalize to get any remaining text
-            detokenizer = tokenizer.detokenizer
-            detokenizer.finalize()
-            text += detokenizer.last_segment
+        if stop_string_processor is not None:
+            stop_string_processor_result = stop_string_processor.process_token(token)
+            if stop_string_processor_result.status == "full_stop":
+                # Force the detokenizer to finalize to get any remaining text
+                detokenizer = tokenizer.detokenizer
+                detokenizer.finalize()
+                text += detokenizer.last_segment
 
-            # Remove everything after the stop string from the text
-            stop_string_start_pos = text.find(stop_string_processor_result.stop_string)
-            if stop_string_start_pos != -1:
-                text = text[:stop_string_start_pos]
-            else:
-                sys.stderr.write(
-                    f"[StopStringProcessor] Could not find stop string in buffered tokens, "
-                    "even though a full stop was detected. Not setting stop_sequence_suffix."
+                # Remove everything after the stop string from the text
+                stop_string = stop_string_processor_result.stop_string
+                stop_string_start_pos = text.find(stop_string)
+                if stop_string_start_pos != -1:
+                    text = text[:stop_string_start_pos]
+                else:
+                    sys.stderr.write(
+                        f"[mlx-engine] Stop string '{stop_string}' not found in final text segment, "
+                        "even though a full stop was detected. This is unexpected."
+                    )
+                # Build the stop condition
+                generation_stop_condition = GenerationStopCondition(
+                    stop_reason="stop_string",
+                    stop_string=stop_string,
+                    stop_tokens=stop_string_processor_result.stop_tokens,
                 )
-            # Build the stop condition
-            generation_stop_condition = GenerationStopCondition(
-                stop_reason="stop_string",
-                stop_string=stop_string_processor_result.stop_string,
-                stop_tokens=stop_string_processor_result.stop_tokens,
-            )
 
-            # Yield the final result and stop generation
-            yield GenerationResult(
-                text=text,
-                tokens=token_buffer,
-                stop_condition=generation_stop_condition,
-                top_logprobs=top_logprobs_buffer,
-            )
-            break
+                # Yield the final result and stop generation
+                yield GenerationResult(
+                    text=text,
+                    tokens=token_buffer,
+                    stop_condition=generation_stop_condition,
+                    top_logprobs=top_logprobs_buffer,
+                )
+                break
 
-        # If we currently have generated a partial match with a stop sequence, generate new
-        # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
-        if stop_string_processor_result.status == "partial_match":
-            continue
+            # If we currently have generated a partial match with a stop sequence, generate new
+            # tokens until we know if the stop sequence is hit or not (i.e., make sure not to yield yet)
+            if stop_string_processor_result.status == "partial_match":
+                continue
 
         # Standard yield - only yield when a non-empty text segment is available
         if text:
