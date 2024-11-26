@@ -4,26 +4,19 @@ from typing import List, Literal, NamedTuple, Optional, Sequence, Tuple
 import sys
 
 
-# used internally and in generate.py
 StopProcessorStatus = Literal["full_stop", "partial_match", "no_match"]
 
-StopReason = Literal["eos_token", "stop_string"]
-
-class GenerationStopCondition(NamedTuple):
-    stop_reason: StopReason
-    stop_string: str
-    stop_tokens: List[int]
-
-# only used internally
 class StopStringProcessorResult(NamedTuple):
     """Result of stop string processing containing status and details."""
     status: StopProcessorStatus
     # the ids that make up the stop string that was found
     stop_tokens: Optional[List[int]]
+    # the decoded stop_tokens
+    stop_string: Optional[str] = None
 
-
+# TODO(matt): pick the right name for this - is it strings or token id? Can it be simplified?
 class StopStringProcessor:
-    """Statefully processes tokens to check for stop sequences during generation."""
+    """State-fully processes tokens to check for stop sequences during generation."""
 
     def __init__(self, tokenizer, stop_sequences: List[List[int]]):
         """
@@ -34,7 +27,6 @@ class StopStringProcessor:
         self.tokenizer = tokenizer
         self.stop_sequences = stop_sequences
         self.tokens_to_check_for_stopping = []
-        self.stop_sequence_suffix: str = None
 
     def process_token(self, tokens: int) -> StopStringProcessorResult:
         """Process a new token and check if generation should stop.
@@ -43,113 +35,133 @@ class StopStringProcessor:
             tokens: New token to process
 
         Returns:
-            StopProcessorResult indicating if/how generation should stop
+            StopProcessorResult indicating the state of stop string detection
         """
         self.tokens_to_check_for_stopping.append(tokens)
-        stopping_criteria_result = stopping_criteria(
+        
+        result = stopping_criteria(
             self.tokens_to_check_for_stopping,
             self.stop_sequences,
             self.tokenizer,
         )
-        status = stopping_criteria_result.status
-        if status == "full_stop":
-            # on a full stop, save the string stop sequence suffix to allow client to handle it
-            # how they'd like (i.e., trim, not trim, etc...)
-            stop_tokens_found = stopping_criteria_result.stop_tokens
-            if stop_tokens_found:
-                stop_string = self.tokenizer.decode(
-                    stop_tokens_found
-                )
-
-                buffered_string = self.tokenizer.decode(
-                    self.tokens_to_check_for_stopping
-                )
-
-                start_of_stop_string_idx = buffered_string.find(stop_string)
-
-                if start_of_stop_string_idx == -1:
-                    sys.stderr.write(
-                        f"[StopStringProcessor] Could not find stop string in buffered tokens, "
-                        "even though a full stop was detected. Not setting stop_sequence_suffix."
-                    )
-                else:
-                    trim_length = len(buffered_string) - start_of_stop_string_idx
-                    self.stop_sequence_suffix = buffered_string[-trim_length:]
-            return StopStringProcessorResult(status="full_stop", stop_tokens=stop_tokens_found)
-        elif status == "partial_match":
-            return StopStringProcessorResult(status="partial_match", stop_tokens=None)
-        else:
-            # if no partial match, can clear the buffer of tokens we need to check for stopping
+        
+        if result.status == "no_match":
+            # Clear buffer since no potential stop sequence detected
             self.tokens_to_check_for_stopping = []
-            return StopStringProcessorResult(status="no_match", stop_tokens=None)
-
-    # TODO(matt): this should cease to exist. the client should do this, since this processor
-    #  must only be in the scope of custom stop strings and not eos tokens/other that the stream_generate
-    #  function already handles
-    def finalize(
-        self, last_segment: str, stop_processor_result: StopStringProcessorResult
-    ) -> Tuple[str, Optional[GenerationStopCondition]]:
-        print(f"self.stop_sequence_suffix: {self.stop_sequence_suffix}")
-        if last_segment:
-            if self.stop_sequence_suffix is not None:
-                last_segment = last_segment[: -len(self.stop_sequence_suffix)]
-
-        # build up the final generation stop condition safely, although stop_processor_result
-        # should always be set at this point
-        generation_stop_condition = None
-        if stop_processor_result and stop_processor_result.status == "full_stop":
-            stop_tokens = stop_processor_result.stop_tokens or []
-            stop_string = self.tokenizer.decode(stop_tokens) if stop_tokens else ""
-            generation_stop_condition = GenerationStopCondition(
-                stop_reason="stop_string",
-                stop_string=stop_string,
-                stop_tokens=stop_tokens,
+            return StopStringProcessorResult(
+                status="no_match",
+                stop_tokens=None,
+                stop_string=None
             )
-        return last_segment, generation_stop_condition
+            
+        elif result.status == "partial_match":
+            return StopStringProcessorResult(
+                status="partial_match",
+                stop_tokens=None,
+                stop_string=None
+            )
+        
+        elif result.status == "full_stop":
+            return StopStringProcessorResult(
+                status="full_stop",
+                stop_tokens=result.stop_tokens,
+                stop_string=self.tokenizer.decode(result.stop_tokens)
+            )
+        
+        else:
+            raise ValueError(f"Unknown StopProcessorStatus: {result.status}")
 
-
+# State-less function to see how a given state of token generation relates to stop sequences
 # Adapted from mlx_lm.utils.server.py
 # https://github.com/ml-explore/mlx-examples/blob/605c4854f1547e8eb0ef3f9c9d81c8aef3196c15/llms/mlx_lm/server.py#L43-L74
 def stopping_criteria(
     tokens: List[int],
     stop_id_sequences: List[List[int]],
-    tokenizer,
+    tokenizer
 ) -> StopStringProcessorResult:
     """Check if token generation should stop.
-
-    Checks three conditions in order:
-    1. End of sequence token from tokenizer
-    2. Exact token match with stop sequences
-    3. Full match between decoded text and any decoded stop sequence
-    4. Partial match with any decoded stop sequence
+    
+    Args:
+        tokens: Current sequence of token IDs
+        stop_id_sequences: List of token ID sequences that signal stopping
+        tokenizer: Tokenizer for encoding/decoding text
+        
+    Returns:
+        StopStringProcessorResult indicating match status and matched tokens
+    
+    Checks three stopping conditions in priority order:
+    1. Exact token sequence match
+    2. Full text match after decoding
+    3. Partial text match after decoding
     """
-    # Check for exact token sequence matches
-    for stop_ids in stop_id_sequences:
-        if len(tokens) >= len(stop_ids) and tokens[-len(stop_ids) :] == stop_ids:
-            return StopStringProcessorResult(
-                status="full_stop", stop_tokens=stop_ids
-            )
+    decoded_tokens = tokenizer.decode(tokens)
+    
+    result = (
+        check_exact_token_match(tokens, stop_id_sequences) or
+        check_full_text_match(decoded_tokens, stop_id_sequences, tokenizer) or
+        check_partial_text_match(decoded_tokens, stop_id_sequences, tokenizer) or
+        StopStringProcessorResult(status="no_match", stop_tokens=None)
+    )
+    
+    return result
 
-    # Check for full matches in decoded text
-    tokens_str = tokenizer.decode(tokens)
+# Helpers for stopping_criteria
+
+def check_exact_token_match(
+    tokens: List[int], 
+    stop_id_sequences: List[List[int]]
+) -> Optional[StopStringProcessorResult]:
+    """Check if tokens end with any stop sequence exactly."""
+    for stop_ids in stop_id_sequences:
+        if len(tokens) >= len(stop_ids) and tokens[-len(stop_ids):] == stop_ids:
+            return StopStringProcessorResult(
+                status="full_stop",
+                stop_tokens=stop_ids
+            )
+    return None
+
+def check_full_text_match(
+    decoded_tokens: str,
+    stop_id_sequences: List[List[int]], 
+    tokenizer
+) -> Optional[StopStringProcessorResult]:
+    """Find earliest full text match of any stop sequence."""
+    earliest_match = {
+        'position': float('inf'),
+        'stop_ids': None
+    }
+    
     for stop_ids in stop_id_sequences:
         stop_str = tokenizer.decode(stop_ids)
-        if stop_str in tokens_str:
-            return StopStringProcessorResult(
-                status="full_stop", stop_tokens=stop_ids
-            )
+        position = decoded_tokens.find(stop_str)
+        
+        if position != -1 and position < earliest_match['position']:
+            earliest_match.update({
+                'position': position,
+                'stop_ids': stop_ids
+            })
+            
+    if earliest_match['stop_ids'] is not None:
+        return StopStringProcessorResult(
+            status="full_stop",
+            stop_tokens=earliest_match['stop_ids']
+        )
+    return None
 
-    # Check for partial matches only if no full matches were found
+def check_partial_text_match(
+    decoded_tokens: str,
+    stop_id_sequences: List[List[int]],
+    tokenizer
+) -> Optional[StopStringProcessorResult]:
+    """Check for partial matches with any stop sequence."""
     for stop_ids in stop_id_sequences:
         stop_str = tokenizer.decode(stop_ids)
-        if sequence_overlap(tokens_str, stop_str):
+        if sequence_overlap(decoded_tokens, stop_str):
             return StopStringProcessorResult(
-                status="partial_match", stop_tokens=None
+                status="partial_match",
+                stop_tokens=None
             )
-
-    # No matches found
-    return StopStringProcessorResult(status="no_match", stop_tokens=None)
-
+    return None
 
 def sequence_overlap(s1: Sequence, s2: Sequence) -> bool:
     """
