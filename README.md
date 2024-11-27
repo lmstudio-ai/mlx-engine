@@ -70,16 +70,15 @@ Run the `demo.py` script with an MLX vision model:
 ```
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/pixtral-12b-4bit --prompt "<s>[INST]Compare these images[IMG][IMG][/INST]" --images demo-data/chameleon.webp demo-data/toucan.jpeg
 ```
-Currently supported vision models and download links:
- - Llama-3.2-Vision
-   - [mlx-community/Llama-3.2-11B-Vision-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Llama-3.2-11B-Vision-Instruct-4bit)
- - Pixtral
-   - [mlx-community/pixtral-12b-4bit](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit) - 7.15 GB
- - Qwen2-VL
-   - [mlx-community/Qwen2-VL-2B-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-2B-4bit) - 1.26 GB
-   - [mlx-community/Qwen2-VL-7B-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit) - 4.68 GB
- - Llava-v1.6
-   - [mlx-community/llava-v1.6-mistral-7b-4bit](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit) - 4.26 GB
+Currently supported vision models include:
+ - [Llama-3.2-Vision](https://model.lmstudio.ai/download/mlx-community/Llama-3.2-11B-Vision-Instruct-4bit)
+   - `lms get mlx-community/Llama-3.2-11B-Vision-Instruct-4bit`
+ - [Pixtral](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit)
+   - `lms get mlx-community/pixtral-12b-4bit`
+ - [Qwen2-VL](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit)
+   - `lms get mlx-community/Qwen2-VL-7B-Instruct-4bit`
+ - [Llava-v1.6](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit)
+   - `lms get mlx-community/llava-v1.6-mistral-7b-4bit`
 
 ## Testing
 

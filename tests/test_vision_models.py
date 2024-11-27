@@ -11,7 +11,7 @@ class TestVisionModels(unittest.TestCase):
     def setUpClass(cls):
         """Set up test resources that will be shared across all test methods"""
         cls.toucan_path = Path("demo-data/toucan.jpeg")
-        cls.model_path_prefix = Path("~/.cache/lm-studio/models/mlx-community").expanduser().resolve()
+        cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
         cls.description_prompt = "Describe what you see in great detail"
         
         # Read and encode the test image
@@ -23,6 +23,19 @@ class TestVisionModels(unittest.TestCase):
         print(f"Testing model {model_name}")
 
         model_path = self.model_path_prefix / model_name
+
+        # Check if model exists, if not prompt user to download
+        if not model_path.exists():
+            print(f"\nModel {model_name} not found at {model_path}")
+            def greenify(text):
+                return f"\033[92m{text}\033[0m"
+            response = input(f"Would you like to download the model {greenify(model_name)}? (y/n): ")
+            if response.lower() == 'y':
+                print(f"Downloading model with command: lms get {model_name}")
+                subprocess.run(['lms', 'get', model_name], check=True)
+            else:
+                print(f"Model {model_name} not found")
+                sys.exit(1)
         
         # Load the model
         model_kit = load_model(
@@ -61,42 +74,43 @@ class TestVisionModels(unittest.TestCase):
     def test_llama_vision_instruct(self):
         """Test Llama 3.2 11B Vision Instruct model"""
         prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{self.description_prompt}<|image|><|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        self.model_helper("Llama-3.2-11B-Vision-Instruct-4bit", prompt)
+        self.model_helper("mlx-community/Llama-3.2-11B-Vision-Instruct-4bit", prompt)
 
     def test_pixtral(self):
         """Test Pixtral 12B model"""
         prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
-        self.model_helper("pixtral-12b-4bit", prompt)
+        self.model_helper("mlx-community/pixtral-12b-4bit", prompt)
 
     def test_qwen2(self):
         """Test Qwen2 VL 7B Instruct model"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<image> {self.description_prompt}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>assistant\n"
-        self.model_helper("Qwen2-VL-7B-Instruct-4bit", prompt)
+        self.model_helper("mlx-community/Qwen2-VL-7B-Instruct-4bit", prompt)
 
     def test_florence(self):
         """Test Florence 2 Large model"""
         prompt = self.description_prompt
-        self.model_helper("Florence-2-large-ft-bf16", prompt)
+        self.model_helper("mlx-community/Florence-2-base-ft-4bit", prompt)
 
     def test_molmo(self):
         """Test Molmo 7B model"""
         prompt = self.description_prompt
-        self.model_helper("Molmo-7B-D-0924-4bit", prompt)
+        self.model_helper("mlx-community/Molmo-7B-D-0924-4bit", prompt)
 
     def test_llava(self):
         """Test LLaVA v1.6 Mistral 7B model"""
-        prompt = f"<image> {self.description_prompt}"
-        self.model_helper("llava-v1.6-mistral-7b-4bit", prompt)
+        prompt = f"[INST] <image>\n{self.description_prompt} [/INST]"
+        self.model_helper("mlx-community/llava-v1.6-mistral-7b-4bit", prompt)
 
     def test_bunny_llama(self):
         """Test Bunny Llama 3 8B V model"""
         prompt = f"<image> {self.description_prompt}"
-        self.model_helper("Bunny-Llama-3-8B-V-4bit", prompt)
+        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n<image>\n{self.description_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        self.model_helper("mlx-community/Bunny-Llama-3-8B-V-4bit", prompt)
 
     def test_nano_llava(self):
         """Test Nano LLaVA 1.5 4B model"""
         prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n<image>\n{self.description_prompt}<|im_end|><|im_start|>assistant\n\n"
-        self.model_helper("nanoLLaVA-1.5-4bit", prompt)
+        self.model_helper("mlx-community/nanoLLaVA-1.5-4bit", prompt)
 
 def run_single_test(test_name):
     """Run a single test in isolation"""
