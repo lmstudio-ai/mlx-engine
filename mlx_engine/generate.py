@@ -145,7 +145,6 @@ def create_generator(
         **repetition_penalty_kwargs,
     )
 
-
     # Process prompt
     stream_generate_input = model_kit.process_prompt(
         prompt_tokens,
@@ -175,13 +174,13 @@ def create_generator(
     # For vision models, immediately record the token once it's sampled
     if type(model_kit) is VisionModelKit:
         sampler_func = generate_args["sampler"]
+
         def sampler_func_wrapper(*args, **kwargs):
             token = sampler_func(*args, **kwargs)
             model_kit.record_sampled_token(token)
             return token
-        generate_args["sampler"] = sampler_func_wrapper
-        
 
+        generate_args["sampler"] = sampler_func_wrapper
 
     # Add outlines logits processor if json_schema is provided
     is_structured_output_request = json_schema is not None

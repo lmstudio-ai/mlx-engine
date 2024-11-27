@@ -6,6 +6,7 @@ import sys
 import subprocess
 import os
 
+
 class TestVisionModels(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -13,10 +14,10 @@ class TestVisionModels(unittest.TestCase):
         cls.toucan_path = Path("demo-data/toucan.jpeg")
         cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
         cls.description_prompt = "Describe what you see in great detail"
-        
+
         # Read and encode the test image
         with open(cls.toucan_path, "rb") as image_file:
-            cls.image_b64 = base64.b64encode(image_file.read()).decode('utf-8')
+            cls.image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
 
     def model_helper(self, model_name: str, prompt: str):
         """Helper method to test a single vision model"""
@@ -27,26 +28,28 @@ class TestVisionModels(unittest.TestCase):
         # Check if model exists, if not prompt user to download
         if not model_path.exists():
             print(f"\nModel {model_name} not found at {model_path}")
+
             def greenify(text):
                 return f"\033[92m{text}\033[0m"
-            response = input(f"Would you like to download the model {greenify(model_name)}? (y/N): ")
-            if response.lower() == 'y':
+
+            response = input(
+                f"Would you like to download the model {greenify(model_name)}? (y/N): "
+            )
+            if response.lower() == "y":
                 print(f"Downloading model with command: lms get {model_name}")
-                subprocess.run(['lms', 'get', model_name], check=True)
+                subprocess.run(["lms", "get", model_name], check=True)
             else:
                 print(f"Model {model_name} not found")
                 sys.exit(1)
-        
+
         # Load the model
         model_kit = load_model(
-            model_path=model_path,
-            max_kv_size=2048,
-            trust_remote_code=True
+            model_path=model_path, max_kv_size=2048, trust_remote_code=True
         )
-        
+
         # Tokenize the prompt
         prompt_tokens = tokenize(model_kit, prompt)
-        
+
         # Generate description
         generated_text = ""
         for result in create_generator(
@@ -63,13 +66,19 @@ class TestVisionModels(unittest.TestCase):
             if result.stop_condition:
                 break
         print()
-        
+
         # Verify the output
-        self.assertGreater(len(generated_text), 0, f"Model {model_name} failed to generate any text")
-        bird_spotted = any(word in generated_text.lower() for word in ["bird", "toucan", "quetzal"])
-        self.assertTrue(bird_spotted,
-                       f"Model {model_name} failed to identify either a bird in the image")
-        
+        self.assertGreater(
+            len(generated_text), 0, f"Model {model_name} failed to generate any text"
+        )
+        bird_spotted = any(
+            word in generated_text.lower() for word in ["bird", "toucan", "quetzal"]
+        )
+        self.assertTrue(
+            bird_spotted,
+            f"Model {model_name} failed to identify either a bird in the image",
+        )
+
         return generated_text
 
     def test_llama_vision_instruct(self):
@@ -119,6 +128,7 @@ To find the correct prompt format for new models, run this command for your mode
 python -m mlx_vlm.generate --model ~/.cache/lm-studio/models/mlx-community/MODEL-NAME --max-tokens 100 --temp 0.0 --image http://images.cocodataset.org/val2017/000000039769.jpg --prompt "What do you see?"
 """
 
+
 def run_single_test(test_name):
     """Run a single test in isolation"""
     suite = unittest.TestSuite()
@@ -128,7 +138,8 @@ def run_single_test(test_name):
     if not result.wasSuccessful():
         sys.exit(1)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # If a test name is provided as an argument, run just that test
     if len(sys.argv) > 1:
         run_single_test(sys.argv[1])
@@ -136,39 +147,37 @@ if __name__ == '__main__':
 
     # List of all test methods
     test_methods = [
-        'test_llama_vision_instruct',
-        'test_pixtral',
-        'test_qwen2',
-        'test_florence',
-        'test_molmo',
-        'test_llava',
-        'test_bunny_llama',
-        'test_nano_llava',
+        "test_llama_vision_instruct",
+        "test_pixtral",
+        "test_qwen2",
+        "test_florence",
+        "test_molmo",
+        "test_llava",
+        "test_bunny_llama",
+        "test_nano_llava",
     ]
-    
+
     # Get the current script path
     script_path = os.path.abspath(__file__)
-    
+
     # Run each test in a separate Python process, to control memory usage
     for test_name in test_methods:
         print(f"\nStarting process for {test_name}")
-        
+
         # Launch a new Python interpreter process for this test
         result = subprocess.run(
-            [sys.executable, script_path, test_name],
-            capture_output=True,
-            text=True
+            [sys.executable, script_path, test_name], capture_output=True, text=True
         )
-        
+
         # Print the output
         print(result.stdout)
         if result.stderr:
             print(result.stderr, file=sys.stderr)
-        
+
         # Check if the test passed
         if result.returncode != 0:
             print(f"Test {test_name} failed!")
             sys.exit(1)
-        
+
         # Force cleanup
         print(f"Completed {test_name}\n")

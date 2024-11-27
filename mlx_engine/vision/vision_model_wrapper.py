@@ -78,7 +78,8 @@ class VisionModelWrapper:
                 )
                 if self.vision_model.config.model_type == "florence2":
                     cache = [
-                        (SimpleKVCache(), SimpleKVCache()) for n in self.language_model.layers
+                        (SimpleKVCache(), SimpleKVCache())
+                        for n in self.language_model.layers
                     ]
                 else:
                     cache = [KVCache(self.language_model.head_dim, n) for n in kv_heads]
@@ -114,7 +115,7 @@ class VisionModelWrapper:
                     "decoder_input_ids": self.decoder_input_ids,
                     "encoder_outputs": outputs.encoder_outputs,
                 }
-            
+
             # Add the cache we created here to the language model kwargs
             self.language_model_kwargs["cache"] = cache
         else:
@@ -123,7 +124,9 @@ class VisionModelWrapper:
 
                 # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1009
                 if "decoder_input_ids" in self.language_model_kwargs:
-                    self.language_model_kwargs["decoder_input_ids"] = self.decoder_input_ids
+                    self.language_model_kwargs["decoder_input_ids"] = (
+                        self.decoder_input_ids
+                    )
                     outputs = self.language_model(
                         **kwargs,
                         **self.language_model_kwargs,
@@ -136,7 +139,6 @@ class VisionModelWrapper:
                         **self.language_model_kwargs,
                     )
 
-
             except ValueError as e:
                 # Create a friendly error message if a user tries to use mllama without images
                 if "Cross attention states must be provided for layer" in str(e):
@@ -146,7 +148,7 @@ class VisionModelWrapper:
                 raise e
 
         return outputs.logits
-    
+
     def record_sampled_token(self, token: int) -> None:
         # Adapted from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1064
         self.decoder_input_ids = mx.array([token])
@@ -190,7 +192,11 @@ class VisionModelWrapper:
         pil_images = self._convert_to_pil(images_b64)
         resized_images = self._custom_resize(pil_images)
 
-        image_token_index = self.vision_model.config.image_token_index if hasattr(self.vision_model.config, "image_token_index") else None
+        image_token_index = (
+            self.vision_model.config.image_token_index
+            if hasattr(self.vision_model.config, "image_token_index")
+            else None
+        )
 
         mask = None
         image_grid_thw = None
@@ -217,9 +223,7 @@ class VisionModelWrapper:
             )
             input_ids = []
             for chunks in text_chunks:
-                ids = (
-                    chunks[0] + [image_token_index] + chunks[1]
-                )
+                ids = chunks[0] + [image_token_index] + chunks[1]
                 padding = [processor.pad_token_id] * (max_length - len(ids))
                 input_ids.append(mx.array(ids + padding))
             input_ids = mx.array(input_ids)
@@ -232,11 +236,17 @@ class VisionModelWrapper:
             processor.tokenizer.pad_token = processor.tokenizer.eos_token
             if hasattr(processor, "process"):
                 inputs = processor.process(
-                    text=prompt, images=resized_images, padding=True, return_tensors="mlx"
+                    text=prompt,
+                    images=resized_images,
+                    padding=True,
+                    return_tensors="mlx",
                 )
             else:
                 inputs = processor(
-                    text=prompt, images=resized_images, padding=True, return_tensors="mlx"
+                    text=prompt,
+                    images=resized_images,
+                    padding=True,
+                    return_tensors="mlx",
                 )
 
             if "images" in inputs:
@@ -248,7 +258,9 @@ class VisionModelWrapper:
                 pixel_values = mx.array(inputs["pixel_values"])
             input_ids = mx.array(inputs["input_ids"])
             mask = (
-                mx.array(inputs["attention_mask"]) if "attention_mask" in inputs else None
+                mx.array(inputs["attention_mask"])
+                if "attention_mask" in inputs
+                else None
             )
             image_input_idx = inputs.get("image_input_idx", None)
             if image_input_idx is not None:

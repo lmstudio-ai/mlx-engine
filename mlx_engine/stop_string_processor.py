@@ -2,9 +2,12 @@
 
 from typing import List, Literal, NamedTuple, Optional, Sequence
 
-StopStringProcessorStatus = Literal["full_stop", "partial_match", "no_match", "multi_byte"]
+StopStringProcessorStatus = Literal[
+    "full_stop", "partial_match", "no_match", "multi_byte"
+]
 
 REPLACEMENT_CHAR = "\ufffd"
+
 
 class StopStringProcessorResult(NamedTuple):
     """Result of stop string processing containing status and details."""
@@ -23,20 +26,20 @@ class StopStringProcessor:
         Args:
             stop_strings: List of strings that should stop generation if found
             tokenizer: Tokenizer instance for encoding token IDs to text
-            
+
         Raises:
             ValueError: If stop_strings is empty or contains invalid values
             TypeError: If stop_strings contains non-string values
         """
         if not stop_strings:
             raise ValueError("Must provide at least one stop string")
-            
+
         if not all(isinstance(s, str) for s in stop_strings):
             raise TypeError("All stop strings must be strings")
-            
+
         if any(not stop_string for stop_string in stop_strings):
             raise ValueError("Stop strings cannot be empty")
-            
+
         self.stop_strings = stop_strings
         self.tokenizer = tokenizer
         self.token_id_buffer = []
@@ -73,7 +76,7 @@ class StopStringProcessor:
             return StopStringProcessorResult(
                 status="partial_match", stop_string=None, stop_tokens=None
             )
-        
+
         elif result.status == "multi_byte":
             return StopStringProcessorResult(
                 status="multi_byte", stop_string=None, stop_tokens=None
@@ -88,14 +91,14 @@ class StopStringProcessor:
 
         else:
             raise ValueError(f"Unknown StopProcessorStatus: {result.status}")
-        
+
     class _StoppingCriteriaResult(NamedTuple):
         status: StopStringProcessorStatus
         stop_string: Optional[str] = None  # populated if status is "full_stop"
-    
+
     def _stopping_criteria(
         self,
-    string: str,
+        string: str,
         stop_strings: List[str],
     ) -> _StoppingCriteriaResult:
         """Check if stop strings match or partially match the input string
@@ -121,14 +124,11 @@ class StopStringProcessor:
         )
 
         return result
-    
+
     def _check_incomplete_utf8(self, string: str) -> Optional[_StoppingCriteriaResult]:
         if string[-1] == REPLACEMENT_CHAR:
-            return self._StoppingCriteriaResult(
-                status="multi_byte", stop_string=None
-            )
+            return self._StoppingCriteriaResult(status="multi_byte", stop_string=None)
         return None
-        
 
     def _check_full_text_match(
         self, string: str, stop_strings: List[str]
@@ -140,7 +140,9 @@ class StopStringProcessor:
             position = string.find(stop_string)
 
             if position != -1 and position < earliest_match["position"]:
-                earliest_match.update({"position": position, "stop_string": stop_string})
+                earliest_match.update(
+                    {"position": position, "stop_string": stop_string}
+                )
 
         if earliest_match["stop_string"] is not None:
             return self._StoppingCriteriaResult(
@@ -148,16 +150,16 @@ class StopStringProcessor:
             )
         return None
 
-
     def check_partial_token_match(
         self, token_sequence: List[int], stop_token_sequences: List[List[int]]
     ) -> Optional[_StoppingCriteriaResult]:
         """Check for partial matches with any stop sequence."""
         for stop_token_sequence in stop_token_sequences:
             if self._sequence_overlap(token_sequence, stop_token_sequence):
-                return self._StoppingCriteriaResult(status="partial_match", stop_string=None)
+                return self._StoppingCriteriaResult(
+                    status="partial_match", stop_string=None
+                )
         return None
-
 
     def _check_partial_text_match(
         self, string: str, stop_strings: List[str]
@@ -165,9 +167,10 @@ class StopStringProcessor:
         """Check for partial matches with any stop sequence."""
         for stop_string in stop_strings:
             if self._sequence_overlap(string, stop_string):
-                return StopStringProcessorResult(status="partial_match", stop_string=None)
+                return StopStringProcessorResult(
+                    status="partial_match", stop_string=None
+                )
         return None
-
 
     def _sequence_overlap(self, s1: Sequence, s2: Sequence) -> bool:
         """
