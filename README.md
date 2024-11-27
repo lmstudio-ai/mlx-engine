@@ -53,37 +53,45 @@ pip install -U -r requirements.txt
 ```
 
 ### Text Model Demo
+Download models with the `lms` CLI tool. The `lms` CLI documentation can be found here: https://lmstudio.ai/docs/cli
 Run the `demo.py` script with an MLX text model:
-```
+```bash
+lms get mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
 ```
 [mlx-community/Meta-Llama-3.1-8B-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit) - 4.53 GB
 
 This command will use a default prompt that is formatted for Llama-3.1. For other models, add a custom `--prompt` argument with the correct prompt formatting:
-```
+```bash
+lms get mlx-community/Mistral-Small-Instruct-2409-4bit
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/Mistral-Small-Instruct-2409-4bit --prompt "<s> [INST] How long will it take for an apple to fall from a 10m tree? [/INST]"
 ```
 [mlx-community/Mistral-Small-Instruct-2409-4bit](https://model.lmstudio.ai/download/mlx-community/Mistral-Small-Instruct-2409-4bit) - 12.52 GB
 
 ### Vision Model Demo
 Run the `demo.py` script with an MLX vision model:
-```
+```bash
+lms get mlx-community/pixtral-12b-4bit
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/pixtral-12b-4bit --prompt "<s>[INST]Compare these images[IMG][IMG][/INST]" --images demo-data/chameleon.webp demo-data/toucan.jpeg
 ```
-Currently supported vision models and download links:
- - Llama-3.2-Vision
-   - [mlx-community/Llama-3.2-11B-Vision-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Llama-3.2-11B-Vision-Instruct-4bit)
- - Pixtral
-   - [mlx-community/pixtral-12b-4bit](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit) - 7.15 GB
- - Qwen2-VL
-   - [mlx-community/Qwen2-VL-2B-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-2B-4bit) - 1.26 GB
-   - [mlx-community/Qwen2-VL-7B-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit) - 4.68 GB
- - Llava-v1.6
-   - [mlx-community/llava-v1.6-mistral-7b-4bit](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit) - 4.26 GB
+Currently supported vision models include:
+ - [Llama-3.2-Vision](https://model.lmstudio.ai/download/mlx-community/Llama-3.2-11B-Vision-Instruct-4bit)
+   - `lms get mlx-community/Llama-3.2-11B-Vision-Instruct-4bit`
+ - [Pixtral](https://model.lmstudio.ai/download/mlx-community/pixtral-12b-4bit)
+   - `lms get mlx-community/pixtral-12b-4bit`
+ - [Qwen2-VL](https://model.lmstudio.ai/download/mlx-community/Qwen2-VL-7B-Instruct-4bit)
+   - `lms get mlx-community/Qwen2-VL-7B-Instruct-4bit`
+ - [Llava-v1.6](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit)
+   - `lms get mlx-community/llava-v1.6-mistral-7b-4bit`
 
 ## Testing
 
 To run tests, run the following command from the root of this repo:
-```
+```bash
 python -m unittest discover tests
+```
+
+To test specific vision models:
+```bash
+python -m unittest tests/test_vision_models.py -k pixtral
 ```

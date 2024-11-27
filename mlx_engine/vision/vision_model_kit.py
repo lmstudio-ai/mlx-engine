@@ -72,8 +72,9 @@ class VisionModelKit(ModelKit):
         # disable `prefill_step_size` prompt pre-processing in mlx_lm::generate_step
         generate_args["prefill_step_size"] = float("inf")
 
-        generate_step_input = self.model.input_ids[None]
-        return generate_step_input
+        # The VLM input_ids shape is important, but mlx_lm expects a flattened array
+        #   Send the prompt back reshaped, and save the real shape in `self.model.input_ids`
+        return self.model.input_ids.reshape(-1)
 
     def update_cache_wrapper(self, token: int) -> None:
         pass
