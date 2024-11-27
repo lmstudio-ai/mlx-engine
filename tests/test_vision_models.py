@@ -29,7 +29,7 @@ class TestVisionModels(unittest.TestCase):
             print(f"\nModel {model_name} not found at {model_path}")
             def greenify(text):
                 return f"\033[92m{text}\033[0m"
-            response = input(f"Would you like to download the model {greenify(model_name)}? (y/n): ")
+            response = input(f"Would you like to download the model {greenify(model_name)}? (y/N): ")
             if response.lower() == 'y':
                 print(f"Downloading model with command: lms get {model_name}")
                 subprocess.run(['lms', 'get', model_name], check=True)
@@ -111,6 +111,12 @@ class TestVisionModels(unittest.TestCase):
         """Test Nano LLaVA 1.5 4B model"""
         prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n<image>\n{self.description_prompt}<|im_end|><|im_start|>assistant\n\n"
         self.model_helper("mlx-community/nanoLLaVA-1.5-4bit", prompt)
+
+
+"""
+To find the correct prompt format for new models, run this command for your model in the terminal and check the prompt dump:
+python -m mlx_vlm.generate --model ~/.cache/lm-studio/models/mlx-community/MODEL-NAME --max-tokens 100 --temp 0.0 --image http://images.cocodataset.org/val2017/000000039769.jpg --prompt "What do you see?"
+"""
 
 def run_single_test(test_name):
     """Run a single test in isolation"""

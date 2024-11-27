@@ -129,8 +129,6 @@ class VisionModelWrapper:
                         **self.language_model_kwargs,
                     )
                 else:
-                    args = list(args)
-                    args[0] = self.decoder_input_ids  # Do not use the prompt directly from mlx_lm, since it's the wrong shape
                     outputs = self.language_model(
                         *args,
                         mask=self.mask,
