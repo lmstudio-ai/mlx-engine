@@ -120,7 +120,10 @@ class VisionModelWrapper:
             self.language_model_kwargs["cache"] = cache
         else:
             try:
-                del kwargs["cache"]  # Use the cache from self.language_model_kwargs
+                if (
+                    "cache" in self.language_model_kwargs
+                ):  # This is only missing if self.pixel_values is None
+                    del kwargs["cache"]  # Use the cache from self.language_model_kwargs
 
                 # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1009
                 if "decoder_input_ids" in self.language_model_kwargs:
@@ -164,6 +167,9 @@ class VisionModelWrapper:
         This method generates the input_ids, pixel_values, and mask for the vision model
         Call this before starting evaluation
         """
+        if images_b64 is None:
+            images_b64 = []
+
         detokenizer.reset()
         [detokenizer.add_token(token) for token in prompt_tokens]
         detokenizer.finalize()
@@ -198,6 +204,7 @@ class VisionModelWrapper:
             else None
         )
 
+        pixel_values = None
         mask = None
         image_grid_thw = None
         image_sizes = None
@@ -207,10 +214,22 @@ class VisionModelWrapper:
         image_input_idx = None
         image_masks = None
         if len(images_b64) == 0:
-            RETURNED_TUPLE_LEN = 9
-            return (mx.array(processor(text=prompt).input_ids), *(None,) * RETURNED_TUPLE_LEN)
-
-        if self.image_processor is not None:
+            try:
+                if hasattr(processor, "process"):
+                    # Needed for Molmo
+                    input_ids = mx.array(processor.process(text=prompt)["input_ids"])
+                else:
+                    input_ids = mx.array(processor(text=prompt).input_ids)
+            except ValueError as e:
+                if (
+                    "`images` are expected as arguments to a `Florence2Processor` instance"
+                    in str(e)
+                ):
+                    raise ValueError(
+                        "Using this model without any images attached is not supported yet."
+                    )
+                raise e
+        elif self.image_processor is not None:
             if not isinstance(prompt, list):
                 prompt = [prompt]
             processor.pad_token = processor.eos_token
