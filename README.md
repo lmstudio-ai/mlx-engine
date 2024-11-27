@@ -87,3 +87,8 @@ To run tests, run the following command from the root of this repo:
 ```
 python -m unittest discover tests
 ```
+
+To test specific vision models:
+```
+python -m unittest tests/test_vision_models.py -k pixtral
+```

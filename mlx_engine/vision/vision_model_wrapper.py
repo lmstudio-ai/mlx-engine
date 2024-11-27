@@ -123,12 +123,14 @@ class VisionModelWrapper:
 
                 # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1009
                 if "decoder_input_ids" in self.language_model_kwargs:
-                    self.language_model_kwargs["decoder_input_ids"] = mx.array([self.decoder_input_ids])
+                    self.language_model_kwargs["decoder_input_ids"] = self.decoder_input_ids
                     outputs = self.language_model(
                         **kwargs,
                         **self.language_model_kwargs,
                     )
                 else:
+                    args = list(args)
+                    args[0] = self.decoder_input_ids  # Do not use the prompt directly from mlx_lm, since it's the wrong shape
                     outputs = self.language_model(
                         *args,
                         mask=self.mask,
@@ -147,9 +149,9 @@ class VisionModelWrapper:
 
         return outputs.logits
     
-    def record_sampled_token(self, token) -> None:
+    def record_sampled_token(self, token: int) -> None:
         # Adapted from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1064
-        self.decoder_input_ids = token
+        self.decoder_input_ids = mx.array([token])
 
     def process_prompt_with_images(
         self,
@@ -199,15 +201,17 @@ class VisionModelWrapper:
         aspect_ratio_mask = None
         cross_attention_mask = None
         image_input_idx = None
+        image_masks = None
         if len(images_b64) == 0:
-            return (mx.array(processor(text=prompt).input_ids), *(None,) * 7)
+            return (mx.array(processor(text=prompt).input_ids), *(None,) * 9)
 
         if self.image_processor is not None:
             if not isinstance(prompt, list):
                 prompt = [prompt]
             processor.pad_token = processor.eos_token
             text_chunks = [
-                [processor(chunk).input_ids for chunk in prompt.split("<image>")]
+                [processor(chunk).input_ids for chunk in p.split("<image>")]
+                for p in prompt
             ]
 
             max_length = max(
