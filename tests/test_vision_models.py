@@ -56,6 +56,7 @@ class TestVisionModels(unittest.TestCase):
             seed=0,
             max_tokens=20,
             temp=0.0,
+            repetition_penalty=1.01,  # enable the logits processor code path
         ):
             generated_text += result.text
             print(result.text, end="", flush=True)

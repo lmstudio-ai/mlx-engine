@@ -74,7 +74,7 @@ class VisionModelKit(ModelKit):
 
         # The VLM input_ids shape is important, but mlx_lm expects a flattened array
         #   Send the prompt back reshaped, and save the real shape in the vision model wrapper
-        return self.model.input_ids[None]
+        return self.model.input_ids.reshape(-1)
 
     def update_cache_wrapper(self, token: int) -> None:
         pass
