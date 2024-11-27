@@ -54,7 +54,7 @@ class TestVisionModels(unittest.TestCase):
         self.assertGreater(len(generated_text), 0, f"Model {model_name} failed to generate any text")
         bird_spotted = any(word in generated_text.lower() for word in ["bird", "toucan", "quetzal"])
         self.assertTrue(bird_spotted,
-                       f"Model {model_name} failed to identify either a bird or toucan in the image")
+                       f"Model {model_name} failed to identify either a bird in the image")
         
         return generated_text
 
@@ -93,6 +93,11 @@ class TestVisionModels(unittest.TestCase):
         prompt = f"<image> {self.description_prompt}"
         self.model_helper("Bunny-Llama-3-8B-V-4bit", prompt)
 
+    def test_nano_llava(self):
+        """Test Nano LLaVA 1.5 4B model"""
+        prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n<image>\n{self.description_prompt}<|im_end|><|im_start|>assistant\n\n"
+        self.model_helper("nanoLLaVA-1.5-4bit", prompt)
+
 def run_single_test(test_name):
     """Run a single test in isolation"""
     suite = unittest.TestSuite()
@@ -116,7 +121,8 @@ if __name__ == '__main__':
         'test_florence',
         'test_molmo',
         'test_llava',
-        'test_bunny_llama'
+        'test_bunny_llama',
+        'test_nano_llava',
     ]
     
     # Get the current script path
