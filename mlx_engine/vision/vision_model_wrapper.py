@@ -207,7 +207,8 @@ class VisionModelWrapper:
         image_input_idx = None
         image_masks = None
         if len(images_b64) == 0:
-            return (mx.array(processor(text=prompt).input_ids), *(None,) * 9)
+            RETURNED_TUPLE_LEN = 9
+            return (mx.array(processor(text=prompt).input_ids), *(None,) * RETURNED_TUPLE_LEN)
 
         if self.image_processor is not None:
             if not isinstance(prompt, list):

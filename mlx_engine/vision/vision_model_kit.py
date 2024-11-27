@@ -73,7 +73,7 @@ class VisionModelKit(ModelKit):
         generate_args["prefill_step_size"] = float("inf")
 
         # The VLM input_ids shape is important, but mlx_lm expects a flattened array
-        #   Send the prompt back reshaped, and save the real shape in the vision model wrapper
+        #   Send the prompt back reshaped, and save the real shape in `self.model.input_ids`
         return self.model.input_ids.reshape(-1)
 
     def update_cache_wrapper(self, token: int) -> None:
