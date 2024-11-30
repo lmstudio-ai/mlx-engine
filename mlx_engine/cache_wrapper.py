@@ -5,6 +5,7 @@ from mlx_lm.models.cache import (
     trim_prompt_cache,
     can_trim_prompt_cache,
 )
+from mlx_lm.utils import generation_stream
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -145,19 +146,20 @@ class CacheWrapper:
         num_total_prefill_tokens = len(prefill_tokens)
         processed: int = 0
         chunk_default_size: int = 512
-        while prefill_tokens.size > 0:
-            chunk_size = min(chunk_default_size, prefill_tokens.size)
-            chunk = prefill_tokens[:chunk_size]
+        with mx.stream(generation_stream):
+            while prefill_tokens.size > 0:
+                chunk_size = min(chunk_default_size, prefill_tokens.size)
+                chunk = prefill_tokens[:chunk_size]
 
-            self.model(chunk[None], cache=self.cache)
-            mx.eval([c.state for c in self.cache])
+                self.model(chunk[None], cache=self.cache)
+                mx.eval([c.state for c in self.cache])
 
-            prefill_tokens = prefill_tokens[chunk_size:]
-            processed += chunk_size
-            prompt_progress_callback((processed / num_total_prefill_tokens) * 100)
-            mx.metal.clear_cache()
+                prefill_tokens = prefill_tokens[chunk_size:]
+                processed += chunk_size
+                prompt_progress_callback((processed / num_total_prefill_tokens) * 100)
+                mx.metal.clear_cache()
 
-        # Return the tokens that must still be proccessed outside of the cache
+        # Return the tokens that must still be processed outside of the cache
         non_prefill_tokens = prompt_tokens[-num_tokens_to_exclude:]
         return non_prefill_tokens
 
