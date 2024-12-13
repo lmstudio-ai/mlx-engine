@@ -186,6 +186,24 @@ class TestVisionModels(unittest.TestCase):
         prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n{self.text_only_prompt}<|im_end|><|im_start|>assistant\n\n"
         self.model_helper("mlx-community/nanoLLaVA-1.5-4bit", prompt, text_only=True)
 
+    def test_paligemma2(self):
+        """Test Paligemma 2 model"""
+        prompt = f"<image>{self.description_prompt}"
+        self.model_helper("mlx-community/paligemma2-3b-pt-896-4bit", prompt)
+
+    def test_paligemma2_text_only(self):
+        """Test Paligemma 2 model with only text"""
+        try:
+            prompt = self.text_only_prompt
+            self.model_helper(
+                "mlx-community/paligemma2-3b-pt-896-4bit", prompt, text_only=True
+            )
+        except ValueError as e:
+            self.assertIn(
+                "Using this model without any images attached is not supported yet.",
+                str(e),
+            )
+
 
 """
 To find the correct prompt format for new models, run this command for your model in the terminal and check the prompt dump:

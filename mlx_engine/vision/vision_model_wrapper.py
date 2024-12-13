@@ -221,10 +221,7 @@ class VisionModelWrapper:
                 else:
                     input_ids = mx.array(processor(text=prompt).input_ids)
             except ValueError as e:
-                if (
-                    "`images` are expected as arguments to a `Florence2Processor` instance"
-                    in str(e)
-                ):
+                if "`images` are expected as arguments" in str(e):
                     raise ValueError(
                         "Using this model without any images attached is not supported yet."
                     )
