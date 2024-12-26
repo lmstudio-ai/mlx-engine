@@ -47,8 +47,8 @@ class CacheWrapper:
         Returns:
             int: The length of the common prefix.
         """
-        prompt_tokens_np = np.array(prompt_tokens)
-        current_tokens_np = np.array(current_tokens)
+        prompt_tokens_np = prompt_tokens
+        current_tokens_np = current_tokens
         # Find the minimum length between the two arrays
         min_length = min(len(current_tokens_np), len(prompt_tokens_np))
 
@@ -56,8 +56,8 @@ class CacheWrapper:
         mask = prompt_tokens_np[:min_length] == current_tokens_np[:min_length]
 
         # Find the index where the first mismatch occurs
-        if np.any(mask == False):
-            common_length = int(np.argmax(mask == False))
+        if mx.any(mask == False):
+            common_length = int(mx.argmax(mask == False))
         else:
             common_length = int(min_length)
 
