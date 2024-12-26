@@ -5,6 +5,7 @@ from io import BytesIO
 import base64
 import PIL
 from mlx_vlm.models.base import KVCache, SimpleKVCache
+from mlx_vlm.utils import prepare_inputs
 
 from typing import List, Optional
 
@@ -31,6 +32,17 @@ class VisionModelWrapper:
             "first_call": False,
             "decoder_input_ids": None,
             "language_model_kwargs": {},
+
+            # vision model kwargs
+            "image_grid_thw": None,
+            "image_sizes": None,
+            "aspect_ratio_ids": None,
+            "aspect_ratio_mask": None,
+            "cross_attention_mask": None,
+            "image_input_idx": None,
+            "image_masks": None,
+            "images_spatial_crop": None,
+            "images_seq_mask": None,
         }
 
     def __getattr__(self, name):
@@ -98,6 +110,8 @@ class VisionModelWrapper:
                 cross_attention_mask=self.cross_attention_mask,
                 image_input_idx=self.image_input_idx,
                 image_masks=self.image_masks,
+                images_spatial_crop=self.images_spatial_crop,
+                images_seq_mask=self.images_seq_mask,
                 **kwargs,
             )
 
@@ -177,142 +191,49 @@ class VisionModelWrapper:
 
         sys.stderr.write(f"[mlx-engine] Prompt dump: {prompt}\n")
 
-        (
-            self.input_ids,
-            self.pixel_values,
-            self.mask,
-            self.image_grid_thw,
-            self.image_sizes,
-            self.aspect_ratio_ids,
-            self.aspect_ratio_mask,
-            self.cross_attention_mask,
-            self.image_input_idx,
-            self.image_masks,
-        ) = self._prepare_inputs(images_b64, prompt, processor)
+        images = self._convert_to_pil(images_b64)
+        images = self._custom_resize(images)
 
-    def _prepare_inputs(self, images_b64: list, prompt: str, processor):
-        """
-        Adapted from `mlx_vlm.utils.prepare_inputs`, with the following enhancements:
-        - Handle prompts without images
-        """
-        pil_images = self._convert_to_pil(images_b64)
-        resized_images = self._custom_resize(pil_images)
+        if hasattr(self.vision_model.config, "image_token_index"):
+            image_token_index = self.vision_model.config.image_token_index
+        else:
+            image_token_index = None
 
-        image_token_index = (
-            self.vision_model.config.image_token_index
-            if hasattr(self.vision_model.config, "image_token_index")
-            else None
-        )
-
-        pixel_values = None
-        mask = None
-        image_grid_thw = None
-        image_sizes = None
-        aspect_ratio_ids = None
-        aspect_ratio_mask = None
-        cross_attention_mask = None
-        image_input_idx = None
-        image_masks = None
-        if len(images_b64) == 0:
+        if len(images) == 0:
             try:
                 if hasattr(processor, "process"):
                     # Needed for Molmo
-                    input_ids = mx.array(processor.process(text=prompt)["input_ids"])
+                    self.input_ids = mx.array(processor.process(text=prompt)["input_ids"])
                 else:
-                    input_ids = mx.array(processor(text=prompt).input_ids)
+                    self.input_ids = mx.array(processor(text=prompt).input_ids)
             except ValueError as e:
                 if "`images` are expected as arguments" in str(e):
                     raise ValueError(
                         "Using this model without any images attached is not supported yet."
                     )
                 raise e
-        elif self.image_processor is not None:
-            if not isinstance(prompt, list):
-                prompt = [prompt]
-            processor.pad_token = processor.eos_token
-            text_chunks = [
-                [processor(chunk).input_ids for chunk in p.split("<image>")]
-                for p in prompt
-            ]
-
-            max_length = max(
-                sum(len(chunk) for chunk in chunks) + 1 for chunks in text_chunks
-            )
-            input_ids = []
-            for chunks in text_chunks:
-                ids = chunks[0] + [image_token_index] + chunks[1]
-                padding = [processor.pad_token_id] * (max_length - len(ids))
-                input_ids.append(mx.array(ids + padding))
-            input_ids = mx.array(input_ids)
-            pixel_values = self.image_processor.preprocess(images=resized_images)
-            pixel_values = mx.array(np.stack(pixel_values))
-            mask = mx.array(
-                [(ids != processor.pad_token_id) for ids in input_ids]
-            ).astype(mx.int32)
         else:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
-            if hasattr(processor, "process"):
-                inputs = processor.process(
-                    text=prompt,
-                    images=resized_images,
-                    padding=True,
-                    return_tensors="mlx",
-                )
-            else:
-                inputs = processor(
-                    text=prompt,
-                    images=resized_images,
-                    padding=True,
-                    return_tensors="mlx",
-                )
-
-            if "images" in inputs:
-                inputs["pixel_values"] = inputs["images"]
-                inputs.pop("images")
-            if isinstance(inputs["pixel_values"], list):
-                pixel_values = inputs["pixel_values"]
-            else:
-                pixel_values = mx.array(inputs["pixel_values"])
-            input_ids = mx.array(inputs["input_ids"])
-            mask = (
-                mx.array(inputs["attention_mask"])
-                if "attention_mask" in inputs
-                else None
+            (
+                self.input_ids,
+                self.pixel_values,
+                self.mask,
+                self.image_grid_thw,
+                self.image_sizes,
+                self.aspect_ratio_ids,
+                self.aspect_ratio_mask,
+                self.cross_attention_mask,
+                self.image_input_idx,
+                self.image_masks,
+                self.images_spatial_crop,
+                self.images_seq_mask,
+            ) = prepare_inputs(
+                image_processor=self.image_processor,
+                processor=processor,
+                images=images,
+                prompts=prompt,
+                image_token_index=image_token_index,
+                resize_shape=None
             )
-            image_input_idx = inputs.get("image_input_idx", None)
-            if image_input_idx is not None:
-                image_input_idx = mx.array(image_input_idx)
-            image_masks = inputs.get("image_masks", None)
-            if image_masks is not None:
-                image_masks = mx.array(image_masks)
-            image_sizes = inputs.get("image_sizes", None)
-            if image_sizes is not None:
-                image_sizes = mx.array(image_sizes)
-            image_grid_thw = inputs.get("image_grid_thw", None)
-            if image_grid_thw is not None:
-                image_grid_thw = mx.array(image_grid_thw)
-            aspect_ratio_ids = inputs.get("aspect_ratio_ids", None)
-            if aspect_ratio_ids is not None:
-                aspect_ratio_ids = mx.array(aspect_ratio_ids)
-            aspect_ratio_mask = inputs.get("aspect_ratio_mask", None)
-            if aspect_ratio_mask is not None:
-                aspect_ratio_mask = mx.array(aspect_ratio_mask)
-            cross_attention_mask = inputs.get("cross_attention_mask", None)
-            if cross_attention_mask is not None:
-                cross_attention_mask = mx.array(cross_attention_mask)
-
-        return (
-            input_ids,
-            pixel_values,
-            mask,
-            image_grid_thw,
-            image_sizes,
-            aspect_ratio_ids,
-            aspect_ratio_mask,
-            cross_attention_mask,
-            image_input_idx,
-            image_masks,
-        )
 
     def _convert_to_pil(self, images_b64: List[str]):
         """Convert a list of base64 strings to PIL Images"""
