@@ -1,11 +1,6 @@
 import unittest
 import sys
 from pathlib import Path
-
-# Add the project root to Python path
-project_root = str(Path(__file__).parent.parent)
-sys.path.insert(0, project_root)
-
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper
 
