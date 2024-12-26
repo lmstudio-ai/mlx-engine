@@ -8,7 +8,6 @@ from mlx_lm.models.cache import (
 from mlx_lm.utils import generation_stream
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
 import sys
 
 
@@ -47,22 +46,22 @@ class CacheWrapper:
         Returns:
             int: The length of the common prefix.
         """
-        prompt_tokens_np = np.array(prompt_tokens)
-        current_tokens_np = np.array(current_tokens)
+        prompt_tokens = prompt_tokens
+        current_tokens = current_tokens
         # Find the minimum length between the two arrays
-        min_length = min(len(current_tokens_np), len(prompt_tokens_np))
+        min_length = min(len(current_tokens), len(prompt_tokens))
 
         # Compare elements up to the minimum length
-        mask = prompt_tokens_np[:min_length] == current_tokens_np[:min_length]
+        mask = prompt_tokens[:min_length] == current_tokens[:min_length]
 
         # Find the index where the first mismatch occurs
-        if np.any(mask == False):
-            common_length = int(np.argmax(mask == False))
+        if mx.any(mask == False):
+            common_length = int(mx.argmax(mask == False))
         else:
             common_length = int(min_length)
 
         # Ensure that the prompt is at least num_tokens_to_exclude long
-        uncached_prompt_tokens_length = len(prompt_tokens_np[common_length:])
+        uncached_prompt_tokens_length = len(prompt_tokens[common_length:])
         length_adjustment = max(
             0, num_tokens_to_exclude - uncached_prompt_tokens_length
         )
