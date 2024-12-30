@@ -1,6 +1,6 @@
 name: Lint
 
-on: 
+on:
   push:
     branches: [ main ]
   pull_request:
@@ -23,7 +23,7 @@ jobs:
           pip install ruff
           
       - name: Check formatting
-        run: ruff format --check .
+        run: ruff format --check . --verbose
         
       - name: Run linter
-        run: ruff check .
+        run: ruff check . --verbose
