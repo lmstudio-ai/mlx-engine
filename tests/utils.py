@@ -5,7 +5,14 @@ import subprocess
 from mlx_engine.generate import load_model, tokenize
 
 
-def model_helper(model_name: str, prompt: str, max_kv_size=4096, trust_remote_code=False, text_only=False, images_b64=None):
+def model_helper(
+    model_name: str,
+    prompt: str,
+    max_kv_size=4096,
+    trust_remote_code=False,
+    text_only=False,
+    images_b64=None,
+):
     """Helper method to test a model"""
     print(f"Testing model {model_name}")
 
@@ -31,7 +38,9 @@ def model_helper(model_name: str, prompt: str, max_kv_size=4096, trust_remote_co
 
     # Load the model
     model_kit = load_model(
-        model_path=model_path, max_kv_size=max_kv_size, trust_remote_code=trust_remote_code
+        model_path=model_path,
+        max_kv_size=max_kv_size,
+        trust_remote_code=trust_remote_code,
     )
 
     # Tokenize the prompt

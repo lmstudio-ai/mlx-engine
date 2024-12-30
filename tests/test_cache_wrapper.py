@@ -1,8 +1,7 @@
 import unittest
-import sys
-from pathlib import Path
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper
+
 
 class TestCacheWrapper(unittest.TestCase):
     def test_find_common_prefix_with_mismatch(self):
@@ -35,7 +34,10 @@ class TestCacheWrapper(unittest.TestCase):
         result = CacheWrapper._find_common_prefix(
             current_tokens, prompt_tokens, num_tokens_to_exclude
         )
-        self.assertEqual(result, 4)  # Should find 4 matching tokens (5-1 due to num_tokens_to_exclude)
+        self.assertEqual(
+            result, 4
+        )  # Should find 4 matching tokens (5-1 due to num_tokens_to_exclude)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main(verbosity=2)
