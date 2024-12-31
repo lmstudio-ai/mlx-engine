@@ -55,8 +55,8 @@ class CacheWrapper:
         mask = prompt_tokens[:min_length] == current_tokens[:min_length]
 
         # Find the index where the first mismatch occurs
-        if mx.any(mask == False):
-            common_length = int(mx.argmax(mask == False))
+        if mx.any(not mask):
+            common_length = int(mx.argmax(not mask))
         else:
             common_length = int(min_length)
 
@@ -132,7 +132,8 @@ class CacheWrapper:
             mx.array: The prompt tokens to be used for the next generation.
         """
         if prompt_progress_callback is None:
-            prompt_progress_callback = lambda x: None
+            def prompt_progress_callback(x):
+                return None
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
