@@ -2,9 +2,10 @@ name: Lint
 
 on:
   push:
-    branches: [ ** ]
+    branches: 
+      - '**'  # This is the correct syntax for all branches
   pull_request:
-    branches: [ ** ]
+    branches: [ main ]
 
 jobs:
   lint:
