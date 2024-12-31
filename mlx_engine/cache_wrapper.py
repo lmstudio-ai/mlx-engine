@@ -132,6 +132,7 @@ class CacheWrapper:
             mx.array: The prompt tokens to be used for the next generation.
         """
         if prompt_progress_callback is None:
+
             def prompt_progress_callback(x):
                 return None
 
