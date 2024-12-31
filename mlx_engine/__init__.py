@@ -3,6 +3,7 @@
 """
 
 from pathlib import Path
+from .generate import load_model, create_generator, tokenize
 import os
 
 
@@ -22,4 +23,4 @@ _set_outlines_cache_dir(Path("~/.cache/lm-studio/.internal/outlines"))
 """
 The API for `mlx_engine` is specified in generate.py
 """
-from .generate import load_model, create_generator, tokenize
+
