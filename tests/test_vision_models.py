@@ -164,28 +164,6 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/llava-v1.6-mistral-7b-4bit", prompt, text_only=True
         )
 
-    def test_bunny_llama(self):
-        """Test Bunny Llama 3 8B V model"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n<image>\n{self.description_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-        self.model_helper("mlx-community/Bunny-Llama-3-8B-V-4bit", prompt)
-
-    def test_bunny_llama_text_only(self):
-        """Test Bunny Llama 3 8B V model with only text"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{self.text_only_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        self.model_helper(
-            "mlx-community/Bunny-Llama-3-8B-V-4bit", prompt, text_only=True
-        )
-
-    def test_nano_llava(self):
-        """Test Nano LLaVA 1.5 4B model"""
-        prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n<image>\n{self.description_prompt}<|im_end|><|im_start|>assistant\n\n"
-        self.model_helper("mlx-community/nanoLLaVA-1.5-4bit", prompt)
-
-    def test_nano_llava_text_only(self):
-        """Test Nano LLaVA 1.5 4B model with only text"""
-        prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n{self.text_only_prompt}<|im_end|><|im_start|>assistant\n\n"
-        self.model_helper("mlx-community/nanoLLaVA-1.5-4bit", prompt, text_only=True)
-
     def test_paligemma2(self):
         """Test Paligemma 2 model"""
         prompt = f"<image>{self.description_prompt}"

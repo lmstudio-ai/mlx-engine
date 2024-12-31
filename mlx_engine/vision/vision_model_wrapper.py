@@ -19,13 +19,12 @@ class VisionModelWrapper:
     Models are evaluated in `mlx_lm` with the `__call__` method, so define a custom `__call__` method to forward calls to the vision model
     """
 
-    def __init__(self, model, image_processor):
+    def __init__(self, model):
         """
         Set the class members in this unusual way, so that we can define `__getattr__` and `__setattr__`
         """
         self.__dict__["_model_attrs"] = {
             "vision_model": model,
-            "image_processor": image_processor,
             "input_ids": None,
             "pixel_values": None,
             "mask": None,
@@ -34,15 +33,7 @@ class VisionModelWrapper:
             "language_model_kwargs": {},
 
             # vision model kwargs
-            "image_grid_thw": None,
-            "image_sizes": None,
-            "aspect_ratio_ids": None,
-            "aspect_ratio_mask": None,
-            "cross_attention_mask": None,
-            "image_input_idx": None,
-            "image_masks": None,
-            "images_spatial_crop": None,
-            "images_seq_mask": None,
+            "model_inputs": {},
         }
 
     def __getattr__(self, name):
@@ -103,15 +94,7 @@ class VisionModelWrapper:
                 self.input_ids,
                 self.pixel_values,
                 mask=self.mask,
-                image_grid_thw=self.image_grid_thw,
-                image_sizes=self.image_sizes,
-                aspect_ratio_ids=self.aspect_ratio_ids,
-                aspect_ratio_mask=self.aspect_ratio_mask,
-                cross_attention_mask=self.cross_attention_mask,
-                image_input_idx=self.image_input_idx,
-                image_masks=self.image_masks,
-                images_spatial_crop=self.images_spatial_crop,
-                images_seq_mask=self.images_seq_mask,
+                **self.model_inputs,
                 **kwargs,
             )
 
@@ -213,27 +196,21 @@ class VisionModelWrapper:
                     )
                 raise e
         else:
-            (
-                self.input_ids,
-                self.pixel_values,
-                self.mask,
-                self.image_grid_thw,
-                self.image_sizes,
-                self.aspect_ratio_ids,
-                self.aspect_ratio_mask,
-                self.cross_attention_mask,
-                self.image_input_idx,
-                self.image_masks,
-                self.images_spatial_crop,
-                self.images_seq_mask,
-            ) = prepare_inputs(
-                image_processor=self.image_processor,
+            inputs = prepare_inputs(
                 processor=processor,
                 images=images,
                 prompts=prompt,
                 image_token_index=image_token_index,
                 resize_shape=None
             )
+            self.input_ids = inputs["input_ids"]
+            self.pixel_values = inputs["pixel_values"]
+            self.mask = inputs["attention_mask"]
+            self.model_inputs = {
+                k: v
+                for k, v in inputs.items()
+                if k not in ["input_ids", "pixel_values", "attention_mask"]
+            }
 
     def _convert_to_pil(self, images_b64: List[str]):
         """Convert a list of base64 strings to PIL Images"""
@@ -316,7 +293,3 @@ class VisionModelWrapper:
     @property
     def language_model(self):
         return self.vision_model.language_model
-
-    @property
-    def image_processor(self):
-        return self._model_attrs["image_processor"]
