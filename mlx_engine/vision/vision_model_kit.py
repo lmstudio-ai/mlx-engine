@@ -23,7 +23,7 @@ class VisionModelKit(ModelKit):
     has_processed_prompt: bool = False
 
     def __init__(self, model_path: Path, max_kv_size: int, trust_remote_code: bool):
-        self.config = mlx_vlm.utils.load_config(model_path)
+        self.config = mlx_vlm.utils.load_config(model_path, trust_remote_code=trust_remote_code)
         self.trust_remote_code = trust_remote_code
         self.model_path = model_path
         self.max_kv_size = max_kv_size
@@ -33,9 +33,9 @@ class VisionModelKit(ModelKit):
         self.model, self.processor = mlx_vlm.utils.load(
             self.model_path,
             processor_config={"trust_remote_code": self.trust_remote_code},
+            trust_remote_code=self.trust_remote_code,
         )
-        image_processor = mlx_vlm.utils.load_image_processor(self.model_path)
-        self.model = VisionModelWrapper(self.model, image_processor)
+        self.model = VisionModelWrapper(self.model)
         self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = None
