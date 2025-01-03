@@ -34,7 +34,7 @@ markdown-it-py==3.0.0
 markupsafe==2.1.5
 mdurl==0.1.2
 mlx-lm==0.20.4
-mlx-vlm==0.1.6
+mlx-vlm==0.1.10
 mlx==0.21.1
 mpmath==1.3.0
 multidict==6.1.0
@@ -90,3 +90,4 @@ uvicorn==0.34.0
 websockets==14.1
 xxhash==3.5.0
 yarl==1.18.3
+
