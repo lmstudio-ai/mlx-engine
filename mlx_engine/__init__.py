@@ -19,7 +19,3 @@ def _set_outlines_cache_dir(cache_dir: Path | str):
 
 
 _set_outlines_cache_dir(Path("~/.cache/lm-studio/.internal/outlines"))
-
-"""
-The API for `mlx_engine` is specified in generate.py
-"""
