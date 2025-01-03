@@ -1,5 +1,4 @@
 import mlx.core as mx
-import numpy as np
 import sys
 from io import BytesIO
 import base64
@@ -31,7 +30,6 @@ class VisionModelWrapper:
             "first_call": False,
             "decoder_input_ids": None,
             "language_model_kwargs": {},
-
             # vision model kwargs
             "model_inputs": {},
         }
@@ -186,7 +184,9 @@ class VisionModelWrapper:
             try:
                 if hasattr(processor, "process"):
                     # Needed for Molmo
-                    self.input_ids = mx.array(processor.process(text=prompt)["input_ids"])
+                    self.input_ids = mx.array(
+                        processor.process(text=prompt)["input_ids"]
+                    )
                 else:
                     self.input_ids = mx.array(processor(text=prompt).input_ids)
             except ValueError as e:
@@ -201,7 +201,7 @@ class VisionModelWrapper:
                 images=images,
                 prompts=prompt,
                 image_token_index=image_token_index,
-                resize_shape=None
+                resize_shape=None,
             )
             self.input_ids = inputs["input_ids"]
             self.pixel_values = inputs["pixel_values"]
