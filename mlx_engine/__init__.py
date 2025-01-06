@@ -5,6 +5,9 @@
 from pathlib import Path
 import os
 
+from .utils.disable_hf_download import patch_huggingface_hub
+patch_huggingface_hub()
+
 
 def _set_outlines_cache_dir(cache_dir: Path | str):
     """
