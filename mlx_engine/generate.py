@@ -305,10 +305,10 @@ def create_generator(
                 continue
 
         # Standard yield - yield when a non-empty text segment is available or eos token is hit
-        if text or token == tokenizer.eos_token_id:
+        if text or token in tokenizer.eos_token_ids:
             # populate stop_condition if we hit an eos token
             stop_condition = None
-            if token == tokenizer.eos_token_id:
+            if token in tokenizer.eos_token_ids:
                 stop_condition = GenerationStopCondition(
                     stop_reason="eos_token",
                     stop_string=tokenizer.decode(token),
