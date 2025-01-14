@@ -1,4 +1,5 @@
 from typing import Callable, Iterator, List, Literal, NamedTuple, Optional
+from collections.abc import Iterable
 import json
 from pathlib import Path
 import sys
@@ -204,6 +205,7 @@ def create_generator(
     tokenizer = model_kit.tokenizer
 
     # Set up stop string processor if non-empty stop_strings are provided
+    eos_token_ids = tokenizer.eos_token_ids if isinstance(tokenizer.eos_token_ids, Iterable) else [tokenizer.eos_token_ids]
     stop_string_processor = None
     if stop_strings is not None and len(stop_strings) > 0:
         stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
@@ -305,10 +307,10 @@ def create_generator(
                 continue
 
         # Standard yield - yield when a non-empty text segment is available or eos token is hit
-        if text or token in tokenizer.eos_token_ids:
+        if text or token in eos_token_ids:
             # populate stop_condition if we hit an eos token
             stop_condition = None
-            if token in tokenizer.eos_token_ids:
+            if token in eos_token_ids:
                 stop_condition = GenerationStopCondition(
                     stop_reason="eos_token",
                     stop_string=tokenizer.decode(token),
