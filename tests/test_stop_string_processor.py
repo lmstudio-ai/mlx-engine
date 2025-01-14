@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
+from mlx_engine.utils.disable_hf_download import _original_snapshot_download
 from mlx_lm.tokenizer_utils import load_tokenizer
 
 from mlx_engine.stop_string_processor import StopStringProcessor
@@ -21,7 +22,7 @@ class TestStopStringProcessor(unittest.TestCase):
     @staticmethod
     def download_tokenizer(repo):
         path = Path(
-            snapshot_download(
+            _original_snapshot_download(
                 repo_id=repo,
                 allow_patterns=[
                     "tokenizer.json",
