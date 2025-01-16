@@ -16,8 +16,8 @@ class ModelKit:
         model_path (Path): Path to the model directory containing model files.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
         kv_bits (Optional[int]): Number of bits for KV cache quantization. None disables quantization.
-        kv_group_size (int): Group size for KV cache quantization. Defaults to 64.
-        quantized_kv_start (int): Step to begin KV cache quantization when enabled. Defaults to 0.
+        kv_group_size (Optional[int]): Group size for KV cache quantization. Defaults to 64.
+        quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled. Defaults to 0.
     """
 
     # model state tracking
