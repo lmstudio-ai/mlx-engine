@@ -42,10 +42,11 @@ class ModelKit:
             raise ValueError(
                 "Enabling KV Cache Quantization requires kv_bits to be set"
             )
-        if not any([kv_bits, kv_group_size, quantized_kv_start]) and max_kv_size is None:
-            raise ValueError(
-                "Context length setting is required"
-            )
+        if (
+            not any([kv_bits, kv_group_size, quantized_kv_start])
+            and max_kv_size is None
+        ):
+            raise ValueError("Context length setting is required")
 
         self.model_path = model_path
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)

@@ -31,7 +31,6 @@ class VisionModelWrapper:
             "first_call": False,
             "decoder_input_ids": None,
             "language_model_kwargs": {},
-
             # vision model kwargs
             "model_inputs": {},
         }
@@ -186,7 +185,9 @@ class VisionModelWrapper:
             try:
                 if hasattr(processor, "process"):
                     # Needed for Molmo
-                    self.input_ids = mx.array(processor.process(text=prompt)["input_ids"])
+                    self.input_ids = mx.array(
+                        processor.process(text=prompt)["input_ids"]
+                    )
                 else:
                     self.input_ids = mx.array(processor(text=prompt).input_ids)
             except ValueError as e:
@@ -201,7 +202,7 @@ class VisionModelWrapper:
                 images=images,
                 prompts=prompt,
                 image_token_index=image_token_index,
-                resize_shape=None
+                resize_shape=None,
             )
             self.input_ids = inputs["input_ids"]
             self.pixel_values = inputs["pixel_values"]
@@ -247,7 +248,7 @@ class VisionModelWrapper:
             aspect_ratio = img.width / img.height
 
             sys.stderr.write(
-                f"[mlx-engine] Image {i+1}: Original size {original_size}\n"
+                f"[mlx-engine] Image {i + 1}: Original size {original_size}\n"
             )
 
             if img.width > max_size[0] or img.height > max_size[1]:
@@ -259,10 +260,10 @@ class VisionModelWrapper:
                     new_width = int(new_height * aspect_ratio)
                 img = img.resize((new_width, new_height), PIL.Image.LANCZOS)
                 sys.stderr.write(
-                    f"[mlx-engine] Image {i+1}: Resized to {img.width}x{img.height}\n"
+                    f"[mlx-engine] Image {i + 1}: Resized to {img.width}x{img.height}\n"
                 )
             else:
-                sys.stderr.write(f"[mlx-engine] Image {i+1}: No resize needed\n")
+                sys.stderr.write(f"[mlx-engine] Image {i + 1}: No resize needed\n")
 
             max_width = max(max_width, img.width)
             max_height = max(max_height, img.height)

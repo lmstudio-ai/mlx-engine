@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 
 from .utils.disable_hf_download import patch_huggingface_hub
+
 patch_huggingface_hub()
 
 

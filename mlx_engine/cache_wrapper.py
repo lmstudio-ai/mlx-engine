@@ -16,7 +16,9 @@ class CacheWrapper:
     Wrapper class for the MLX LM cache to maintain an in-memory cache
     """
 
-    def __init__(self, model: nn.Module, max_kv_size: Optional[int], verbose: bool = False):
+    def __init__(
+        self, model: nn.Module, max_kv_size: Optional[int], verbose: bool = False
+    ):
         """
         Initialize the CacheWrapper.
 

@@ -22,8 +22,9 @@ class VisionModelKit(ModelKit):
     has_processed_prompt: bool = False
 
     def __init__(self, model_path: Path, trust_remote_code: bool):
-
-        self.config = mlx_vlm.utils.load_config(model_path, trust_remote_code=trust_remote_code)
+        self.config = mlx_vlm.utils.load_config(
+            model_path, trust_remote_code=trust_remote_code
+        )
         self.trust_remote_code = trust_remote_code
         self.model_path = model_path
         self._initializer()
