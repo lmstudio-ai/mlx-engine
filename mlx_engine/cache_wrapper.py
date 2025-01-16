@@ -16,13 +16,13 @@ class CacheWrapper:
     Wrapper class for the MLX LM cache to maintain an in-memory cache
     """
 
-    def __init__(self, model: nn.Module, max_kv_size: int, verbose: bool = False):
+    def __init__(self, model: nn.Module, max_kv_size: Optional[int], verbose: bool = False):
         """
         Initialize the CacheWrapper.
 
         Args:
             model (nn.Module): The model to be cached.
-            max_kv_size (int): Maximum size of the key-value cache.
+            max_kv_size (Optional[int]): Maximum size of the key-value cache.
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None

@@ -17,16 +17,15 @@ class VisionModelKit(ModelKit):
     config: dict = None
     trust_remote_code: bool = False
     model_path: Path = None
-    max_kv_size: int = None
 
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
 
-    def __init__(self, model_path: Path, max_kv_size: int, trust_remote_code: bool):
+    def __init__(self, model_path: Path, trust_remote_code: bool):
+
         self.config = mlx_vlm.utils.load_config(model_path, trust_remote_code=trust_remote_code)
         self.trust_remote_code = trust_remote_code
         self.model_path = model_path
-        self.max_kv_size = max_kv_size
         self._initializer()
 
     def _initializer(self):

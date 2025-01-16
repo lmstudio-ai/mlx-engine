@@ -45,6 +45,27 @@ def setup_arg_parser():
         default=0,
         help="Number of top logprobs to return",
     )
+    parser.add_argument(
+        "--max-kv-size",
+        type=int,
+        help="Max context size of the model",
+    )
+    parser.add_argument(
+        "--kv-bits",
+        type=int,
+        choices=range(3, 9),
+        help="Number of bits for KV cache quantization. Must be between 3 and 8 (inclusive)",
+    )
+    parser.add_argument(
+        "--kv-group-size",
+        type=int,
+        help="Group size for KV cache quantization",
+    )
+    parser.add_argument(
+        "--quantized-kv-start",
+        type=int,
+        help="When --kv-bits is set, start quantizing the KV cache from this step onwards",
+    )
     return parser
 
 
@@ -62,7 +83,14 @@ if __name__ == "__main__":
 
     # Load the model
     model_path = args.model
-    model_kit = load_model(str(model_path), max_kv_size=4096, trust_remote_code=False)
+    model_kit = load_model(
+        str(model_path),
+        max_kv_size=args.max_kv_size,
+        trust_remote_code=False,
+        kv_bits=args.kv_bits,
+        kv_group_size=args.kv_group_size,
+        quantized_kv_start=args.quantized_kv_start,
+    )
 
     # Tokenize the prompt
     prompt = args.prompt

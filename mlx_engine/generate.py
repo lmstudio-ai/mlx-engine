@@ -37,7 +37,13 @@ class GenerationResult(NamedTuple):
 
 
 def load_model(
-    model_path: str | Path, max_kv_size: int, trust_remote_code: bool
+    model_path: str | Path,
+    *,
+    max_kv_size: Optional[int] = 4096,
+    trust_remote_code: bool = False,
+    kv_bits: Optional[int] = None,
+    kv_group_size: Optional[int] = None,
+    quantized_kv_start: Optional[int] = None,
 ) -> ModelKit | VisionModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -49,6 +55,9 @@ def load_model(
         model_path (str | Path): Path to the model directory containing model files and config.json.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
         trust_remote_code (bool): Whether to allow loading of remote code during model initialization.
+        kv_bits (Optional[int]): Number of bits for KV cache quantization
+        kv_group_size (Optional[int]): Group size for KV cache quantization
+        quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
@@ -64,9 +73,19 @@ def load_model(
     config_json = json.loads((model_path / "config.json").read_text())
 
     if "vision_config" in config_json:
-        return VisionModelKit(model_path, max_kv_size, trust_remote_code)
+        if any([kv_bits, kv_group_size, quantized_kv_start]):
+            raise ValueError(
+                "MLX vision models do not support KV cache quantization"
+            )
+        return VisionModelKit(model_path, trust_remote_code)
     else:
-        return ModelKit(model_path, max_kv_size)
+        return ModelKit(
+            model_path,
+            max_kv_size,
+            kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+        )
 
 
 def create_generator(
@@ -130,8 +149,13 @@ def create_generator(
     set_seed(seed)
 
     generate_args = {}
+
+    # Set up kv cache
     if type(model_kit) is not VisionModelKit:
-        generate_args["max_kv_size"] = model_kit.max_kv_size
+        for attr in ["max_kv_size", "kv_bits", "kv_group_size", "quantized_kv_start"]:
+            value = getattr(model_kit, attr, None)
+            if value is not None:
+                generate_args[attr] = value
 
     # Set up repetition penalty
     repetition_penalty_kwargs = {}
@@ -154,9 +178,6 @@ def create_generator(
         repetition_context_size,
         generate_args,
     )
-
-    # Workaround until mlx_lm.utils.stream_generate supports prompt as type mx.array
-    stream_generate_input = stream_generate_input.tolist()
 
     # Set up sampler
     generate_args["sampler"] = mlx_lm.utils.make_sampler(
