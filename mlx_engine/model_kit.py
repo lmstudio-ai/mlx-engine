@@ -1,3 +1,4 @@
+import sys
 from typing import List, Optional
 
 import mlx_lm
@@ -6,6 +7,13 @@ from mlx_engine.cache_wrapper import CacheWrapper
 from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
+
+
+# https://github.com/ml-explore/mlx/blob/f288db8d34c0bcfa0867b6458ab0277c5e86ed45/mlx/fast.cpp#L782
+VALID_KV_BITS = (2, 3, 4, 6, 8)
+
+# https://github.com/ml-explore/mlx/blob/f288db8d34c0bcfa0867b6458ab0277c5e86ed45/mlx/fast.cpp#L775
+VALID_KV_GROUP_SIZE = (32, 64, 128)
 
 
 class ModelKit:
@@ -38,15 +46,17 @@ class ModelKit:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
     ):
-        if any([kv_group_size, quantized_kv_start]) and kv_bits is None:
-            raise ValueError(
-                "Enabling KV Cache Quantization requires kv_bits to be set"
+        self._validate_kv_cache_params(
+            max_kv_size, kv_bits, kv_group_size, quantized_kv_start
+        )
+
+        if kv_bits and max_kv_size is not None:
+            # Quantized KV cache is only supported for non-rotating KV cache
+            print(
+                "Warning: max_kv_size is ignored when using KV cache quantization",
+                file=sys.stderr,
             )
-        if (
-            not any([kv_bits, kv_group_size, quantized_kv_start])
-            and max_kv_size is None
-        ):
-            raise ValueError("Context length setting is required")
+            max_kv_size = None
 
         self.model_path = model_path
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
@@ -56,6 +66,29 @@ class ModelKit:
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
+
+    @staticmethod
+    def _validate_kv_cache_params(
+        max_kv_size: Optional[int],
+        kv_bits: Optional[int],
+        kv_group_size: Optional[int],
+        quantized_kv_start: Optional[int],
+    ):
+        if any([kv_group_size, quantized_kv_start]) and kv_bits is None:
+            raise ValueError(
+                "Enabling KV Cache Quantization requires kv_bits to be set"
+            )
+        if (
+            not any([kv_bits, kv_group_size, quantized_kv_start])
+            and max_kv_size is None
+        ):
+            raise ValueError("Context length setting is required")
+        if kv_bits and kv_bits not in VALID_KV_BITS:
+            raise ValueError(f"Invalid kv_bits value. Must be one of {VALID_KV_BITS}")
+        if kv_group_size and kv_group_size not in VALID_KV_GROUP_SIZE:
+            raise ValueError(
+                f"Invalid kv_group_size value. Must be one of {VALID_KV_GROUP_SIZE}"
+            )
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
