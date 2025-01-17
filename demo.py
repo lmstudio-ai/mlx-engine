@@ -2,6 +2,7 @@ import argparse
 import base64
 
 from mlx_engine.generate import load_model, create_generator, tokenize
+from mlx_engine.model_kit import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 
 
 DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
@@ -53,12 +54,13 @@ def setup_arg_parser():
     parser.add_argument(
         "--kv-bits",
         type=int,
-        choices=range(3, 9),
+        choices=VALID_KV_BITS,
         help="Number of bits for KV cache quantization. Must be between 3 and 8 (inclusive)",
     )
     parser.add_argument(
         "--kv-group-size",
         type=int,
+        choices=VALID_KV_GROUP_SIZE,
         help="Group size for KV cache quantization",
     )
     parser.add_argument(
