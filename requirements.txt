@@ -33,7 +33,7 @@ lark==1.2.2
 markdown-it-py==3.0.0
 markupsafe==2.1.5
 mdurl==0.1.2
-mlx-lm==0.20.4
+mlx-lm==0.20.5
 mlx-vlm==0.1.10
 mlx==0.21.1
 mpmath==1.3.0

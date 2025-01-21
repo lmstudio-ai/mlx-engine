@@ -98,6 +98,7 @@ def create_generator(
     repetition_context_size: Optional[int] = 20,
     temp: Optional[float] = None,
     top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
     min_p: Optional[float] = None,
     min_tokens_to_keep: Optional[int] = None,
     seed: Optional[int] = None,
@@ -127,6 +128,7 @@ def create_generator(
             repetition penalty. Defaults to 20
         temp (Optional[float]): Temperature for sampling. Higher values increase randomness
         top_p (Optional[float]): Top-p (nucleus) sampling parameter
+        top_k (Optional[int]): Top-k sampling parameter
         min_p (Optional[float]): Minimum probability threshold for token sampling
         min_tokens_to_keep (Optional[int]): Minimum number of tokens to keep during sampling
         seed (Optional[int]): Random seed for reproducible generation
@@ -186,6 +188,7 @@ def create_generator(
                 "top_p": top_p,
                 "min_p": min_p,
                 "min_tokens_to_keep": min_tokens_to_keep,
+                "top_k": top_k,
             }.items()
             if v is not None
         }
