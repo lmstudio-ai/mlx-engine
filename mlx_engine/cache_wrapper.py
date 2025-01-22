@@ -17,7 +17,8 @@ class CacheWrapper:
     """
 
     def __init__(
-        self, model: nn.Module, max_kv_size: Optional[int], verbose: bool = False
+        self, model: nn.Module, draft_model: Optional[nn.Module],
+          max_kv_size: Optional[int], verbose: bool = False
     ):
         """
         Initialize the CacheWrapper.
@@ -29,7 +30,13 @@ class CacheWrapper:
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
         self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
+        # TODO(matt): clean up this inexplicit popping (done in mlx_lm)
+        if draft_model is not None:
+            max_kv_size = None
+        if draft_model is not None:
+            self.cache += make_prompt_cache(draft_model, max_kv_size)
         self.model = model
+        self.draft_model = draft_model
         self.max_kv_size = max_kv_size
         self.verbose = verbose
 
@@ -115,6 +122,29 @@ class CacheWrapper:
 
         # All of the common tokens are now in the cache, so we can return the remaining tokens that still need to be processed
         return prompt_tokens[common_prefix:]
+    
+    def _prefill(
+        self,
+        cache,
+        prefill_tokens,
+        step_size: int,
+        num_processed: int,
+        num_total_prefill_tokens: int,
+        prompt_progress_callback,
+    ):
+        while prefill_tokens.size > 0:
+            chunk_size = min(step_size, prefill_tokens.size)
+            chunk = prefill_tokens[:chunk_size]
+            self.model(chunk[None], cache=cache)
+            # TODO(matt): Add quantize_cache_fn(cache) here
+            mx.eval([c.state for c in cache])
+
+            prefill_tokens = prefill_tokens[chunk_size:]
+            num_processed += chunk_size
+            prompt_progress_callback((num_processed / num_total_prefill_tokens) * 100)
+            mx.metal.clear_cache()
+
+        return num_processed
 
     def update_cache(
         self,
@@ -145,20 +175,31 @@ class CacheWrapper:
         prompt_progress_callback(0)
         prefill_tokens = prompt_tokens[:-num_tokens_to_exclude]
         num_total_prefill_tokens = len(prefill_tokens)
-        processed: int = 0
+        # If the draft model exists, we will prefill both
+        if (self.draft_model is not None) :
+            num_total_prefill_tokens *= 2
+        num_processed: int = 0
         chunk_default_size: int = 512
+        # TODO(matt): clean up prefill
         with mx.stream(generation_stream):
-            while prefill_tokens.size > 0:
-                chunk_size = min(chunk_default_size, prefill_tokens.size)
-                chunk = prefill_tokens[:chunk_size]
-
-                self.model(chunk[None], cache=self.cache)
-                mx.eval([c.state for c in self.cache])
-
-                prefill_tokens = prefill_tokens[chunk_size:]
-                processed += chunk_size
-                prompt_progress_callback((processed / num_total_prefill_tokens) * 100)
-                mx.metal.clear_cache()
+            num_processed = self._prefill(
+                cache=self.cache[: len(self.model.layers)],
+                prefill_tokens=prefill_tokens,
+                step_size=chunk_default_size,
+                num_processed=num_processed,
+                num_total_prefill_tokens=num_total_prefill_tokens,
+                prompt_progress_callback=prompt_progress_callback,
+            )
+            # Also prefill for the draft model, if it exists
+            if self.draft_model is not None:
+                num_processed = self._prefill(
+                    cache=self.cache[: len(self.draft_model.layers)],
+                    prefill_tokens=prefill_tokens,
+                    step_size=chunk_default_size,
+                    num_processed=num_processed,
+                    num_total_prefill_tokens=num_total_prefill_tokens,
+                    prompt_progress_callback=prompt_progress_callback,
+                )
 
         # Return the tokens that must still be processed outside of the cache
         non_prefill_tokens = prompt_tokens[-num_tokens_to_exclude:]

@@ -1,5 +1,6 @@
 import argparse
 import base64
+import time
 
 from mlx_engine.generate import load_model, create_generator, tokenize
 from mlx_engine.model_kit import VALID_KV_BITS, VALID_KV_GROUP_SIZE
@@ -68,6 +69,11 @@ def setup_arg_parser():
         type=int,
         help="When --kv-bits is set, start quantizing the KV cache from this step onwards",
     )
+    parser.add_argument(
+        "--draft-model",
+        type=str,
+        help="The path to the local model directory to use as the draft model for speculative decoding.",
+    )
     return parser
 
 
@@ -83,6 +89,10 @@ if __name__ == "__main__":
     if isinstance(args.images, str):
         args.images = [args.images]
 
+    # set max_kv_size default if no cache quantization params set
+    if not any([args.kv_bits, args.kv_group_size, args.quantized_kv_start]):
+        args.max_kv_size = args.max_kv_size or 1024
+
     # Load the model
     model_path = args.model
     model_kit = load_model(
@@ -92,6 +102,7 @@ if __name__ == "__main__":
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
         quantized_kv_start=args.quantized_kv_start,
+        draft_model_path=args.draft_model,
     )
 
     # Tokenize the prompt
@@ -108,6 +119,11 @@ if __name__ == "__main__":
     # Record top logprobs
     logprobs_list = []
 
+    # Initialize timing variables
+    start_time = time.time()
+    first_token_time = None
+    total_tokens = 0
+
     # Generate the response
     generator = create_generator(
         model_kit,
@@ -118,13 +134,30 @@ if __name__ == "__main__":
         top_logprobs=args.top_logprobs,
     )
     for generation_result in generator:
+        if first_token_time is None:
+            first_token_time = time.time()
+
         print(generation_result.text, end="", flush=True)
+        total_tokens += 1
         logprobs_list.extend(generation_result.top_logprobs)
+        
         if generation_result.stop_condition:
+            end_time = time.time()
+            total_time = end_time - start_time
+            tokens_per_second = total_tokens / total_time
+            
             print(
                 f"\n\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
             )
             if generation_result.stop_condition.stop_string:
                 print(f"Stop string: {generation_result.stop_condition.stop_string}")
+            
+            ttft = first_token_time - start_time
+            print(f"\nGeneration stats:")
+            print(f" - Time to first token: {ttft:.2f}s")
+            print(f" - Total tokens generated: {total_tokens}")
+            print(f" - Total time: {total_time:.2f}s")
+            print(f" - Tokens per second: {tokens_per_second:.2f}")
+            
     if args.top_logprobs:
         [print(x) for x in logprobs_list]

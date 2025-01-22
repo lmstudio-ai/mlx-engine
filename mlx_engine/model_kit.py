@@ -37,6 +37,7 @@ class ModelKit:
     kv_bits: Optional[int] = None
     kv_group_size: Optional[int] = None
     quantized_kv_start: Optional[int] = None
+    draft_model: Optional[nn.Module] = None
 
     def __init__(
         self,
@@ -45,6 +46,7 @@ class ModelKit:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        draft_model_path: Optional[Path] = None,
     ):
         self._validate_kv_cache_params(
             max_kv_size, kv_bits, kv_group_size, quantized_kv_start
@@ -60,8 +62,12 @@ class ModelKit:
 
         self.model_path = model_path
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
+        if draft_model_path:
+            self.draft_model, draft_tokenizer = mlx_lm.utils.load(draft_model_path)
+            if draft_tokenizer.vocab_size != self.tokenizer.vocab_size:
+                raise ValueError("Draft model tokenizer does not match model tokenizer.")
         self.detokenizer = self.tokenizer.detokenizer
-        self.cache_wrapper = CacheWrapper(self.model, max_kv_size)
+        self.cache_wrapper = CacheWrapper(self.model, self.draft_model, max_kv_size)
         self.max_kv_size = max_kv_size
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size

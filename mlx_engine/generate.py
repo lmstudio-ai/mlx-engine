@@ -44,6 +44,7 @@ def load_model(
     kv_bits: Optional[int] = None,
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
+    draft_model_path: Optional[str | Path] = None,
 ) -> ModelKit | VisionModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -55,9 +56,10 @@ def load_model(
         model_path (str | Path): Path to the model directory containing model files and config.json.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
         trust_remote_code (bool): Whether to allow loading of remote code during model initialization.
-        kv_bits (Optional[int]): Number of bits for KV cache quantization
-        kv_group_size (Optional[int]): Group size for KV cache quantization
-        quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled
+        kv_bits (Optional[int]): Number of bits for KV cache quantization.
+        kv_group_size (Optional[int]): Group size for KV cache quantization.
+        quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
+        draft_model_path (Optional[str | Path]): Path to the draft model directory for speculative decoding.
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
@@ -74,7 +76,9 @@ def load_model(
 
     if "vision_config" in config_json:
         if any([kv_bits, kv_group_size, quantized_kv_start]):
-            raise ValueError("MLX vision models do not support KV cache quantization")
+            raise ValueError("MLX vision models do not currently support KV cache quantization")
+        if draft_model_path:
+            raise ValueError("MLX vision models do not currently support speculative decoding")
         return VisionModelKit(model_path, trust_remote_code)
     else:
         return ModelKit(
@@ -83,6 +87,7 @@ def load_model(
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
+            draft_model_path=draft_model_path,
         )
 
 
@@ -104,6 +109,7 @@ def create_generator(
     seed: Optional[int] = None,
     json_schema: Optional[str] = None,
     max_tokens: Optional[int] = 10000000,
+    num_draft_tokens: Optional[int] = None,
 ) -> Iterator[GenerationResult]:
     """
     Create a generator that streams text generation results from the model.
@@ -134,6 +140,8 @@ def create_generator(
         seed (Optional[int]): Random seed for reproducible generation
         json_schema (Optional[str]): JSON schema for structured output generation
         max_tokens (Optional[int]): Maximum number of tokens to generate. Defaults to 10000000
+        num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding.
+            Ignored if no draft model in ModelKit.
 
     Yields:
         GenerationResult: A named tuple containing:
@@ -149,6 +157,8 @@ def create_generator(
     set_seed(seed)
 
     generate_args = {}
+
+    # TODO(matt): implement num_draft_tokens
 
     # Set up kv cache
     if type(model_kit) is not VisionModelKit:
@@ -292,6 +302,7 @@ def create_generator(
     for generation_result in mlx_lm.utils.stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
+        draft_model=model_kit.draft_model,
         prompt=stream_generate_input,
         max_tokens=max_tokens,
         **generate_args,
