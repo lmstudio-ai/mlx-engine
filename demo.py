@@ -22,7 +22,7 @@ def setup_arg_parser():
         "--model",
         required=True,
         type=str,
-        help="The path to the local model directory.",
+        help="The file system path to the model",
     )
     parser.add_argument(
         "--prompt",
@@ -79,7 +79,7 @@ def setup_arg_parser():
     parser.add_argument(
         "--draft-model",
         type=str,
-        help="The path to the local model directory to use as the draft model for speculative decoding.",
+        help="The file system path to the draft model for speculative decoding.",
     )
     parser.add_argument(
         "--num-draft-tokens",

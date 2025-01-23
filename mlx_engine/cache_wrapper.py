@@ -164,7 +164,7 @@ class CacheWrapper:
             progress_callback(progress)
             mx.metal.clear_cache()
 
-    def add_draft_model(self, draft_model):
+    def set_draft_model(self, draft_model: nn.Module):
         if self.model is None:
             raise ValueError("Cannot add a draft model to cache without a main model")
         if self.max_kv_size is not None:
@@ -178,7 +178,7 @@ class CacheWrapper:
             self.cache += make_prompt_cache(draft_model)
         self.draft_model = draft_model
 
-    def remove_draft_model(self):
+    def unset_draft_model(self):
         if self.draft_model is None:
             log_info(
                 prefix="CacheWrapper", message="No draft model to remove from cache"

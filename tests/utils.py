@@ -29,7 +29,7 @@ def model_getter(model_name: str):
     
     return model_path
 
-def model_helper(model_name: str, prompt: str, max_kv_size=4096, trust_remote_code=False, text_only=False, images_b64=None):
+def model_load_and_tokenize_prompt(model_name: str, prompt: str, max_kv_size=4096, trust_remote_code=False, text_only=False, images_b64=None):
     """Helper method to test a model"""
     print(f"Testing model {model_name}")
 

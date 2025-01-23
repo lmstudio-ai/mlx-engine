@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from mlx_engine.generate import create_generator
-from .utils import model_helper
+from .utils import model_load_and_tokenize_prompt
 
 
 class TestStructuredGen(unittest.TestCase):
@@ -10,7 +10,7 @@ class TestStructuredGen(unittest.TestCase):
         """Test structured generation with a JSON schema."""
         prompt = "List three colors and their hex codes."
         model_name = "mlx-community/Llama-3.2-1B-Instruct-4bit"
-        model_kit, prompt_tokens = model_helper(model_name, prompt)
+        model_kit, prompt_tokens = model_load_and_tokenize_prompt(model_name, prompt)
 
         json_schema = """
         {

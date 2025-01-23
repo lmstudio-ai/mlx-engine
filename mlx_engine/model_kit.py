@@ -140,7 +140,7 @@ class ModelKit:
         if not self.is_draft_model_compatible(path):
             raise ValueError("Draft model is not compatible with main model")
         self.draft_model, _ = mlx_lm.utils.load(path)
-        self.cache_wrapper.add_draft_model(self.draft_model)
+        self.cache_wrapper.set_draft_model(self.draft_model)
         log_info(prefix="ModelKit", message="Draft model loaded")
 
     def unload_draft_model(self) -> None:
@@ -148,7 +148,7 @@ class ModelKit:
             log_info(prefix="ModelKit", message="No loaded draft model to unload")
         else:
             self.draft_model = None
-            self.cache_wrapper.remove_draft_model()
+            self.cache_wrapper.unset_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
         mx.metal.clear_cache()
 
