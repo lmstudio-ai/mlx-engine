@@ -10,6 +10,7 @@ DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
 
 Explain the rules of chess in one sentence.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 """
+DEFAULT_TEMP = 0.8
 
 
 def setup_arg_parser():
@@ -34,6 +35,12 @@ def setup_arg_parser():
         type=str,
         nargs="+",
         help="Path of the images to process",
+    )
+    parser.add_argument(
+        "--temp",
+        default=DEFAULT_TEMP,
+        type=float,
+        help="Sampling temperature",
     )
     parser.add_argument(
         "--stop-strings",
@@ -127,8 +134,8 @@ if __name__ == "__main__":
         if args.print_prompt_progress:
             width = 40  # bar width
             filled = int(width * percent / 100)
-            bar = '█' * filled + '░' * (width - filled)
-            print(f'\rProcessing prompt: |{bar}| ({percent:.1f}%)', end='', flush=True)
+            bar = "█" * filled + "░" * (width - filled)
+            print(f"\rProcessing prompt: |{bar}| ({percent:.1f}%)", end="", flush=True)
             if percent >= 100:
                 print()  # new line when done
         else:
@@ -176,6 +183,7 @@ if __name__ == "__main__":
         top_logprobs=args.top_logprobs,
         prompt_progress_callback=prompt_progress_callback,
         num_draft_tokens=args.num_draft_tokens,
+        temp=args.temp,
     )
     for generation_result in generator:
         print(generation_result.text, end="", flush=True)
