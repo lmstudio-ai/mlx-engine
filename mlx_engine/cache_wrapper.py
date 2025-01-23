@@ -131,7 +131,8 @@ class CacheWrapper:
         end_progress: float,
         chunk_size: int = 512,
     ):
-        """Fill a KV cache for a specific model
+        """
+        Fill a KV cache for a specific model
 
         Args:
             model: The model to use for cache filling

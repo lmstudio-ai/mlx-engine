@@ -151,8 +151,7 @@ def create_generator(
         seed (Optional[int]): Random seed for reproducible generation
         json_schema (Optional[str]): JSON schema for structured output generation
         max_tokens (Optional[int]): Maximum number of tokens to generate. Defaults to 10000000
-        num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding.
-            Ignored if no draft model in ModelKit.
+        num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
 
     Yields:
         GenerationResult: A named tuple containing:
@@ -164,6 +163,7 @@ def create_generator(
 
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
+        ValueError: If num_draft_tokens is provided but no draft model is loaded
     """
     set_seed(seed)
 
