@@ -4,6 +4,7 @@ import sys
 from io import BytesIO
 import base64
 import PIL
+from mlx_engine.logging import log_info
 from mlx_vlm.models.base import KVCache, SimpleKVCache
 from mlx_vlm.utils import prepare_inputs
 
@@ -171,7 +172,7 @@ class VisionModelWrapper:
         detokenizer.finalize()
         prompt = detokenizer.text
 
-        sys.stderr.write(f"[mlx-engine] Prompt dump: {prompt}\n")
+        log_info(prefix="VisionModelWrapper", message=f"Prompt dump: {prompt}\n")
 
         images = self._convert_to_pil(images_b64)
         images = self._custom_resize(images)
@@ -247,8 +248,9 @@ class VisionModelWrapper:
             original_size = (img.width, img.height)
             aspect_ratio = img.width / img.height
 
-            sys.stderr.write(
-                f"[mlx-engine] Image {i + 1}: Original size {original_size}\n"
+            log_info(
+                prefix="VisionModelWrapper",
+                message=f"Image {i + 1}: Original size {original_size}",
             )
 
             if img.width > max_size[0] or img.height > max_size[1]:
@@ -259,11 +261,15 @@ class VisionModelWrapper:
                     new_height = max_size[1]
                     new_width = int(new_height * aspect_ratio)
                 img = img.resize((new_width, new_height), PIL.Image.LANCZOS)
-                sys.stderr.write(
-                    f"[mlx-engine] Image {i + 1}: Resized to {img.width}x{img.height}\n"
+                log_info(
+                    prefix="VisionModelWrapper",
+                    message=f"Image {i + 1}: Resized to {img.width}x{img.height}\n",
                 )
             else:
-                sys.stderr.write(f"[mlx-engine] Image {i + 1}: No resize needed\n")
+                log_info(
+                    prefix="VisionModelWrapper",
+                    message=f"Image {i + 1}: No resize needed\n",
+                )
 
             max_width = max(max_width, img.width)
             max_height = max(max_height, img.height)
@@ -271,9 +277,10 @@ class VisionModelWrapper:
             resized_images.append(img)
 
         if len(pil_images) > 1:
-            sys.stderr.write(
-                f"[mlx-engine] Maximum dimensions: {max_width}x{max_height}. "
-                f"Adding padding so that all images are the same size.\n"
+            log_info(
+                prefix="VisionModelWrapper",
+                message=f"[mlx-engine] Maximum dimensions: {max_width}x{max_height}. "
+                f"Adding padding so that all images are the same size.\n",
             )
 
             final_images = []

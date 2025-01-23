@@ -1,7 +1,14 @@
 import unittest
 from pathlib import Path
 from .utils import model_getter
-from mlx_engine.generate import load_model, tokenize, create_generator
+from mlx_engine.generate import (
+    load_model,
+    load_draft_model,
+    is_draft_model_compatible,
+    unload_draft_model,
+    tokenize,
+    create_generator,
+)
 
 
 class TestSpeculativeDecoding(unittest.TestCase):
@@ -16,21 +23,27 @@ class TestSpeculativeDecoding(unittest.TestCase):
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
         model_kit = load_model(model_path=model_path)
-        self.assertTrue(model_kit.is_draft_model_compatible(path=draft_model_path))
+        self.assertTrue(
+            is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+        )
 
     def test_is_draft_model_compatible_false_incompatible(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         draft_model_path = model_getter("mlx-community/Llama-3.2-1B-Instruct-4bit")
         model_kit = load_model(model_path=model_path)
-        self.assertFalse(model_kit.is_draft_model_compatible(path=draft_model_path))
+        self.assertFalse(
+            is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+        )
 
     def test_is_draft_model_compatible_false_vision(self):
-        model_path = model_getter("mlx-community/Qwen2-VL-3B-Instruct-4bit")
+        model_path = model_getter("mlx-community/Qwen2-VL-7B-Instruct-4bit")
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
         model_kit = load_model(model_path=model_path)
-        self.assertFalse(model_kit.is_draft_model_compatible(path=draft_model_path))
+        self.assertFalse(
+            is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+        )
 
     def test_load_draft_model_success(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
@@ -38,7 +51,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
         model_kit = load_model(model_path=model_path, max_kv_size=None)
-        model_kit.load_draft_model(path=draft_model_path)
+        load_draft_model(model_kit=model_kit, path=draft_model_path)
         self.assertIsNotNone(model_kit.draft_model)
 
     def test_load_draft_model_invalid_model(self):
@@ -46,12 +59,12 @@ class TestSpeculativeDecoding(unittest.TestCase):
         draft_model_path = model_getter("mlx-community/Llama-3.2-1B-Instruct-4bit")
         model_kit = load_model(model_path=model_path, max_kv_size=None)
         with self.assertRaises(ValueError):
-            model_kit.load_draft_model(path=draft_model_path)
+            load_draft_model(model_kit=model_kit, path=draft_model_path)
 
     def test_unload_draft_model_idempotent_none_loaded(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         model_kit = load_model(model_path=model_path, max_kv_size=None)
-        model_kit.unload_draft_model()
+        unload_draft_model(model_kit=model_kit)
 
     def test_unload_draft_model_success(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
@@ -60,7 +73,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         )
         model_kit = load_model(model_path=model_path, max_kv_size=None)
         model_kit.load_draft_model(path=draft_model_path)
-        model_kit.unload_draft_model()
+        unload_draft_model(model_kit=model_kit)
         self.assertIsNone(model_kit.draft_model)
 
     def test_basic_generation(self):
@@ -69,7 +82,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
         model_kit = load_model(model_path=model_path, max_kv_size=None)
-        model_kit.load_draft_model(path=draft_model_path)
+        load_draft_model(model_kit=model_kit, path=draft_model_path)
         prompt = "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
         prompt_tokens = tokenize(model_kit, prompt)
         generated_text = ""

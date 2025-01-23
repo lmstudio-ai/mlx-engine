@@ -1,10 +1,10 @@
 import sys
 from typing import List, Optional
 
+from mlx_engine.logging import log_info, log_warn
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
 from mlx_engine.cache_wrapper import CacheWrapper
-from mlx_engine.simple_logger import SimpleLogger
 from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
@@ -39,7 +39,6 @@ class ModelKit:
     kv_group_size: Optional[int] = None
     quantized_kv_start: Optional[int] = None
     draft_model: Optional[nn.Module] = None
-    logger: Optional[SimpleLogger] = None
 
     def __init__(
         self,
@@ -48,25 +47,24 @@ class ModelKit:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
-        logger: Optional[SimpleLogger] = SimpleLogger("ModelKit"),
     ):
-        self.logger = logger
-
         self._validate_kv_cache_quantization_params(
             kv_bits, kv_group_size, quantized_kv_start
         )
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
-            self.logger.warn("max_kv_size is ignored when using KV cache quantization")
+            log_warn("max_kv_size is ignored when using KV cache quantization")
             max_kv_size = None
 
         self.model_path = model_path
+        log_info(prefix="ModelKit", message=f"Loading model from {model_path}...")
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(self.model, max_kv_size)
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
+        log_info(prefix="ModelKit", message="Model loaded successfully")
 
     @staticmethod
     def _validate_kv_cache_quantization_params(
@@ -127,9 +125,7 @@ class ModelKit:
     def is_draft_model_compatible(self, path: str | Path) -> bool:
         path = Path(path)
         if self.model is None or self.tokenizer is None:
-            self.logger.warn(
-                "Draft model will never be compatible without a main model loaded"
-            )
+            log_warn("Draft model will never be compatible without a main model loaded")
             return False
         draft_tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(path)
         if draft_tokenizer.vocab_size != self.tokenizer.vocab_size:
@@ -137,6 +133,7 @@ class ModelKit:
         return True
 
     def load_draft_model(self, path: str | Path) -> None:
+        log_info(prefix="ModelKit", message=f"Loading draft model from {path}...")
         path = Path(path)
         if self.model is None:
             raise ValueError("Main model must be loaded before loading a draft model")
@@ -144,16 +141,16 @@ class ModelKit:
             raise ValueError("Draft model is not compatible with main model")
         self.draft_model, _ = mlx_lm.utils.load(path)
         self.cache_wrapper.add_draft_model(self.draft_model)
+        log_info(prefix="ModelKit", message="Draft model loaded")
 
     def unload_draft_model(self) -> None:
         if self.draft_model is None:
-            self.logger.info("No loaded draft model to unload")
+            log_info(prefix="ModelKit", message="No loaded draft model to unload")
         else:
             self.draft_model = None
             self.cache_wrapper.remove_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
         mx.metal.clear_cache()
-        
 
     @property
     def language_model(self):

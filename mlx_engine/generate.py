@@ -88,6 +88,20 @@ def load_model(
         )
 
 
+def load_draft_model(model_kit: ModelKit | VisionModelKit, path: str | Path) -> None:
+    model_kit.load_draft_model(path)
+
+
+def is_draft_model_compatible(
+    model_kit: ModelKit | VisionModelKit, path: str | Path
+) -> bool:
+    return model_kit.is_draft_model_compatible(path)
+
+
+def unload_draft_model(model_kit: ModelKit | VisionModelKit) -> None:
+    model_kit.unload_draft_model()
+
+
 def create_generator(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],

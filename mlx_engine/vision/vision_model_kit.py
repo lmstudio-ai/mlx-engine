@@ -1,7 +1,6 @@
 from typing import Union, Optional, List
 
 from mlx_engine.model_kit import ModelKit
-from mlx_engine.simple_logger import SimpleLogger
 from .vision_model_wrapper import VisionModelWrapper
 
 import mlx_vlm
@@ -26,9 +25,7 @@ class VisionModelKit(ModelKit):
         self,
         model_path: Path,
         trust_remote_code: bool,
-        logger: Optional[SimpleLogger] = SimpleLogger("VisionModelKit"),
     ):
-        self.logger = logger
         self.config = mlx_vlm.utils.load_config(
             model_path, trust_remote_code=trust_remote_code
         )

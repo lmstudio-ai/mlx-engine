@@ -84,6 +84,19 @@ Currently supported vision models include:
  - [Llava-v1.6](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit)
    - `lms get mlx-community/llava-v1.6-mistral-7b-4bit`
 
+### Speculative Decoding Demo
+Run the `demo.py` script with an MLX text model and a compatible `--draft-model`
+```bash
+lms get mlx-community/Qwen2.5-7B-Instruct-4bit
+lms get lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit
+python demo.py --model /Users/matt/.cache/lm-studio/models/mlx-community/Qwen2.5-7B-Instruct-4bit --draft-model /Users/matt/.cache/lm-studio/models/lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit --prompt "<|im_start|>system
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Write a quick sort in C++<|im_end|>
+<|im_start|>assistant
+"
+```
+
 ## Testing
 
 To run tests, run the following command from the root of this repo:
