@@ -44,7 +44,6 @@ def load_model(
     kv_bits: Optional[int] = None,
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
-    draft_model_path: Optional[str | Path] = None,
 ) -> ModelKit | VisionModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -59,7 +58,6 @@ def load_model(
         kv_bits (Optional[int]): Number of bits for KV cache quantization.
         kv_group_size (Optional[int]): Group size for KV cache quantization.
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
-        draft_model_path (Optional[str | Path]): Path to the draft model directory for speculative decoding.
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
@@ -76,9 +74,9 @@ def load_model(
 
     if "vision_config" in config_json:
         if any([kv_bits, kv_group_size, quantized_kv_start]):
-            raise ValueError("MLX vision models do not currently support KV cache quantization")
-        if draft_model_path:
-            raise ValueError("MLX vision models do not currently support speculative decoding")
+            raise ValueError(
+                "MLX vision models do not currently support KV cache quantization"
+            )
         return VisionModelKit(model_path, trust_remote_code)
     else:
         return ModelKit(
@@ -87,7 +85,6 @@ def load_model(
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
-            draft_model_path=draft_model_path,
         )
 
 

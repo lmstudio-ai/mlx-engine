@@ -10,15 +10,23 @@ import mlx.core as mx
 import mlx.nn as nn
 import sys
 
+from mlx_engine.simple_logger import SimpleLogger
+
 
 class CacheWrapper:
     """
     Wrapper class for the MLX LM cache to maintain an in-memory cache
     """
 
+    draft_model: Optional[nn.Module] = None
+    logger: Optional[SimpleLogger] = None
+
     def __init__(
-        self, model: nn.Module, draft_model: Optional[nn.Module],
-          max_kv_size: Optional[int], verbose: bool = True
+        self,
+        model: nn.Module,
+        max_kv_size: Optional[int],
+        verbose: bool = False,
+        logger: Optional[SimpleLogger] = SimpleLogger("CacheWrapper"),
     ):
         """
         Initialize the CacheWrapper.
@@ -27,16 +35,11 @@ class CacheWrapper:
             model (nn.Module): The model to be cached.
             max_kv_size (Optional[int]): Maximum size of the key-value cache.
         """
+        self.logger = logger
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
-        # TODO(matt): clean up this inexplicit popping (done in mlx_lm)
-        if draft_model is not None:
-            max_kv_size = None
         self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
-        if draft_model is not None:
-            self.cache += make_prompt_cache(draft_model, max_kv_size)
         self.model = model
-        self.draft_model = draft_model
         self.max_kv_size = max_kv_size
         self.verbose = verbose
 
@@ -122,7 +125,7 @@ class CacheWrapper:
 
         # All of the common tokens are now in the cache, so we can return the remaining tokens that still need to be processed
         return prompt_tokens[common_prefix:]
-    
+
     def _prefill(
         self,
         model,
@@ -146,6 +149,26 @@ class CacheWrapper:
             mx.metal.clear_cache()
 
         return num_processed
+
+    def add_draft_model(self, draft_model):
+        if self.model is None:
+            raise ValueError("Cannot add a draft model to cache without a main model")
+        if self.max_kv_size is not None:
+            self.logger.warn("Disabling max_kv_size when adding a draft model")
+            self.max_kv_size = None
+
+        # clear the current cache, and create a new one with main model and draft model
+        self.cache: List[Any] = make_prompt_cache(self.model)
+        if draft_model is not None:
+            self.cache += make_prompt_cache(draft_model)
+        self.draft_model = draft_model
+
+    def remove_draft_model(self):
+        if self.draft_model is None:
+            self.logger.info("No draft model to remove from cache")
+            return
+        self.draft_model = None
+        self.cache = self.cache[: len(self.model.layers)]
 
     def update_cache(
         self,
@@ -177,16 +200,16 @@ class CacheWrapper:
         prefill_tokens = prompt_tokens[:-num_tokens_to_exclude]
         num_total_prefill_tokens = len(prefill_tokens)
         # If the draft model exists, we will prefill both
-        if (self.draft_model is not None) :
+        if self.draft_model is not None:
             num_total_prefill_tokens *= 2
         num_processed: int = 0
         chunk_default_size: int = 512
         # Split cache into draft and model caches
-        draft_cache = self.cache[len(self.model.layers):]
-        model_cache = self.cache[:len(self.model.layers)]
+        draft_cache = self.cache[len(self.model.layers) :]
+        model_cache = self.cache[: len(self.model.layers)]
         # TODO(matt): clean up prefill
         with mx.stream(generation_stream):
-             # Prefill for the draft model, if it exists
+            # Prefill for the draft model, if it exists
             if self.draft_model is not None:
                 num_processed = self._prefill(
                     cache=draft_cache,

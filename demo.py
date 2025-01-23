@@ -119,8 +119,11 @@ if __name__ == "__main__":
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
         quantized_kv_start=args.quantized_kv_start,
-        draft_model_path=args.draft_model,
     )
+
+    # Load draft model if requested
+    if args.draft_model:
+        model_kit.load_draft_model(args.draft_model)
 
     # Tokenize the prompt
     prompt = args.prompt
