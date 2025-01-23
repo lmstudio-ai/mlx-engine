@@ -74,6 +74,16 @@ def setup_arg_parser():
         type=str,
         help="The path to the local model directory to use as the draft model for speculative decoding.",
     )
+    parser.add_argument(
+        "--num-draft-tokens",
+        type=int,
+        help="Number of tokens to draft when using speculative decoding."
+    )
+    parser.add_argument(
+        "--print-prompt-processing",
+        action="store_true",
+        help="Enable printed prompt processing callback",
+    )
     return parser
 
 
@@ -89,9 +99,16 @@ if __name__ == "__main__":
     if isinstance(args.images, str):
         args.images = [args.images]
 
-    # set max_kv_size default if no cache quantization params set
+    # Set max_kv_size default if no cache quantization params set
     if not any([args.kv_bits, args.kv_group_size, args.quantized_kv_start]):
         args.max_kv_size = args.max_kv_size or 1024
+
+    # Set up prompt processing callback
+    def prompt_progress_callback(percent):
+        if args.print_prompt_processing:
+            print(f"Processed {percent}% of prompt")
+        else:
+            pass
 
     # Load the model
     model_path = args.model
@@ -132,6 +149,8 @@ if __name__ == "__main__":
         stop_strings=args.stop_strings,
         max_tokens=1024,
         top_logprobs=args.top_logprobs,
+        prompt_progress_callback=prompt_progress_callback,
+        num_draft_tokens=args.num_draft_tokens,
     )
     for generation_result in generator:
         if first_token_time is None:

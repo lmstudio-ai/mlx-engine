@@ -158,8 +158,6 @@ def create_generator(
 
     generate_args = {}
 
-    # TODO(matt): implement num_draft_tokens
-
     # Set up kv cache
     if type(model_kit) is not VisionModelKit:
         for attr in ["max_kv_size", "kv_bits", "kv_group_size", "quantized_kv_start"]:
@@ -179,6 +177,14 @@ def create_generator(
         logit_bias=None,
         **repetition_penalty_kwargs,
     )
+
+    # Set up speculative decoding
+    if num_draft_tokens is not None:
+        if type(model_kit) is not ModelKit or model_kit.draft_model is None:
+            raise ValueError(
+                "num_draft_tokens is only supported for text models with a loaded draft model"
+            )
+        generate_args["num_draft_tokens"] = num_draft_tokens
 
     # Process prompt
     stream_generate_input = model_kit.process_prompt(

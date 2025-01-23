@@ -18,7 +18,7 @@ class CacheWrapper:
 
     def __init__(
         self, model: nn.Module, draft_model: Optional[nn.Module],
-          max_kv_size: Optional[int], verbose: bool = False
+          max_kv_size: Optional[int], verbose: bool = True
     ):
         """
         Initialize the CacheWrapper.
@@ -29,10 +29,10 @@ class CacheWrapper:
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
-        self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
         # TODO(matt): clean up this inexplicit popping (done in mlx_lm)
         if draft_model is not None:
             max_kv_size = None
+        self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
         if draft_model is not None:
             self.cache += make_prompt_cache(draft_model, max_kv_size)
         self.model = model
@@ -125,6 +125,7 @@ class CacheWrapper:
     
     def _prefill(
         self,
+        model,
         cache,
         prefill_tokens,
         step_size: int,
@@ -135,7 +136,7 @@ class CacheWrapper:
         while prefill_tokens.size > 0:
             chunk_size = min(step_size, prefill_tokens.size)
             chunk = prefill_tokens[:chunk_size]
-            self.model(chunk[None], cache=cache)
+            model(chunk[None], cache=cache)
             # TODO(matt): Add quantize_cache_fn(cache) here
             mx.eval([c.state for c in cache])
 
@@ -180,26 +181,31 @@ class CacheWrapper:
             num_total_prefill_tokens *= 2
         num_processed: int = 0
         chunk_default_size: int = 512
+        # Split cache into draft and model caches
+        draft_cache = self.cache[len(self.model.layers):]
+        model_cache = self.cache[:len(self.model.layers)]
         # TODO(matt): clean up prefill
         with mx.stream(generation_stream):
-            num_processed = self._prefill(
-                cache=self.cache[: len(self.model.layers)],
-                prefill_tokens=prefill_tokens,
-                step_size=chunk_default_size,
-                num_processed=num_processed,
-                num_total_prefill_tokens=num_total_prefill_tokens,
-                prompt_progress_callback=prompt_progress_callback,
-            )
-            # Also prefill for the draft model, if it exists
+             # Prefill for the draft model, if it exists
             if self.draft_model is not None:
                 num_processed = self._prefill(
-                    cache=self.cache[: len(self.draft_model.layers)],
+                    cache=draft_cache,
+                    model=self.draft_model,
                     prefill_tokens=prefill_tokens,
                     step_size=chunk_default_size,
                     num_processed=num_processed,
                     num_total_prefill_tokens=num_total_prefill_tokens,
                     prompt_progress_callback=prompt_progress_callback,
                 )
+            num_processed = self._prefill(
+                cache=model_cache,
+                model=self.model,
+                prefill_tokens=prefill_tokens,
+                step_size=chunk_default_size,
+                num_processed=num_processed,
+                num_total_prefill_tokens=num_total_prefill_tokens,
+                prompt_progress_callback=prompt_progress_callback,
+            )
 
         # Return the tokens that must still be processed outside of the cache
         non_prefill_tokens = prompt_tokens[-num_tokens_to_exclude:]
