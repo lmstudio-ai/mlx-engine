@@ -21,7 +21,11 @@ class VisionModelKit(ModelKit):
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
 
-    def __init__(self, model_path: Path, trust_remote_code: bool):
+    def __init__(
+        self,
+        model_path: Path,
+        trust_remote_code: bool,
+    ):
         self.config = mlx_vlm.utils.load_config(
             model_path, trust_remote_code=trust_remote_code
         )
@@ -81,6 +85,19 @@ class VisionModelKit(ModelKit):
 
     def record_sampled_token(self, token: int) -> None:
         self.model.record_sampled_token(token)
+
+    def is_draft_model_compatible(self, path: str | Path) -> bool:
+        return False
+
+    def load_draft_model(self, path: str | Path) -> None:
+        raise ValueError(
+            "Speculative decoding is not currently supported for vision models"
+        )
+
+    def unload_draft_model(self) -> None:
+        raise ValueError(
+            "Speculative decoding is not currently supported for vision models"
+        )
 
     @property
     def language_model(self):

@@ -4,10 +4,8 @@ import subprocess
 
 from mlx_engine.generate import load_model, tokenize
 
-
-def model_helper(model_name: str, prompt: str, max_kv_size=4096, trust_remote_code=False, text_only=False, images_b64=None):
-    """Helper method to test a model"""
-    print(f"Testing model {model_name}")
+def model_getter(model_name: str):
+    """Helper method to get a model, prompt user to download if not found"""
 
     model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
     model_path = model_path_prefix / model_name
@@ -28,6 +26,15 @@ def model_helper(model_name: str, prompt: str, max_kv_size=4096, trust_remote_co
         else:
             print(f"Model {model_name} not found")
             sys.exit(1)
+    
+    return model_path
+
+def model_load_and_tokenize_prompt(model_name: str, prompt: str, max_kv_size=4096, trust_remote_code=False, text_only=False, images_b64=None):
+    """Helper method to test a model"""
+    print(f"Testing model {model_name}")
+
+    # Check if model exists, if not prompt user to download
+    model_path = model_getter(model_name)
 
     # Load the model
     model_kit = load_model(

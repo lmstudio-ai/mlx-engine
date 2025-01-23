@@ -1,5 +1,6 @@
 from typing import List, Optional, Any
 
+from mlx_engine.logging import log_info, log_warn
 from mlx_lm.models.cache import (
     make_prompt_cache,
     trim_prompt_cache,
@@ -17,7 +18,10 @@ class CacheWrapper:
     """
 
     def __init__(
-        self, model: nn.Module, max_kv_size: Optional[int], verbose: bool = False
+        self,
+        model: nn.Module,
+        max_kv_size: Optional[int],
+        verbose: bool = False,
     ):
         """
         Initialize the CacheWrapper.
@@ -30,6 +34,7 @@ class CacheWrapper:
         self.tokens: Optional[mx.array] = None
         self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
         self.model = model
+        self.draft_model: Optional[nn.Module] = None
         self.max_kv_size = max_kv_size
         self.verbose = verbose
 
@@ -116,6 +121,72 @@ class CacheWrapper:
         # All of the common tokens are now in the cache, so we can return the remaining tokens that still need to be processed
         return prompt_tokens[common_prefix:]
 
+    def _prefill(
+        self,
+        model,
+        cache,
+        tokens,
+        progress_callback,
+        start_progress: float,
+        end_progress: float,
+        chunk_size: int = 512,
+    ):
+        """
+        Fill a KV cache for a specific model
+
+        Args:
+            model: The model to use for cache filling
+            cache: The cache to fill
+            tokens: Tokens to process
+            progress_callback: Callback for reporting progress
+            start_progress: Starting progress percentage
+            end_progress: Ending progress percentage
+        """
+        chunk_size = 512  # Default chunk size
+        remaining_tokens = tokens
+        num_processed = 0
+        total_tokens = len(tokens)
+
+        while remaining_tokens.size > 0:
+            current_chunk_size = min(chunk_size, remaining_tokens.size)
+            current_chunk = remaining_tokens[:current_chunk_size]
+
+            model(current_chunk[None], cache=cache)
+            mx.eval([c.state for c in cache])
+
+            remaining_tokens = remaining_tokens[current_chunk_size:]
+            num_processed += current_chunk_size
+
+            # Scale progress to fit between start_progress and end_progress
+            progress = start_progress + (end_progress - start_progress) * (
+                num_processed / total_tokens
+            )
+            progress_callback(progress)
+            mx.metal.clear_cache()
+
+    def set_draft_model(self, draft_model: nn.Module):
+        if self.model is None:
+            raise ValueError("Cannot add a draft model to cache without a main model")
+        if self.max_kv_size is not None:
+            log_warn(prefix="CacheWrapper", message="Disabling max_kv_size when adding a draft model")
+            self.max_kv_size = None
+
+        # clear the current cache, append draft model cache to the end of the main model cache as per
+        # https://github.com/ml-explore/mlx-examples/blob/514502da22f0dc4c1ac439bdf78c07d5ec41acf7/llms/mlx_lm/utils.py#L381-L382
+        self.cache: List[Any] = make_prompt_cache(self.model)
+        if draft_model is not None:
+            self.cache += make_prompt_cache(draft_model)
+        self.draft_model = draft_model
+
+    def unset_draft_model(self):
+        if self.draft_model is None:
+            log_info(
+                prefix="CacheWrapper", message="No draft model to remove from cache"
+            )
+            return
+        self.draft_model = None
+        self.cache = self.cache[: len(self.model.layers)]
+
     def update_cache(
         self,
         prompt_tokens: mx.array,
@@ -144,21 +215,28 @@ class CacheWrapper:
         # Prefill the cache with the non-excluded prompt tokens
         prompt_progress_callback(0)
         prefill_tokens = prompt_tokens[:-num_tokens_to_exclude]
-        num_total_prefill_tokens = len(prefill_tokens)
-        processed: int = 0
-        chunk_default_size: int = 512
         with mx.stream(generation_stream):
-            while prefill_tokens.size > 0:
-                chunk_size = min(chunk_default_size, prefill_tokens.size)
-                chunk = prefill_tokens[:chunk_size]
-
-                self.model(chunk[None], cache=self.cache)
-                mx.eval([c.state for c in self.cache])
-
-                prefill_tokens = prefill_tokens[chunk_size:]
-                processed += chunk_size
-                prompt_progress_callback((processed / num_total_prefill_tokens) * 100)
-                mx.metal.clear_cache()
+            if self.draft_model is not None:
+                # Fill draft model cache (0% to 50% progress)
+                draft_cache = self.cache[len(self.model.layers) :]
+                self._prefill(
+                    model=self.draft_model,
+                    cache=draft_cache,
+                    tokens=prefill_tokens,
+                    progress_callback=prompt_progress_callback,
+                    start_progress=0,
+                    end_progress=50,
+                )
+            # Fill main model cache (50% to 100% progress for draft model, 0% to 100% otherwise)
+            main_cache = self.cache[: len(self.model.layers)]
+            self._prefill(
+                model=self.model,
+                cache=main_cache,
+                tokens=prefill_tokens,
+                progress_callback=prompt_progress_callback,
+                start_progress=50 if self.draft_model is not None else 0,
+                end_progress=100,
+            )
 
         # Return the tokens that must still be processed outside of the cache
         non_prefill_tokens = prompt_tokens[-num_tokens_to_exclude:]

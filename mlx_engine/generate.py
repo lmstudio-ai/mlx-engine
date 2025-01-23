@@ -55,9 +55,9 @@ def load_model(
         model_path (str | Path): Path to the model directory containing model files and config.json.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
         trust_remote_code (bool): Whether to allow loading of remote code during model initialization.
-        kv_bits (Optional[int]): Number of bits for KV cache quantization
-        kv_group_size (Optional[int]): Group size for KV cache quantization
-        quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled
+        kv_bits (Optional[int]): Number of bits for KV cache quantization.
+        kv_group_size (Optional[int]): Group size for KV cache quantization.
+        quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
@@ -74,7 +74,9 @@ def load_model(
 
     if "vision_config" in config_json:
         if any([kv_bits, kv_group_size, quantized_kv_start]):
-            raise ValueError("MLX vision models do not support KV cache quantization")
+            raise ValueError(
+                "MLX vision models do not currently support KV cache quantization"
+            )
         return VisionModelKit(model_path, trust_remote_code)
     else:
         return ModelKit(
@@ -84,6 +86,20 @@ def load_model(
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
+
+
+def load_draft_model(model_kit: ModelKit | VisionModelKit, path: str | Path) -> None:
+    model_kit.load_draft_model(path)
+
+
+def is_draft_model_compatible(
+    model_kit: ModelKit | VisionModelKit, path: str | Path
+) -> bool:
+    return model_kit.is_draft_model_compatible(path)
+
+
+def unload_draft_model(model_kit: ModelKit | VisionModelKit) -> None:
+    model_kit.unload_draft_model()
 
 
 def create_generator(
@@ -104,6 +120,7 @@ def create_generator(
     seed: Optional[int] = None,
     json_schema: Optional[str] = None,
     max_tokens: Optional[int] = 10000000,
+    num_draft_tokens: Optional[int] = None,
 ) -> Iterator[GenerationResult]:
     """
     Create a generator that streams text generation results from the model.
@@ -134,6 +151,7 @@ def create_generator(
         seed (Optional[int]): Random seed for reproducible generation
         json_schema (Optional[str]): JSON schema for structured output generation
         max_tokens (Optional[int]): Maximum number of tokens to generate. Defaults to 10000000
+        num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
 
     Yields:
         GenerationResult: A named tuple containing:
@@ -145,6 +163,7 @@ def create_generator(
 
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
+        ValueError: If num_draft_tokens is provided but no draft model is loaded
     """
     set_seed(seed)
 
@@ -169,6 +188,14 @@ def create_generator(
         logit_bias=None,
         **repetition_penalty_kwargs,
     )
+
+    # Set up speculative decoding
+    if num_draft_tokens is not None:
+        if type(model_kit) is not ModelKit or model_kit.draft_model is None:
+            raise ValueError(
+                "num_draft_tokens is only supported for text models with a loaded draft model"
+            )
+        generate_args["num_draft_tokens"] = num_draft_tokens
 
     # Process prompt
     stream_generate_input = model_kit.process_prompt(
@@ -292,6 +319,7 @@ def create_generator(
     for generation_result in mlx_lm.utils.stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
+        draft_model=model_kit.draft_model,
         prompt=stream_generate_input,
         max_tokens=max_tokens,
         **generate_args,

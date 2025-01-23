@@ -1,7 +1,8 @@
 import argparse
 import base64
+import time
 
-from mlx_engine.generate import load_model, create_generator, tokenize
+from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.model_kit import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 
 
@@ -9,6 +10,7 @@ DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
 
 Explain the rules of chess in one sentence.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 """
+DEFAULT_TEMP = 0.8
 
 
 def setup_arg_parser():
@@ -20,7 +22,7 @@ def setup_arg_parser():
         "--model",
         required=True,
         type=str,
-        help="The path to the local model directory.",
+        help="The file system path to the model",
     )
     parser.add_argument(
         "--prompt",
@@ -33,6 +35,12 @@ def setup_arg_parser():
         type=str,
         nargs="+",
         help="Path of the images to process",
+    )
+    parser.add_argument(
+        "--temp",
+        default=DEFAULT_TEMP,
+        type=float,
+        help="Sampling temperature",
     )
     parser.add_argument(
         "--stop-strings",
@@ -68,6 +76,21 @@ def setup_arg_parser():
         type=int,
         help="When --kv-bits is set, start quantizing the KV cache from this step onwards",
     )
+    parser.add_argument(
+        "--draft-model",
+        type=str,
+        help="The file system path to the draft model for speculative decoding.",
+    )
+    parser.add_argument(
+        "--num-draft-tokens",
+        type=int,
+        help="Number of tokens to draft when using speculative decoding.",
+    )
+    parser.add_argument(
+        "--print-prompt-progress",
+        action="store_true",
+        help="Enable printed prompt processing progress callback",
+    )
     return parser
 
 
@@ -76,12 +99,47 @@ def image_to_base64(image_path):
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 
+class GenerationStatsCollector:
+    def __init__(self):
+        self.start_time = time.time()
+        self.first_token_time = None
+        self.total_tokens = 0
+
+    def add_tokens(self, tokens):
+        """Record new tokens and their timing."""
+        if self.first_token_time is None:
+            self.first_token_time = time.time()
+        self.total_tokens += len(tokens)
+
+    def print_stats(self):
+        """Print generation statistics."""
+        end_time = time.time()
+        total_time = end_time - self.start_time
+        print(f"\n\nGeneration stats:")
+        print(f" - Time to first token: {self.first_token_time - self.start_time:.2f}s")
+        print(f" - Total tokens generated: {self.total_tokens}")
+        print(f" - Total time: {total_time:.2f}s")
+        print(f" - Tokens per second: {self.total_tokens / total_time:.2f}")
+
+
 if __name__ == "__main__":
     # Parse arguments
     parser = setup_arg_parser()
     args = parser.parse_args()
     if isinstance(args.images, str):
         args.images = [args.images]
+
+    # Set up prompt processing callback
+    def prompt_progress_callback(percent):
+        if args.print_prompt_progress:
+            width = 40  # bar width
+            filled = int(width * percent / 100)
+            bar = "█" * filled + "░" * (width - filled)
+            print(f"\rProcessing prompt: |{bar}| ({percent:.1f}%)", end="", flush=True)
+            if percent >= 100:
+                print()  # new line when done
+        else:
+            pass
 
     # Load the model
     model_path = args.model
@@ -93,6 +151,10 @@ if __name__ == "__main__":
         kv_group_size=args.kv_group_size,
         quantized_kv_start=args.quantized_kv_start,
     )
+
+    # Load draft model if requested
+    if args.draft_model:
+        load_draft_model(model_kit=model_kit, path=args.draft_model)
 
     # Tokenize the prompt
     prompt = args.prompt
@@ -108,6 +170,9 @@ if __name__ == "__main__":
     # Record top logprobs
     logprobs_list = []
 
+    # Initialize generation stats collector
+    stats_collector = GenerationStatsCollector()
+
     # Generate the response
     generator = create_generator(
         model_kit,
@@ -116,15 +181,22 @@ if __name__ == "__main__":
         stop_strings=args.stop_strings,
         max_tokens=1024,
         top_logprobs=args.top_logprobs,
+        prompt_progress_callback=prompt_progress_callback,
+        num_draft_tokens=args.num_draft_tokens,
+        temp=args.temp,
     )
     for generation_result in generator:
         print(generation_result.text, end="", flush=True)
+        stats_collector.add_tokens(generation_result.tokens)
         logprobs_list.extend(generation_result.top_logprobs)
+
         if generation_result.stop_condition:
+            stats_collector.print_stats()
             print(
-                f"\n\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
+                f"\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
             )
             if generation_result.stop_condition.stop_string:
                 print(f"Stop string: {generation_result.stop_condition.stop_string}")
+
     if args.top_logprobs:
         [print(x) for x in logprobs_list]

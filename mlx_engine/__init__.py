@@ -26,4 +26,11 @@ _set_outlines_cache_dir(Path("~/.cache/lm-studio/.internal/outlines"))
 """
 The API for `mlx_engine` is specified in generate.py
 """
-from .generate import load_model, create_generator, tokenize
+from .generate import (
+    load_model,
+    load_draft_model,
+    is_draft_model_compatible,
+    unload_draft_model,
+    create_generator,
+    tokenize,
+)

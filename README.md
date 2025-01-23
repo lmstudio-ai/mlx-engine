@@ -54,7 +54,7 @@ pip install -U -r requirements.txt
 
 ### Text Model Demo
 Download models with the `lms` CLI tool. The `lms` CLI documentation can be found here: https://lmstudio.ai/docs/cli
-Run the `demo.py` script with an MLX text model:
+Run the `demo.py` script with an MLX text generation model:
 ```bash
 lms get mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
@@ -83,6 +83,22 @@ Currently supported vision models include:
    - `lms get mlx-community/Qwen2-VL-7B-Instruct-4bit`
  - [Llava-v1.6](https://model.lmstudio.ai/download/mlx-community/llava-v1.6-mistral-7b-4bit)
    - `lms get mlx-community/llava-v1.6-mistral-7b-4bit`
+
+### Speculative Decoding Demo
+Run the `demo.py` script with an MLX text generation model and a compatible `--draft-model`
+```bash
+lms get mlx-community/Qwen2.5-7B-Instruct-4bit
+lms get lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit
+python demo.py \
+    --model ~/.lmstudio/models/mlx-community/Qwen2.5-7B-Instruct-4bit \
+    --draft-model ~/.lmstudio/models/lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit \
+    --prompt "<|im_start|>system
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Write a quick sort algorithm in C++<|im_end|>
+<|im_start|>assistant
+"
+```
 
 ## Testing
 
