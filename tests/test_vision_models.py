@@ -124,6 +124,18 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/Qwen2-VL-7B-Instruct-4bit", prompt, text_only=True
         )
 
+    def test_qwen2_5(self):
+        """Test Qwen2.5 VL 7B Instruct model"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<image> {self.description_prompt}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>assistant\n"
+        self.model_helper("mlx-community/Qwen2.5-VL-7B-Instruct-4bit", prompt)
+
+    def test_qwen2_5_text_only(self):
+        """Test Qwen2.5 VL 7B Instruct model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>assistant\n"
+        self.model_helper(
+            "mlx-community/Qwen2.5-VL-7B-Instruct-4bit", prompt, text_only=True
+        )
+
     def test_florence(self):
         """Test Florence 2 Large model"""
         prompt = self.description_prompt
