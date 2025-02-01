@@ -53,7 +53,10 @@ class ModelKit:
         )
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
-            log_warn("max_kv_size is ignored when using KV cache quantization")
+            log_warn(
+                prefix="ModelKit",
+                message="max_kv_size is ignored when using KV cache quantization",
+            )
             max_kv_size = None
 
         self.model_path = model_path
