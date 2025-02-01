@@ -15,6 +15,7 @@ from mlx_engine.stop_string_processor import (
     StopStringProcessorResult,
 )
 from mlx_engine.utils.set_seed import set_seed
+from mlx_engine.logging import log_info
 
 
 MAX_TOP_LOGPROBS = 10
@@ -191,11 +192,18 @@ def create_generator(
 
     # Set up speculative decoding
     if num_draft_tokens is not None:
-        if type(model_kit) is not ModelKit or model_kit.draft_model is None:
-            raise ValueError(
-                "num_draft_tokens is only supported for text models with a loaded draft model"
+        if type(model_kit) is not ModelKit:
+            log_info(
+                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
+                f"model_kit (type {type(model_kit).__name__}) must be a text ModelKit instance"
             )
-        generate_args["num_draft_tokens"] = num_draft_tokens
+        elif model_kit.draft_model is None:
+            log_info(
+                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
+                "no draft model loaded"
+            )
+        else:
+            generate_args["num_draft_tokens"] = num_draft_tokens
 
     # Process prompt
     stream_generate_input = model_kit.process_prompt(
