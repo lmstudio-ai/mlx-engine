@@ -192,17 +192,15 @@ def create_generator(
 
     # Set up speculative decoding
     if num_draft_tokens is not None:
-        can_use_draft = (
-            isinstance(model_kit, ModelKit) and model_kit.draft_model is not None
-        )
-        if not can_use_draft:
-            reason = (
-                "No draft model loaded"
-                if isinstance(model_kit, ModelKit)
-                else "model_kit must be of type ModelKit"
-            )
+        if type(model_kit) is not ModelKit:
             log_info(
-                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored. Reason: {reason}",
+                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
+                f"model_kit (type {type(model_kit).__name__}) must be a text ModelKit instance"
+            )
+        elif model_kit.draft_model is None:
+            log_info(
+                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
+                "no draft model loaded"
             )
         else:
             generate_args["num_draft_tokens"] = num_draft_tokens
