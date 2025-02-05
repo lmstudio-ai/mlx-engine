@@ -17,7 +17,17 @@ class TestSpeculativeDecoding(unittest.TestCase):
         """Set up test resources that will be shared across all test methods"""
         cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
 
-    def test_is_draft_model_compatible_true(self):
+    def test_is_draft_model_compatible_true_vocab_only_load(self):
+        model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
+        draft_model_path = model_getter(
+            "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
+        )
+        model_kit = load_model(model_path=model_path, vocab_only=True)
+        self.assertTrue(
+            is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+        )
+
+    def test_is_draft_model_compatible_true_full_model_load(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
@@ -27,7 +37,15 @@ class TestSpeculativeDecoding(unittest.TestCase):
             is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
         )
 
-    def test_is_draft_model_compatible_false_incompatible(self):
+    def test_is_draft_model_compatible_false_vocab_only_load(self):
+        model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
+        draft_model_path = model_getter("mlx-community/Llama-3.2-1B-Instruct-4bit")
+        model_kit = load_model(model_path=model_path, vocab_only=True)
+        self.assertFalse(
+            is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+        )
+
+    def test_is_draft_model_compatible_false_full_model_load(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         draft_model_path = model_getter("mlx-community/Llama-3.2-1B-Instruct-4bit")
         model_kit = load_model(model_path=model_path)

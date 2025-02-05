@@ -17,6 +17,7 @@ class VisionModelKit(ModelKit):
     config: dict = None
     trust_remote_code: bool = False
     model_path: Path = None
+    vocab_only: bool = False
 
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
@@ -24,16 +25,22 @@ class VisionModelKit(ModelKit):
     def __init__(
         self,
         model_path: Path,
+        vocab_only: bool,
         trust_remote_code: bool,
     ):
         self.config = mlx_vlm.utils.load_config(
             model_path, trust_remote_code=trust_remote_code
         )
         self.trust_remote_code = trust_remote_code
+        self.vocab_only = vocab_only
         self.model_path = model_path
         self._initializer()
 
-    def _initializer(self):
+    def _vocab_only_init(self):
+        self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
+        self.detokenizer = self.tokenizer.detokenizer
+    
+    def _full_model_init(self):
         self.model, self.processor = mlx_vlm.utils.load(
             self.model_path,
             processor_config={"trust_remote_code": self.trust_remote_code},
@@ -44,6 +51,12 @@ class VisionModelKit(ModelKit):
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = None
         mx.metal.clear_cache()
+
+    def _initializer(self):
+        if self.vocab_only:
+            self._vocab_only_init()
+        else:
+            self._full_model_init()
 
     def _reset(self):
         # it's a shortcoming that the only way to reset the model is to reload it

@@ -40,6 +40,7 @@ class GenerationResult(NamedTuple):
 def load_model(
     model_path: str | Path,
     *,
+    vocab_only: bool = False,
     max_kv_size: Optional[int] = 4096,
     trust_remote_code: bool = False,
     kv_bits: Optional[int] = None,
@@ -54,6 +55,7 @@ def load_model(
 
     Args:
         model_path (str | Path): Path to the model directory containing model files and config.json.
+        vocab_only (bool): Only load vocabulary/tokenizer, not the full model.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
         trust_remote_code (bool): Whether to allow loading of remote code during model initialization.
         kv_bits (Optional[int]): Number of bits for KV cache quantization.
@@ -78,10 +80,11 @@ def load_model(
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
             )
-        return VisionModelKit(model_path, trust_remote_code)
+        return VisionModelKit(model_path, vocab_only, trust_remote_code)
     else:
         return ModelKit(
             model_path,
+            vocab_only,
             max_kv_size,
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
@@ -152,6 +155,7 @@ def create_generator(
         seed (Optional[int]): Random seed for reproducible generation
         json_schema (Optional[str]): JSON schema for structured output generation
         max_tokens (Optional[int]): Maximum number of tokens to generate. Defaults to 10000000
+        speculative_decoding_enabled (bool): Whether to enable speculative decoding
         num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
 
     Yields:
