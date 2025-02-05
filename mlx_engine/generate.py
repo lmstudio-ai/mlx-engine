@@ -155,7 +155,6 @@ def create_generator(
         seed (Optional[int]): Random seed for reproducible generation
         json_schema (Optional[str]): JSON schema for structured output generation
         max_tokens (Optional[int]): Maximum number of tokens to generate. Defaults to 10000000
-        speculative_decoding_enabled (bool): Whether to enable speculative decoding
         num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
 
     Yields:
