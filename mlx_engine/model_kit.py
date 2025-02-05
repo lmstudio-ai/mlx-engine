@@ -23,6 +23,7 @@ class ModelKit:
 
     Args:
         model_path (Path): Path to the model directory containing model files.
+        vocab_only (bool): Only load vocabulary/tokenizer, not the full model.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
         kv_bits (Optional[int]): Number of bits for KV cache quantization. None disables quantization.
         kv_group_size (Optional[int]): Group size for KV cache quantization. Defaults to 64.
@@ -40,7 +41,16 @@ class ModelKit:
     quantized_kv_start: Optional[int] = None
     draft_model: Optional[nn.Module] = None
 
-    def __init__(
+    def _vocab_only_init(self, model_path: Path):
+        log_info(
+            prefix="ModelKit",
+            message=f"Loading model (vocab-only) from {model_path}...",
+        )
+        self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(model_path)
+        self.detokenizer = self.tokenizer.detokenizer
+        log_info(prefix="ModelKit", message="Model (vocab-only) loaded successfully")
+
+    def _full_model_init(
         self,
         model_path: Path,
         max_kv_size: Optional[int] = None,
@@ -68,6 +78,26 @@ class ModelKit:
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
         log_info(prefix="ModelKit", message="Model loaded successfully")
+
+    def __init__(
+        self,
+        model_path: Path,
+        vocab_only: bool = False,
+        max_kv_size: Optional[int] = None,
+        kv_bits: Optional[int] = None,
+        kv_group_size: Optional[int] = None,
+        quantized_kv_start: Optional[int] = None,
+    ):
+        if vocab_only:
+            self._vocab_only_init(model_path)
+        else:
+            self._full_model_init(
+                model_path,
+                max_kv_size,
+                kv_bits,
+                kv_group_size,
+                quantized_kv_start,
+            )
 
     @staticmethod
     def _validate_kv_cache_quantization_params(
@@ -127,8 +157,12 @@ class ModelKit:
 
     def is_draft_model_compatible(self, path: str | Path) -> bool:
         path = Path(path)
-        if self.model is None or self.tokenizer is None:
-            log_warn("Draft model will never be compatible without a main model loaded")
+        if self.tokenizer is None:
+            log_warn(
+                prefix="ModelKit",
+                message="Draft model compatibility check requires at least a vocab-only "
+                "loaded main model",
+            )
             return False
         draft_tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(path)
         if draft_tokenizer.vocab_size != self.tokenizer.vocab_size:
