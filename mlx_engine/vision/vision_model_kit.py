@@ -58,10 +58,10 @@ class VisionModelKit(ModelKit):
         else:
             self._full_model_init()
 
-    def _reset(self):
-        # it's a shortcoming that the only way to reset the model is to reload it
-        # worth investigating how to make resetting faster
-        self._initializer()
+    def _reset_for_prediction(self):
+        # It's a shortcoming that the only way to reset the model for prediction 
+        # is to reload it. Worth investigating how to make resetting faster
+        self._full_model_init()
 
     def process_prompt(
         self,
