@@ -1,6 +1,6 @@
 from typing import List, Optional, Any
 
-from mlx_engine.logging import log_info, log_warn
+from mlx_engine.logging import log_info
 from mlx_lm.models.cache import (
     make_prompt_cache,
     trim_prompt_cache,
