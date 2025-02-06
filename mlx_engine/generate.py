@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import mlx_lm
+import mlx.nn as nn
 
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
@@ -15,6 +16,10 @@ from mlx_engine.stop_string_processor import (
     StopStringProcessorResult,
 )
 from mlx_engine.utils.set_seed import set_seed
+from mlx_engine.utils.speculative_decoding import (
+    determine_draft_model_for_generation,
+    configure_num_draft_tokens_in_generate_args,
+)
 from mlx_engine.logging import log_info
 
 
@@ -124,6 +129,7 @@ def create_generator(
     seed: Optional[int] = None,
     json_schema: Optional[str] = None,
     max_tokens: Optional[int] = 10000000,
+    speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
 ) -> Iterator[GenerationResult]:
     """
@@ -155,6 +161,9 @@ def create_generator(
         seed (Optional[int]): Random seed for reproducible generation
         json_schema (Optional[str]): JSON schema for structured output generation
         max_tokens (Optional[int]): Maximum number of tokens to generate. Defaults to 10000000
+        speculative_decoding_toggle (Optional[bool]): If not set, use speculative decoding
+            if a draft model is loaded. If set to true, draft model must be loaded or else error.
+            If set to false, speculative decoding is disabled even if a draft model is loaded.
         num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
 
     Yields:
@@ -194,19 +203,12 @@ def create_generator(
     )
 
     # Set up speculative decoding
-    if num_draft_tokens is not None:
-        if type(model_kit) is not ModelKit:
-            log_info(
-                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
-                f"model_kit (type {type(model_kit).__name__}) must be a text ModelKit instance"
-            )
-        elif model_kit.draft_model is None:
-            log_info(
-                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
-                "no draft model loaded"
-            )
-        else:
-            generate_args["num_draft_tokens"] = num_draft_tokens
+    draft_model = determine_draft_model_for_generation(
+        model_kit, speculative_decoding_toggle
+    )
+    configure_num_draft_tokens_in_generate_args(
+        model_kit, draft_model, num_draft_tokens, generate_args
+    )
 
     # Process prompt
     stream_generate_input = model_kit.process_prompt(
@@ -215,6 +217,7 @@ def create_generator(
         prompt_progress_callback,
         repetition_context_size,
         generate_args,
+        speculative_decoding_toggle,
     )
 
     # Set up sampler
@@ -330,7 +333,7 @@ def create_generator(
     for generation_result in mlx_lm.utils.stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
-        draft_model=model_kit.draft_model,
+        draft_model=draft_model,
         prompt=stream_generate_input,
         max_tokens=max_tokens,
         **generate_args,
