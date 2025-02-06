@@ -1,6 +1,6 @@
 from typing import List, Optional, Any
 
-from mlx_engine.logging import log_info, log_warn
+from mlx_engine.logging import log_info
 from mlx_lm.models.cache import (
     make_prompt_cache,
     trim_prompt_cache,
@@ -164,14 +164,31 @@ class CacheWrapper:
             mx.metal.clear_cache()
 
     def set_draft_model(self, draft_model: nn.Module):
+        """
+        Sets or updates the draft model to use in the cache.
+
+        If the provided draft_model is already set, returns without changes.
+        Otherwise, clears existing cache and rebuilds it by combining caches
+        from the main model and draft model. Requires a main model to be set first.
+
+        Args:
+            draft_model: The draft model to cache. Pass None to remove draft model.
+
+        Raises:
+            ValueError: If main model hasn't been set yet.
+        """
         if self.model is None:
             raise ValueError("Cannot add a draft model to cache without a main model")
         if self.max_kv_size is not None:
-            log_warn(
+            log_info(
                 prefix="CacheWrapper",
-                message="Disabling max_kv_size when adding a draft model",
+                message="Disabling max_kv_size when setting a draft model for cache",
             )
             self.max_kv_size = None
+
+        if self.draft_model is draft_model:
+            # Skip if the exact same draft model instance is already in cache
+            return
 
         # clear the current cache, append draft model cache to the end of the main model cache as per
         # https://github.com/ml-explore/mlx-examples/blob/514502da22f0dc4c1ac439bdf78c07d5ec41acf7/llms/mlx_lm/utils.py#L381-L382
@@ -181,10 +198,8 @@ class CacheWrapper:
         self.draft_model = draft_model
 
     def unset_draft_model(self):
+        """Removes the draft model from the cache if one exists."""
         if self.draft_model is None:
-            log_info(
-                prefix="CacheWrapper", message="No draft model to remove from cache"
-            )
             return
         self.draft_model = None
         self.cache = self.cache[: len(self.model.layers)]

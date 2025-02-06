@@ -130,6 +130,7 @@ class ModelKit:
         prompt_progress_callback,
         repetition_context_size,
         generate_args,
+        speculative_decoding_toggle: Optional[bool] = None,
     ) -> mx.array:
         """
         This method processes the prompt, adding its tokens to the cache history
@@ -141,6 +142,22 @@ class ModelKit:
         """
         if len(prompt_tokens) == 0:
             raise ValueError("Prompt tokens must be non-empty")
+
+        # Make sure cache's draft model setting aligns with speculative decoding toggle
+        should_use_draft_model = (
+            speculative_decoding_toggle
+            if speculative_decoding_toggle is not None
+            else self.draft_model is not None
+        )
+        if should_use_draft_model:
+            if not self.draft_model:
+                raise ValueError(
+                    "Speculative decoding toggle is enabled for prompt processing but no "
+                    "draft model is loaded"
+                )
+            self.cache_wrapper.set_draft_model(self.draft_model)
+        else:
+            self.cache_wrapper.unset_draft_model()
 
         # Check for common tokens with the previous cache and re-use the cache if possible
         prompt_tokens = self.cache_wrapper.update_cache(

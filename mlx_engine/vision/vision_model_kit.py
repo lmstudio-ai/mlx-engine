@@ -6,6 +6,7 @@ from .vision_model_wrapper import VisionModelWrapper
 import mlx_vlm
 from pathlib import Path
 import mlx.core as mx
+import mlx.nn as nn
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 
@@ -39,7 +40,7 @@ class VisionModelKit(ModelKit):
     def _vocab_only_init(self):
         self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
-    
+
     def _full_model_init(self):
         self.model, self.processor = mlx_vlm.utils.load(
             self.model_path,
@@ -59,7 +60,7 @@ class VisionModelKit(ModelKit):
             self._full_model_init()
 
     def _reset_for_prediction(self):
-        # It's a shortcoming that the only way to reset the model for prediction 
+        # It's a shortcoming that the only way to reset the model for prediction
         # is to reload it. Worth investigating how to make resetting faster
         self._full_model_init()
 
@@ -70,6 +71,7 @@ class VisionModelKit(ModelKit):
         prompt_progress_callback,
         repetition_context_size,
         generate_args,
+        speculative_decoding_toggle: Optional[bool] = None,
     ) -> mx.array:
         """
         Call this before starting evaluation
