@@ -192,6 +192,11 @@ class CacheWrapper:
 
         # clear the current cache, append draft model cache to the end of the main model cache as per
         # https://github.com/ml-explore/mlx-examples/blob/514502da22f0dc4c1ac439bdf78c07d5ec41acf7/llms/mlx_lm/utils.py#L381-L382
+        log_info(
+            prefix="CacheWrapper",
+            message="Clearing current prompt cache and adding draft model to the cache",
+        )
+        self.tokens = None
         self.cache: List[Any] = make_prompt_cache(self.model)
         if draft_model is not None:
             self.cache += make_prompt_cache(draft_model)
