@@ -180,7 +180,7 @@ class CacheWrapper:
         if self.model is None:
             raise ValueError("Cannot add a draft model to cache without a main model")
         if self.max_kv_size is not None:
-            log_warn(
+            log_info(
                 prefix="CacheWrapper",
                 message="Disabling max_kv_size when setting a draft model for cache",
             )
