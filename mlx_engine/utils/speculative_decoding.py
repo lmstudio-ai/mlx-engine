@@ -35,7 +35,7 @@ def configure_num_draft_tokens_in_generate_args(
     draft_model: Optional[nn.Module],
     num_draft_tokens: Optional[int],
     generate_args: dict,
-) -> dict:
+):
     """
     Modifies generate_args in place to include num_draft_tokens if applicable
     """

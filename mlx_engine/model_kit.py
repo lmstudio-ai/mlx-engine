@@ -147,7 +147,7 @@ class ModelKit:
         should_use_draft_model = (
             speculative_decoding_toggle
             if speculative_decoding_toggle is not None
-            else bool(self.draft_model)
+            else self.draft_model is not None
         )
         if should_use_draft_model:
             if not self.draft_model:
