@@ -115,11 +115,15 @@ class GenerationStatsCollector:
         """Print generation statistics."""
         end_time = time.time()
         total_time = end_time - self.start_time
+        time_to_first_token = self.first_token_time - self.start_time
+        effective_time = total_time - time_to_first_token
+        tokens_per_second = self.total_tokens / effective_time if effective_time > 0 else float("inf")
         print(f"\n\nGeneration stats:")
-        print(f" - Time to first token: {self.first_token_time - self.start_time:.2f}s")
+        print(f" - Time to first token: {time_to_first_token:.2f}s")
         print(f" - Total tokens generated: {self.total_tokens}")
         print(f" - Total time: {total_time:.2f}s")
-        print(f" - Tokens per second: {self.total_tokens / total_time:.2f}")
+        print(f" - Tokens per second: {tokens_per_second:.2f}")
+
 
 
 if __name__ == "__main__":
