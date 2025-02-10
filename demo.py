@@ -112,11 +112,12 @@ class GenerationStatsCollector:
         """Record new tokens and their timing."""
         if self.first_token_time is None:
             self.first_token_time = time.time()
-        for token in tokens:
-            if token.from_draft:
-                if self.num_accepted_draft_tokens is None:
-                    self.num_accepted_draft_tokens = 0
-                self.num_accepted_draft_tokens += 1
+            
+        draft_tokens = sum(1 for token in tokens if token.from_draft)
+        if draft_tokens and self.num_accepted_draft_tokens is None:
+            self.num_accepted_draft_tokens = 0
+        self.num_accepted_draft_tokens += draft_tokens
+            
         self.total_tokens += len(tokens)
 
     def print_stats(self):
