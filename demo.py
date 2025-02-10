@@ -1,7 +1,6 @@
 import argparse
 import base64
 import time
-from typing import List
 
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
@@ -108,13 +107,13 @@ class GenerationStatsCollector:
         self.total_tokens = 0
         self.num_accepted_draft_tokens: int | None = None
 
-    def add_tokens(self, tokens: List[Token]):
+    def add_tokens(self, tokens: list[Token]):
         """Record new tokens and their timing."""
         if self.first_token_time is None:
             self.first_token_time = time.time()
             
         draft_tokens = sum(1 for token in tokens if token.from_draft)
-        if draft_tokens and self.num_accepted_draft_tokens is None:
+        if self.num_accepted_draft_tokens is None:
             self.num_accepted_draft_tokens = 0
         self.num_accepted_draft_tokens += draft_tokens
             
