@@ -5,12 +5,12 @@ from pathlib import Path
 import sys
 
 import mlx_lm
-import mlx.nn as nn
 
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
-from mlx_engine.utils.top_logprobs import summarize_top_logprobs, TokenLogprob
+from mlx_engine.utils.token import Token
+from mlx_engine.utils.top_logprobs import summarize_top_logprobs
 from mlx_engine.stop_string_processor import (
     StopStringProcessor,
     StopStringProcessorResult,
@@ -20,7 +20,6 @@ from mlx_engine.utils.speculative_decoding import (
     determine_draft_model_for_generation,
     configure_num_draft_tokens_in_generate_args,
 )
-from mlx_engine.logging import log_info
 
 
 MAX_TOP_LOGPROBS = 10
@@ -37,8 +36,8 @@ class GenerationStopCondition(NamedTuple):
 
 class GenerationResult(NamedTuple):
     text: str
-    tokens: List[TokenLogprob]
-    top_logprobs: List[List[TokenLogprob]]
+    tokens: List[Token]
+    top_logprobs: List[List[Token]]
     stop_condition: Optional[GenerationStopCondition]
 
 
@@ -262,8 +261,8 @@ def create_generator(
         )
 
     # Keep track of tokens buffered by detokenizer to yield accurate generation results
-    token_buffer: List[TokenLogprob] = []
-    top_logprobs_buffer: List[List[TokenLogprob]] = []
+    token_buffer: List[Token] = []
+    top_logprobs_buffer: List[List[Token]] = []
 
     tokenizer = model_kit.tokenizer
 
@@ -282,8 +281,8 @@ def create_generator(
         tokenizer,
         stop_string_processor_result: StopStringProcessorResult,
         text: str,
-        token_buffer: List[TokenLogprob],
-        top_logprobs_buffer: List[List[TokenLogprob]],
+        token_buffer: List[Token],
+        top_logprobs_buffer: List[List[Token]],
     ) -> GenerationResult:
         """
         Helper method to Handle completion of text generation when a stop string is
@@ -345,7 +344,12 @@ def create_generator(
 
         logprobs = generation_result.logprobs
         token_buffer.append(
-            TokenLogprob(token, tokenizer.decode(token), float(logprobs[token]))
+            Token(
+                token,
+                tokenizer.decode(token),
+                float(logprobs[token]),
+                from_draft=generation_result.from_draft,
+            )
         )
         if top_logprobs:
             top_logprobs_buffer.append(

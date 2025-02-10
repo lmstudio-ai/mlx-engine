@@ -1,17 +1,11 @@
-from typing import NamedTuple
+from mlx_engine.utils.token import Token
 
 import mlx.core as mx
 
 
-class TokenLogprob(NamedTuple):
-    id: int
-    text: str
-    logprob: float
-
-
 def summarize_top_logprobs(
     tokenizer, logprobs: mx.array, top_logprobs: int
-) -> list[TokenLogprob]:
+) -> list[Token]:
     # find the sorted indices (in descending order) of the logprobs
     sorted_indices = mx.argsort(-logprobs)
 
@@ -27,7 +21,7 @@ def summarize_top_logprobs(
 
     # return list of TokenLogprob with id (int), text (str), and logprob (float)
     return [
-        TokenLogprob(int(idx), txt, float(prob))
+        Token(id=int(idx), text=txt, logprob=float(prob))
         for idx, txt, prob in zip(
             top_indices.tolist(), text_list, top_logprobs.tolist()
         )
