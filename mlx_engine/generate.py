@@ -345,7 +345,12 @@ def create_generator(
 
         logprobs = generation_result.logprobs
         token_buffer.append(
-            TokenLogprob(token, tokenizer.decode(token), float(logprobs[token]))
+            TokenLogprob(
+                token,
+                tokenizer.decode(token),
+                float(logprobs[token]),
+                from_draft=generation_result.from_draft,
+            )
         )
         if top_logprobs:
             top_logprobs_buffer.append(

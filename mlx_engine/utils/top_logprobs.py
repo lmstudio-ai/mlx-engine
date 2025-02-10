@@ -7,6 +7,7 @@ class TokenLogprob(NamedTuple):
     id: int
     text: str
     logprob: float
+    from_draft: bool
 
 
 def summarize_top_logprobs(

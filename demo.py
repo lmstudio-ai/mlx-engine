@@ -104,11 +104,15 @@ class GenerationStatsCollector:
         self.start_time = time.time()
         self.first_token_time = None
         self.total_tokens = 0
+        self.num_accepted_draft_tokens = 0
 
     def add_tokens(self, tokens):
         """Record new tokens and their timing."""
         if self.first_token_time is None:
             self.first_token_time = time.time()
+        for token in tokens:
+            if token.from_draft:
+                self.num_accepted_draft_tokens += 1
         self.total_tokens += len(tokens)
 
     def print_stats(self):
@@ -123,6 +127,7 @@ class GenerationStatsCollector:
         print(f" - Total tokens generated: {self.total_tokens}")
         print(f" - Total time: {total_time:.2f}s")
         print(f" - Tokens per second: {tokens_per_second:.2f}")
+        print(f" - Number of accepted draft tokens: {self.num_accepted_draft_tokens}")
 
 
 
