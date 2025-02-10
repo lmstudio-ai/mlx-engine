@@ -5,7 +5,6 @@ from pathlib import Path
 import sys
 
 import mlx_lm
-import mlx.nn as nn
 
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
