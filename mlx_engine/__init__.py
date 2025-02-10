@@ -33,4 +33,5 @@ from .generate import (
     unload_draft_model,
     create_generator,
     tokenize,
+    Token,
 )

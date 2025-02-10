@@ -1,8 +1,9 @@
 import argparse
 import base64
 import time
+from typing import List
 
-from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
+from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize, Token
 from mlx_engine.model_kit import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 
 
@@ -104,14 +105,16 @@ class GenerationStatsCollector:
         self.start_time = time.time()
         self.first_token_time = None
         self.total_tokens = 0
-        self.num_accepted_draft_tokens = 0
+        self.num_accepted_draft_tokens: int | None = None
 
-    def add_tokens(self, tokens):
+    def add_tokens(self, tokens: List[Token]):
         """Record new tokens and their timing."""
         if self.first_token_time is None:
             self.first_token_time = time.time()
         for token in tokens:
             if token.from_draft:
+                if self.num_accepted_draft_tokens is None:
+                    self.num_accepted_draft_tokens = 0
                 self.num_accepted_draft_tokens += 1
         self.total_tokens += len(tokens)
 
@@ -123,11 +126,12 @@ class GenerationStatsCollector:
         effective_time = total_time - time_to_first_token
         tokens_per_second = self.total_tokens / effective_time if effective_time > 0 else float("inf")
         print(f"\n\nGeneration stats:")
+        print(f" - Tokens per second: {tokens_per_second:.2f}")
+        if self.num_accepted_draft_tokens is not None:
+            print(f" - Number of accepted draft tokens: {self.num_accepted_draft_tokens}")
         print(f" - Time to first token: {time_to_first_token:.2f}s")
         print(f" - Total tokens generated: {self.total_tokens}")
         print(f" - Total time: {total_time:.2f}s")
-        print(f" - Tokens per second: {tokens_per_second:.2f}")
-        print(f" - Number of accepted draft tokens: {self.num_accepted_draft_tokens}")
 
 
 
