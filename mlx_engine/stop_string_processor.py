@@ -126,7 +126,7 @@ class StopStringProcessor:
         return result
 
     def _check_incomplete_utf8(self, string: str) -> Optional[_StoppingCriteriaResult]:
-        if string[-1] == REPLACEMENT_CHAR:
+        if len(string) == 0 or string[-1] == REPLACEMENT_CHAR:
             return self._StoppingCriteriaResult(status="multi_byte", stop_string=None)
         return None
 
