@@ -58,7 +58,7 @@ class TestStructuredGen(unittest.TestCase):
         )
         self._generate_and_validate(model_kit, prompt_tokens)
 
-    @unittest.skip("Temporarily disabled due to bug, should work")
+    # @unittest.skip("Temporarily disabled due to bug, should work")
     def test_structured_gen_with_json_schema_speculative_decoding(self):
         """Test structured generation with a JSON schema + spec decoding."""
         model_kit, prompt_tokens = model_load_and_tokenize_prompt(
