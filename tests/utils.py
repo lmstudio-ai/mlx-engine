@@ -2,7 +2,8 @@ from pathlib import Path
 import sys
 import subprocess
 
-from mlx_engine.generate import load_model, tokenize
+from mlx_engine.generate import load_model, load_draft_model, tokenize
+
 
 def model_getter(model_name: str):
     """Helper method to get a model, prompt user to download if not found"""
@@ -26,10 +27,17 @@ def model_getter(model_name: str):
         else:
             print(f"Model {model_name} not found")
             sys.exit(1)
-    
+
     return model_path
 
-def model_load_and_tokenize_prompt(model_name: str, prompt: str, max_kv_size=4096, trust_remote_code=False, text_only=False, images_b64=None):
+
+def model_load_and_tokenize_prompt(
+    model_name: str,
+    prompt: str,
+    max_kv_size=4096,
+    trust_remote_code=False,
+    draft_model_name=None,
+):
     """Helper method to test a model"""
     print(f"Testing model {model_name}")
 
@@ -38,8 +46,15 @@ def model_load_and_tokenize_prompt(model_name: str, prompt: str, max_kv_size=409
 
     # Load the model
     model_kit = load_model(
-        model_path=model_path, max_kv_size=max_kv_size, trust_remote_code=trust_remote_code
+        model_path=model_path,
+        max_kv_size=max_kv_size,
+        trust_remote_code=trust_remote_code,
     )
+
+    # Load the draft model if any
+    if draft_model_name is not None:
+        draft_model_path = model_getter(draft_model_name)
+        load_draft_model(model_kit, draft_model_path)
 
     # Tokenize the prompt
     prompt_tokens = tokenize(model_kit, prompt)

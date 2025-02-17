@@ -6,13 +6,10 @@ from .utils import model_load_and_tokenize_prompt
 
 
 class TestStructuredGen(unittest.TestCase):
-    def test_structured_gen_with_json_schema(self):
-        """Test structured generation with a JSON schema."""
-        prompt = "List three colors and their hex codes."
-        model_name = "mlx-community/Llama-3.2-1B-Instruct-4bit"
-        model_kit, prompt_tokens = model_load_and_tokenize_prompt(model_name, prompt)
-
-        json_schema = """
+    def setUp(self):
+        self.prompt = "List three colors and their hex codes."
+        self.model_name = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+        self.json_schema = """
         {
             "type": "object",
             "properties": {
@@ -32,14 +29,14 @@ class TestStructuredGen(unittest.TestCase):
         }
         """
 
+    def _generate_and_validate(self, model_kit, prompt_tokens):
         generator = create_generator(
             model_kit,
             prompt_tokens,
-            json_schema=json_schema,
+            json_schema=self.json_schema,
             max_tokens=1024,
         )
 
-        # Collect all generated text
         generated_text = ""
         for generation_result in generator:
             generated_text += generation_result.text
@@ -53,3 +50,18 @@ class TestStructuredGen(unittest.TestCase):
         self.assertIn("colors", generated_text)
         self.assertIn("name", generated_text)
         self.assertIn("hex", generated_text)
+
+    def test_structured_gen_with_json_schema(self):
+        """Test structured generation with a JSON schema."""
+        model_kit, prompt_tokens = model_load_and_tokenize_prompt(
+            self.model_name, self.prompt
+        )
+        self._generate_and_validate(model_kit, prompt_tokens)
+
+    @unittest.skip("Temporarily disabled due to bug, should work")
+    def test_structured_gen_with_json_schema_speculative_decoding(self):
+        """Test structured generation with a JSON schema + spec decoding."""
+        model_kit, prompt_tokens = model_load_and_tokenize_prompt(
+            self.model_name, self.prompt, draft_model_name=self.model_name
+        )
+        self._generate_and_validate(model_kit, prompt_tokens)
