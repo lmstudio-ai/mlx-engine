@@ -29,10 +29,14 @@ class TestStructuredGen(unittest.TestCase):
         }
         """
 
-    def _generate_and_validate(self, model_kit, prompt_tokens):
+    def test_structured_gen_with_json_schema(self):
+        model_kit, prompt_tokens = model_load_and_tokenize_prompt(
+            self.model_name, self.prompt
+        )
+        
         generator = create_generator(
             model_kit,
-            prompt_tokens,
+            prompt_tokens, 
             json_schema=self.json_schema,
             max_tokens=1024,
         )
@@ -44,24 +48,34 @@ class TestStructuredGen(unittest.TestCase):
                 break
 
         print(f"Generated text:\n{generated_text}")
-        # Basic validation that the output looks like JSON
         self.assertTrue(generated_text.strip().startswith("{"))
         self.assertTrue(generated_text.strip().endswith("}"))
         self.assertIn("colors", generated_text)
         self.assertIn("name", generated_text)
         self.assertIn("hex", generated_text)
 
-    def test_structured_gen_with_json_schema(self):
-        """Test structured generation with a JSON schema."""
-        model_kit, prompt_tokens = model_load_and_tokenize_prompt(
-            self.model_name, self.prompt
-        )
-        self._generate_and_validate(model_kit, prompt_tokens)
-
-    # @unittest.skip("Temporarily disabled due to bug, should work")
     def test_structured_gen_with_json_schema_speculative_decoding(self):
-        """Test structured generation with a JSON schema + spec decoding."""
+        # Uses same model for main and draft, not a speed test
         model_kit, prompt_tokens = model_load_and_tokenize_prompt(
             self.model_name, self.prompt, draft_model_name=self.model_name
         )
-        self._generate_and_validate(model_kit, prompt_tokens)
+
+        generator = create_generator(
+            model_kit,
+            prompt_tokens,
+            json_schema=self.json_schema, 
+            max_tokens=1024,
+        )
+
+        generated_text = ""
+        for generation_result in generator:
+            generated_text += generation_result.text
+            if generation_result.stop_condition:
+                break
+
+        print(f"Generated text:\n{generated_text}")
+        self.assertTrue(generated_text.strip().startswith("{"))
+        self.assertTrue(generated_text.strip().endswith("}"))
+        self.assertIn("colors", generated_text)
+        self.assertIn("name", generated_text)
+        self.assertIn("hex", generated_text)
