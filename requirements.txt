@@ -34,7 +34,7 @@ lark==1.2.2
 markdown-it-py==3.0.0
 markupsafe==2.1.5
 mdurl==0.1.2
-mlx-lm @ git+https://github.com/ml-explore/mlx-examples@7b07b14#subdirectory=llms
+mlx-lm @ git+https://github.com/ml-explore/mlx-examples@3d677f0#subdirectory=llms
 mlx-vlm==0.1.13
 mlx==0.23.0
 mpmath==1.3.0
@@ -83,7 +83,7 @@ tokenizers==0.21.0
 tomlkit==0.13.2
 torch==2.5.1
 tqdm==4.67.1
-transformers @ git+https://github.com/huggingface/transformers@62db3e6
+transformers==4.49.0.dev0
 typer==0.15.1
 typing-extensions==4.12.2
 tzdata==2025.1
