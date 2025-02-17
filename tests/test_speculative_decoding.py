@@ -104,6 +104,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         prompt = "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
         prompt_tokens = tokenize(model_kit, prompt)
         generated_text = ""
+        from_draft_count = 0
         for result in create_generator(
             model_kit=model_kit,
             prompt_tokens=prompt_tokens,
@@ -111,6 +112,9 @@ class TestSpeculativeDecoding(unittest.TestCase):
             max_tokens=10,
             temp=0.0,
         ):
+            for token in result.tokens:
+                if token.from_draft:
+                    from_draft_count += 1
             generated_text += result.text
             if result.stop_condition:
                 break
@@ -121,6 +125,11 @@ class TestSpeculativeDecoding(unittest.TestCase):
         self.assertTrue(
             paris_in_response,
             f"Model failed to respond correctly",
+        )
+        self.assertGreaterEqual(
+            from_draft_count,
+            3,
+            "Less draft tokens accepted than expected",
         )
 
 
