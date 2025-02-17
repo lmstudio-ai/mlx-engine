@@ -83,7 +83,7 @@ tokenizers==0.21.0
 tomlkit==0.13.2
 torch==2.5.1
 tqdm==4.67.1
-transformers==4.49.0.dev0
+transformers @ git+https://github.com/huggingface/transformers@62db3e6
 typer==0.15.1
 typing-extensions==4.12.2
 tzdata==2025.1
