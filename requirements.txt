@@ -36,7 +36,7 @@ markupsafe==2.1.5
 mdurl==0.1.2
 mlx-lm @ git+https://github.com/ml-explore/mlx-examples@3d677f0#subdirectory=llms
 mlx-vlm==0.1.13
-mlx==0.23.0
+mlx==0.23.1
 mpmath==1.3.0
 multidict==6.1.0
 multiprocess==0.70.16
