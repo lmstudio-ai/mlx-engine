@@ -19,6 +19,7 @@ class VisionModelKit(ModelKit):
     trust_remote_code: bool = False
     model_path: Path = None
     vocab_only: bool = False
+    model_weights = None
 
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
@@ -42,11 +43,19 @@ class VisionModelKit(ModelKit):
         self.detokenizer = self.tokenizer.detokenizer
 
     def _full_model_init(self):
-        self.model, self.processor = mlx_vlm.utils.load(
+        addl_kwargs = {}
+        if self.model_weights:
+            addl_kwargs["weights"] = self.model_weights
+        return_tuple = mlx_vlm.utils.load(
             self.model_path,
             processor_config={"trust_remote_code": self.trust_remote_code},
             trust_remote_code=self.trust_remote_code,
+            **addl_kwargs,
         )
+        if len(return_tuple) == 2:
+            self.model, self.processor = return_tuple
+        else:
+            self.model, self.processor, self.model_weights = return_tuple
         self.model = VisionModelWrapper(self.model)
         self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
