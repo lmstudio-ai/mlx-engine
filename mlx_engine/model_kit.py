@@ -1,5 +1,5 @@
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from mlx_engine.logging import log_info, log_warn
 import mlx_lm
@@ -59,7 +59,7 @@ class ModelKit:
         quantized_kv_start: Optional[int] = None,
     ):
         kv_bits, kv_group_size, quantized_kv_start = (
-            self._set_kv_cache_quantization_params(
+            self._get_kv_cache_quantization_params(
                 kv_bits, kv_group_size, quantized_kv_start
             )
         )
@@ -108,13 +108,24 @@ class ModelKit:
             )
 
     @staticmethod
-    def _set_kv_cache_quantization_params(
+    def _get_kv_cache_quantization_params(
         kv_bits: Optional[int],
         kv_group_size: Optional[int],
         quantized_kv_start: Optional[int],
-    ) -> tuple:
+    ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
         """
-        Helper function to set KV cache quantization parameters
+        Validates and processes KV cache quantization parameters.
+
+        Args:
+            kv_bits: Number of bits for quantization. If None, disables quantization.
+            kv_group_size: Group size for quantization. Defaults to 64 if quantization enabled.
+            quantized_kv_start: Step to begin quantization. Defaults to 0 if quantization enabled.
+
+        Returns:
+            Tuple of (kv_bits, kv_group_size, quantized_kv_start), all None if quantization disabled.
+
+        Raises:
+            ValueError: If kv_bits is invalid or missing when other params are set.
         """
         if any([kv_group_size, quantized_kv_start]) and kv_bits is None:
             raise ValueError(
