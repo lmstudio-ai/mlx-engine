@@ -6,7 +6,7 @@ from mlx_lm.models.cache import (
     trim_prompt_cache,
     can_trim_prompt_cache,
 )
-from mlx_lm.utils import generation_stream
+from mlx_lm.utils import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
@@ -21,7 +21,11 @@ class CacheWrapper:
         self,
         model: nn.Module,
         max_kv_size: Optional[int],
+        *,
         verbose: bool = False,
+        kv_bits: Optional[int] = None,
+        kv_group_size: Optional[int] = None,
+        quantized_kv_start: Optional[int] = None,
     ):
         """
         Initialize the CacheWrapper.
@@ -37,6 +41,11 @@ class CacheWrapper:
         self.draft_model: Optional[nn.Module] = None
         self.max_kv_size = max_kv_size
         self.verbose = verbose
+        self.kv_cache_qtn_params = dict(
+            kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+        )
 
     @staticmethod
     def _find_common_prefix(
@@ -151,6 +160,7 @@ class CacheWrapper:
             current_chunk = remaining_tokens[:current_chunk_size]
 
             model(current_chunk[None], cache=cache)
+            maybe_quantize_kv_cache(prompt_cache=cache, **self.kv_cache_qtn_params)
             mx.eval([c.state for c in cache])
 
             remaining_tokens = remaining_tokens[current_chunk_size:]
