@@ -43,14 +43,14 @@ class VisionModelKit(ModelKit):
         self.detokenizer = self.tokenizer.detokenizer
 
     def _full_model_init(self):
-        addl_kwargs = {}
+        additional_kwargs = {}
         if self.model_weights:
-            addl_kwargs["weights"] = self.model_weights
+            additional_kwargs["weights"] = self.model_weights
         return_tuple = mlx_vlm.utils.load(
             self.model_path,
             processor_config={"trust_remote_code": self.trust_remote_code},
             trust_remote_code=self.trust_remote_code,
-            **addl_kwargs,
+            **additional_kwargs,
         )
         if len(return_tuple) == 2:
             self.model, self.processor = return_tuple
