@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -56,7 +57,9 @@ class TestStructuredGen(unittest.TestCase):
         self.assertIn("name", generated_text)
         self.assertIn("hex", generated_text)
 
-    @unittest.skip("Temporarily disabled until logits_processors are fixed for sd")
+        # throw if not valid JSON
+        json.loads(generated_text)
+
     def test_structured_gen_with_json_schema_speculative_decoding(self):
         # Uses same model for main and draft, not a speed test
         model_kit, prompt_tokens = model_load_and_tokenize_prompt(
@@ -82,3 +85,6 @@ class TestStructuredGen(unittest.TestCase):
         self.assertIn("colors", generated_text)
         self.assertIn("name", generated_text)
         self.assertIn("hex", generated_text)
+
+        # throw if not valid JSON
+        json.loads(generated_text)

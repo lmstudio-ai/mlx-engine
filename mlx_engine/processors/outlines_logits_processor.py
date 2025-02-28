@@ -6,9 +6,7 @@ import json
 
 
 class OutlinesLogitsProcessor:
-    processed_token_count: int = 0
-
-    def __init__(self, model_kit: ModelKit, json_schema: str):
+    def __init__(self, model_kit: ModelKit, json_schema: str, prompt_tokens: mx.array):
         # Sanity check the json schema
         json.loads(json_schema)
 
@@ -17,12 +15,10 @@ class OutlinesLogitsProcessor:
             TransformerTokenizer(model_kit.tokenizer._tokenizer),
         )
 
+        self.prompt_tokens = prompt_tokens
+
     def __call__(self, tokens: mx.array, logits: mx.array):
-        generated_tokens = (
-            tokens[-self.processed_token_count :]
-            if self.processed_token_count > 0
-            else []
-        )
+        generated_tokens = tokens[len(self.prompt_tokens) :]
 
         if logits.dtype == mx.bfloat16:
             logits = logits.astype(mx.float32)
@@ -30,5 +26,4 @@ class OutlinesLogitsProcessor:
         logits_1d = self.logits_processor(generated_tokens, logits_1d)
         logits = logits_1d.reshape(1, -1)
 
-        self.processed_token_count += 1
         return logits

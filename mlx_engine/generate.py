@@ -249,7 +249,7 @@ def create_generator(
     is_structured_output_request = json_schema is not None
     if is_structured_output_request:
         generate_args["logits_processors"].append(
-            OutlinesLogitsProcessor(model_kit, json_schema)
+            OutlinesLogitsProcessor(model_kit, json_schema, stream_generate_input)
         )
 
     # Validate top_logprobs
