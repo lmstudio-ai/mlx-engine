@@ -1,5 +1,5 @@
 from outlines.processors.structured import JSONLogitsProcessor
-from outlines.models.transformers import TransformerTokenizer
+from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
 from mlx_engine.model_kit import ModelKit
 import mlx.core as mx
 import json
@@ -12,7 +12,7 @@ class OutlinesLogitsProcessor:
 
         self.logits_processor = JSONLogitsProcessor(
             json_schema,
-            TransformerTokenizer(model_kit.tokenizer._tokenizer),
+            OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
         )
 
         self.prompt_tokens = prompt_tokens
