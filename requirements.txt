@@ -21,8 +21,8 @@ jsonschema-specifications==2024.10.1
 jsonschema==4.23.0
 lark==1.2.2
 markupsafe==2.1.5
-mlx-lm==0.21.5+lmstudio
-mlx-vlm==0.1.15+lmstudio
+mlx-lm==0.21.5
+mlx-vlm==0.1.15
 mlx==0.23.1
 mpmath==1.3.0
 multidict==6.1.0
@@ -30,7 +30,7 @@ nest-asyncio==1.6.0
 networkx==3.4.2
 numpy==2.1.3
 outlines-core==0.1.26
-outlines==0.1.14+lmstudio
+outlines==0.1.14
 packaging==24.2
 pillow==11.1.0
 propcache==0.3.0
