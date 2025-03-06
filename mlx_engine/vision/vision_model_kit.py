@@ -44,7 +44,7 @@ class VisionModelKit(ModelKit):
     def _fix_qwen2_5_vl_image_processor(model_path: Path):
         """
         Register Qwen2_5_VLImageProcessor as Qwen2VLImageProcessor in AutoImageProcessor
-        This is needed because Qwen2_5_VLImageProcessor was deleted from transformers
+        This is needed because Qwen2_5_VLImageProcessor was deleted from transformers, but legacy versions of the model used this
         Ref https://github.com/Blaizzy/mlx-vlm/issues/209#issuecomment-2678113857
         Ref https://huggingface.co/mlx-community/Qwen2.5-VL-7B-Instruct-4bit/commit/fdcc572e8b05ba9daeaf71be8c9e4267c826ff9b
         """
