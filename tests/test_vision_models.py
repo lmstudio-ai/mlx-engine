@@ -227,6 +227,7 @@ class TestVisionModels(unittest.TestCase):
         prompt = f"{self.text_only_prompt}"
         self.model_helper("mlx-community/gemma-3-4b-it-4bit", prompt, text_only=True)
 
+
 """
 To find the correct prompt format for new models, run this command for your model in the terminal and check the prompt dump:
 python -m mlx_vlm.generate --model ~/.cache/lm-studio/models/mlx-community/MODEL-NAME --max-tokens 100 --temp 0.0 --image http://images.cocodataset.org/val2017/000000039769.jpg --prompt "What do you see?"

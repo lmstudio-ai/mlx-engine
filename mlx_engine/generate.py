@@ -267,11 +267,7 @@ def create_generator(
     tokenizer = model_kit.tokenizer
 
     # Set up stop string processor if non-empty stop_strings are provided
-    eos_token_ids = (
-        tokenizer.eos_token_ids
-        if isinstance(tokenizer.eos_token_ids, Iterable)
-        else [tokenizer.eos_token_ids]
-    )
+    eos_token_ids = model_kit.eos_token_ids
     stop_string_processor = None
     if stop_strings is not None and len(stop_strings) > 0:
         stop_string_processor = StopStringProcessor(stop_strings, tokenizer)

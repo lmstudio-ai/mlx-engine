@@ -243,3 +243,7 @@ class ModelKit:
     @property
     def language_model(self):
         return self.model
+
+    @property
+    def eos_token_ids(self):
+        return self.tokenizer.eos_token_ids

@@ -21,6 +21,7 @@ class VisionModelKit(ModelKit):
     model_path: Path = None
     vocab_only: bool = False
     model_weights = None
+    eos_token_ids = set()
 
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
@@ -102,6 +103,14 @@ class VisionModelKit(ModelKit):
         self.model = VisionModelWrapper(self.model)
         self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
+
+        # Set the eos_token_ids
+        if (eos_tokens := self.config.get("eos_token_ids", None)) is not None:
+            self.eos_token_ids = set(eos_tokens)
+            log_info(f"Setting eos token ids: {self.eos_token_ids}")
+        elif (eos_tokens := self.config.get("eos_token_id", None)) is not None:
+            self.eos_token_ids = {eos_tokens}
+
         self.cache_wrapper = None
         mx.metal.clear_cache()
 
