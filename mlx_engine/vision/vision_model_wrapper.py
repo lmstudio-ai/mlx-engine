@@ -285,7 +285,7 @@ class VisionModelWrapper:
 
             final_images = []
             for i, img in enumerate(resized_images):
-                new_img = PIL.Image.new("RGBA", (max_width, max_height), (0, 0, 0, 0))
+                new_img = PIL.Image.new("RGB", (max_width, max_height), (0, 0, 0))
                 paste_x = (max_width - img.width) // 2
                 paste_y = (max_height - img.height) // 2
                 new_img.paste(img, (paste_x, paste_y))
