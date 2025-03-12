@@ -6,6 +6,7 @@ from mlx_engine.logging import log_info, log_warn
 from .vision_model_wrapper import VisionModelWrapper
 
 import mlx_vlm
+import mlx_lm
 from pathlib import Path
 import mlx.core as mx
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -21,7 +22,6 @@ class VisionModelKit(ModelKit):
     model_path: Path = None
     vocab_only: bool = False
     model_weights = None
-    eos_token_ids = set()
 
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
     has_processed_prompt: bool = False
@@ -101,15 +101,20 @@ class VisionModelKit(ModelKit):
         else:
             self.model, self.processor, self.model_weights = return_tuple
         self.model = VisionModelWrapper(self.model)
-        self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
-        self.detokenizer = self.tokenizer.detokenizer
 
         # Set the eos_token_ids
+        eos_token_ids = []
         if (eos_tokens := self.config.get("eos_token_ids", None)) is not None:
-            self.eos_token_ids = set(eos_tokens)
-            log_info(f"Setting eos token ids: {self.eos_token_ids}")
+            eos_token_ids = list(set(eos_tokens))
+            log_info(f"Setting eos token ids: {eos_token_ids}")
         elif (eos_tokens := self.config.get("eos_token_id", None)) is not None:
-            self.eos_token_ids = {eos_tokens}
+            eos_token_ids = [eos_tokens]
+
+        # Use the mlx_lm tokenizer since it's more robust
+        self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(
+            self.model_path, eos_token_ids=list(eos_token_ids)
+        )
+        self.detokenizer = self.tokenizer.detokenizer
 
         self.cache_wrapper = None
         mx.metal.clear_cache()
