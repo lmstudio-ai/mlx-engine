@@ -216,6 +216,16 @@ class TestVisionModels(unittest.TestCase):
                 str(e),
             )
 
+    def test_gemma3(self):
+        """Test Gemma 3 model"""
+        prompt = f"{self.description_prompt}<start_of_image>"
+        self.model_helper("mlx-community/gemma-3-4b-it-4bit", prompt)
+
+    @unittest.skip("This only outputs pad tokens, but it doesn't crash")
+    def test_gemma3_text_only(self):
+        """Test Gemma 3 model"""
+        prompt = f"{self.text_only_prompt}"
+        self.model_helper("mlx-community/gemma-3-4b-it-4bit", prompt, text_only=True)
 
 """
 To find the correct prompt format for new models, run this command for your model in the terminal and check the prompt dump:
