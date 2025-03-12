@@ -105,14 +105,14 @@ class VisionModelKit(ModelKit):
         # Set the eos_token_ids
         eos_token_ids = []
         if (eos_tokens := self.config.get("eos_token_ids", None)) is not None:
-            eos_token_ids = list(set(eos_tokens))
+            eos_token_ids = list(eos_tokens)
             log_info(f"Setting eos token ids: {eos_token_ids}")
         elif (eos_tokens := self.config.get("eos_token_id", None)) is not None:
-            eos_token_ids = [eos_tokens]
+            eos_token_ids = list(eos_tokens)
 
         # Use the mlx_lm tokenizer since it's more robust
         self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(
-            self.model_path, eos_token_ids=list(eos_token_ids)
+            self.model_path, eos_token_ids=eos_token_ids
         )
         self.detokenizer = self.tokenizer.detokenizer
 
