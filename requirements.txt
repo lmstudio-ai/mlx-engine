@@ -22,8 +22,8 @@ jsonschema-specifications==2024.10.1
 jsonschema==4.23.0
 lark==1.2.2
 markupsafe==2.1.5
-mlx-lm==0.21.5+lmstudio
-mlx-vlm==0.1.17+lmstudio
+mlx-lm==0.21.5
+mlx-vlm==0.1.17
 mlx==0.23.2
 mpmath==1.3.0
 multidict==6.1.0
@@ -31,7 +31,7 @@ nest-asyncio==1.6.0
 networkx==3.4.2
 numpy==2.1.3
 outlines-core==0.1.26
-outlines==0.2.2+lmstudio
+outlines==0.2.2
 packaging==24.2
 pillow==11.1.0
 propcache==0.3.0
@@ -50,7 +50,7 @@ sympy==1.13.1
 tokenizers==0.21.0
 torch==2.6.0
 tqdm==4.67.1
-transformers==4.50.0.dev0
+transformers @ git+https://github.com/huggingface/transformers@071a161d3e38f56dbda2743b979f0afeed2cd4f1
 typing-extensions==4.12.2
 urllib3==2.3.0
 xxhash==3.5.0
