@@ -1,6 +1,5 @@
 import json
 import unittest
-from pathlib import Path
 
 from mlx_engine.generate import create_generator
 from .utils import model_load_and_tokenize_prompt

@@ -1,5 +1,4 @@
 from typing import Callable, Iterator, List, Literal, NamedTuple, Optional
-from collections.abc import Iterable
 import json
 from pathlib import Path
 import sys

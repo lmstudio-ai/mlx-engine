@@ -14,14 +14,14 @@ def fix_qwen2_5_vl_image_processor(model_path: Path):
         # We are looking for a specific entry, so if any of this throws, we don't need to do anything
         with open(model_path / "preprocessor_config.json", "r") as f:
             image_processor_type = json.load(f)["image_processor_type"]
-    except:
+    except: # noqa: E722
         return
 
     if image_processor_type != "Qwen2_5_VLImageProcessor":
         return
 
     log_info(
-        f"Registering deprecated Qwen2_5_VLImageProcessor as Qwen2VLImageProcessor"
+        "Registering deprecated Qwen2_5_VLImageProcessor as Qwen2VLImageProcessor"
     )
     try:
         from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
@@ -57,10 +57,10 @@ def fix_qwen2_vl_preprocessor(model_path: Path):
             return
         with open(model_path / "preprocessor_config.json", "r") as f:
             json.load(f)["size"]
-    except:
+    except: # noqa: E722
         return
 
-    log_warn(f"Removing `size` entry from preprocessor_config.json")
+    log_warn("Removing `size` entry from preprocessor_config.json")
     with open(model_path / "preprocessor_config.json", "r") as f:
         preprocessor_config = json.load(f)
     preprocessor_config.pop("size")
