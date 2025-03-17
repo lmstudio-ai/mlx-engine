@@ -5,13 +5,12 @@ import time
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.model_kit import VALID_KV_BITS, VALID_KV_GROUP_SIZE
+from transformers import AutoTokenizer, AutoProcessor
 
-
-DEFAULT_PROMPT = """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
-
-Explain the rules of chess in one sentence.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-"""
+DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
 DEFAULT_TEMP = 0.8
+
+DEFAULT_SYSTEM_PROMPT = {"role": "system", "content": "You are a helpful assistant."}
 
 
 def setup_arg_parser():
@@ -175,14 +174,36 @@ if __name__ == "__main__":
 
     # Tokenize the prompt
     prompt = args.prompt
-    prompt_tokens = tokenize(model_kit, prompt)
-
-    # Handle optional images
+    
+    # Handle the prompt according to the input type
+    # If images are provided, add them to the prompt
     images_base64 = []
     if args.images:
-        if isinstance(args.images, str):
-            args.images = [args.images]
+        tf_tokenizer = AutoProcessor.from_pretrained(model_path)
         images_base64 = [image_to_base64(img_path) for img_path in args.images]
+        conversation = [
+            DEFAULT_SYSTEM_PROMPT,
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "content": prompt},
+                    *[
+                        {"type": "image", "base64": image_b64}
+                        for image_b64 in images_base64
+                    ],
+                ],
+            },
+        ]
+    else:
+        tf_tokenizer = AutoTokenizer.from_pretrained(model_path)
+        conversation = [
+            DEFAULT_SYSTEM_PROMPT,
+            {"role": "user", "content": prompt},
+        ]
+    prompt = tf_tokenizer.apply_chat_template(
+        conversation, tokenize=False, add_generation_prompt=True
+    )
+    prompt_tokens = tokenize(model_kit, prompt)
 
     # Record top logprobs
     logprobs_list = []
