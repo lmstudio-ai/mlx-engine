@@ -1,6 +1,4 @@
 import unittest
-import sys
-from pathlib import Path
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper
 

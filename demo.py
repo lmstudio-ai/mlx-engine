@@ -128,7 +128,7 @@ class GenerationStatsCollector:
         tokens_per_second = (
             self.total_tokens / effective_time if effective_time > 0 else float("inf")
         )
-        print(f"\n\nGeneration stats:")
+        print("\n\nGeneration stats:")
         print(f" - Tokens per second: {tokens_per_second:.2f}")
         if self.num_accepted_draft_tokens is not None:
             print(

@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
 from mlx_engine.utils.disable_hf_download import _original_snapshot_download
 from mlx_lm.tokenizer_utils import load_tokenizer
 
