@@ -1,6 +1,4 @@
 import mlx.core as mx
-import numpy as np
-import sys
 from io import BytesIO
 import base64
 import PIL
