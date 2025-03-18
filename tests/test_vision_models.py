@@ -221,7 +221,6 @@ class TestVisionModels(unittest.TestCase):
         prompt = f"{self.description_prompt}<start_of_image>"
         self.model_helper("mlx-community/gemma-3-4b-it-4bit", prompt)
 
-    @unittest.skip("This only outputs pad tokens, but it doesn't crash")
     def test_gemma3_text_only(self):
         """Test Gemma 3 model"""
         prompt = f"{self.text_only_prompt}"
