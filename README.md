@@ -57,14 +57,14 @@ Download models with the `lms` CLI tool. The `lms` CLI documentation can be foun
 Run the `demo.py` script with an MLX text generation model:
 ```bash
 lms get mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
-python demo.py --model ~/.cache/lm-studio/models/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
+python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit 
 ```
 [mlx-community/Meta-Llama-3.1-8B-Instruct-4bit](https://model.lmstudio.ai/download/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit) - 4.53 GB
 
-This command will use a default prompt that is formatted for Llama-3.1. For other models, add a custom `--prompt` argument with the correct prompt formatting:
+This command will use a default prompt. For a different prompt, add a custom `--prompt` argument like:
 ```bash
 lms get mlx-community/Mistral-Small-Instruct-2409-4bit
-python demo.py --model ~/.cache/lm-studio/models/mlx-community/Mistral-Small-Instruct-2409-4bit --prompt "<s> [INST] How long will it take for an apple to fall from a 10m tree? [/INST]"
+python demo.py --model mlx-community/Mistral-Small-Instruct-2409-4bit --prompt "How long will it take for an apple to fall from a 10m tree?"
 ```
 [mlx-community/Mistral-Small-Instruct-2409-4bit](https://model.lmstudio.ai/download/mlx-community/Mistral-Small-Instruct-2409-4bit) - 12.52 GB
 
@@ -72,7 +72,7 @@ python demo.py --model ~/.cache/lm-studio/models/mlx-community/Mistral-Small-Ins
 Run the `demo.py` script with an MLX vision model:
 ```bash
 lms get mlx-community/pixtral-12b-4bit
-python demo.py --model ~/.cache/lm-studio/models/mlx-community/pixtral-12b-4bit --prompt "<s>[INST]Compare these images[IMG][IMG][/INST]" --images demo-data/chameleon.webp demo-data/toucan.jpeg
+python demo.py --model mlx-community/pixtral-12b-4bit --prompt "Compare these images" --images demo-data/chameleon.webp demo-data/toucan.jpeg
 ```
 Currently supported vision models include:
  - [Llama-3.2-Vision](https://model.lmstudio.ai/download/mlx-community/Llama-3.2-11B-Vision-Instruct-4bit)
@@ -90,8 +90,8 @@ Run the `demo.py` script with an MLX text generation model and a compatible `--d
 lms get mlx-community/Qwen2.5-7B-Instruct-4bit
 lms get lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit
 python demo.py \
-    --model ~/.lmstudio/models/mlx-community/Qwen2.5-7B-Instruct-4bit \
-    --draft-model ~/.lmstudio/models/lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit \
+    --model mlx-community/Qwen2.5-7B-Instruct-4bit \
+    --draft-model lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit \
     --prompt "<|im_start|>system
 You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
 <|im_start|>user
