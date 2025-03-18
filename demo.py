@@ -1,6 +1,7 @@
 import argparse
 import base64
 import time
+import os
 
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
@@ -137,6 +138,23 @@ class GenerationStatsCollector:
         print(f" - Total tokens generated: {self.total_tokens}")
         print(f" - Total time: {total_time:.2f}s")
 
+def resolve_model_path(model_arg):
+    # If it's a full path or local file, return as-is
+    if os.path.exists(model_arg):
+        return model_arg
+        
+    # Check common local directories
+    local_paths = [
+        os.path.expanduser("~/.lmstudio/models"),
+        os.path.expanduser("~/.cache/lm-studio/models")
+    ]
+    
+    for path in local_paths:
+        full_path = os.path.join(path, model_arg)
+        if os.path.exists(full_path):
+            return full_path
+                
+    raise ValueError(f"Could not find model '{model_arg}' in local directories")
 
 if __name__ == "__main__":
     # Parse arguments
@@ -158,7 +176,7 @@ if __name__ == "__main__":
             pass
 
     # Load the model
-    model_path = args.model
+    model_path = resolve_model_path(args.model)
     model_kit = load_model(
         str(model_path),
         max_kv_size=args.max_kv_size,
@@ -170,7 +188,7 @@ if __name__ == "__main__":
 
     # Load draft model if requested
     if args.draft_model:
-        load_draft_model(model_kit=model_kit, path=args.draft_model)
+        load_draft_model(model_kit=model_kit, path=resolve_model_path(args.draft_model))
 
     # Tokenize the prompt
     prompt = args.prompt
