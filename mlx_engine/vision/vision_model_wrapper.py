@@ -134,7 +134,6 @@ class VisionModelWrapper:
                 else:
                     outputs = self.language_model(
                         *args,
-                        mask=self.mask,
                         **kwargs,
                         **self.language_model_kwargs,
                     )
@@ -217,7 +216,8 @@ class VisionModelWrapper:
     def _convert_to_pil(self, images_b64: List[str]):
         """Convert a list of base64 strings to PIL Images"""
         return [
-            PIL.Image.open(BytesIO(base64.b64decode(img))).convert("RGB") for img in images_b64 or []
+            PIL.Image.open(BytesIO(base64.b64decode(img))).convert("RGB")
+            for img in images_b64 or []
         ]
 
     def _custom_resize(self, pil_images, max_size=(1000, 1000)):
