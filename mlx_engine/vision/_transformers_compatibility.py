@@ -51,6 +51,10 @@ def fix_qwen2_vl_preprocessor(model_path: Path):
     """
     try:
         # We are looking for a specific entry, so if any of this throws, we don't need to do anything
+        with open(model_path / "config.json", "r") as f:
+            model_type = json.load(f)["model_type"]
+        if model_type != "qwen2_vl":
+            return
         with open(model_path / "preprocessor_config.json", "r") as f:
             json.load(f)["size"]
     except:
