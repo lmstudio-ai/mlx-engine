@@ -110,7 +110,7 @@ We use pre-commit hooks to maintain code quality. Before contributing, please:
    ```bash
    pip install pre-commit && pre-commit install
     ```
-2. Run pre-commit on your changes:
+2. Run pre-commit:
    ```bash
    pre-commit run --all-files
    ```
