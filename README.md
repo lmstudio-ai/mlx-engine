@@ -100,6 +100,23 @@ Write a quick sort algorithm in C++<|im_end|>
 "
 ```
 
+## Development Setup
+
+### Pre-commit Hooks
+
+We use pre-commit hooks to maintain code quality. Before contributing, please:
+
+1. Install pre-commit:
+   ```bash
+   pip install pre-commit
+    pre-commit install
+    ```
+2. Run pre-commit on your changes:
+   ```bash
+   pre-commit run --all-files
+   ```
+3. Fix any issues before submitting your PR
+
 ## Testing
 
 To run tests, run the following command from the root of this repo:
