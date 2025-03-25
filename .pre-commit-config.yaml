@@ -6,7 +6,9 @@ repos:
     # Run the linter.
     - id: ruff
       args: [ --fix ]
-      additional_dependencies: [ "python==3.11" ]
+      stages: [pre-commit]
     # Run the formatter.
     - id: ruff-format
-      additional_dependencies: [ "python==3.11" ]
+      args: [--target-version, py311]
+      stages: [pre-commit]
+
