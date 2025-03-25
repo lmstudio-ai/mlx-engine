@@ -108,8 +108,7 @@ We use pre-commit hooks to maintain code quality. Before contributing, please:
 
 1. Install pre-commit:
    ```bash
-   pip install pre-commit
-    pre-commit install
+   pip install pre-commit && pre-commit install
     ```
 2. Run pre-commit on your changes:
    ```bash
