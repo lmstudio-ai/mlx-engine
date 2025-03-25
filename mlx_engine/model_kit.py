@@ -1,4 +1,3 @@
-import sys
 from typing import List, Optional, Tuple
 
 from mlx_engine.logging import log_info, log_warn
@@ -153,7 +152,7 @@ class ModelKit:
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
-        if type(ids) == int:
+        if isinstance(ids, int):
             return [ids]
         return ids
 

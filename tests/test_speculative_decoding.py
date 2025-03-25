@@ -124,7 +124,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         paris_in_response = "paris" in generated_text.lower()
         self.assertTrue(
             paris_in_response,
-            f"Model failed to respond correctly",
+            "Model failed to respond correctly",
         )
         self.assertGreaterEqual(
             from_draft_count,

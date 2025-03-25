@@ -2,10 +2,29 @@
 `mlx_engine` is LM Studio's LLM inferencing engine for Apple MLX
 """
 
+__all__ = [
+    "load_model",
+    "load_draft_model",
+    "is_draft_model_compatible",
+    "unload_draft_model",
+    "create_generator",
+    "tokenize",
+]
+
 from pathlib import Path
 import os
 
 from .utils.disable_hf_download import patch_huggingface_hub
+
+
+from .generate import (
+    load_model,
+    load_draft_model,
+    is_draft_model_compatible,
+    unload_draft_model,
+    create_generator,
+    tokenize,
+)
 
 patch_huggingface_hub()
 
@@ -22,15 +41,3 @@ def _set_outlines_cache_dir(cache_dir: Path | str):
 
 
 _set_outlines_cache_dir(Path("~/.cache/lm-studio/.internal/outlines"))
-
-"""
-The API for `mlx_engine` is specified in generate.py
-"""
-from .generate import (
-    load_model,
-    load_draft_model,
-    is_draft_model_compatible,
-    unload_draft_model,
-    create_generator,
-    tokenize,
-)
