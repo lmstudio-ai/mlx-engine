@@ -1,8 +1,11 @@
-import json
 from typing import Union, Optional, List
 
 from mlx_engine.model_kit import ModelKit
-from mlx_engine.logging import log_info, log_warn
+from mlx_engine.logging import log_info
+from ._transformers_compatibility import (
+    fix_qwen2_5_vl_image_processor,
+    fix_qwen2_vl_preprocessor,
+)
 from .vision_model_wrapper import VisionModelWrapper
 
 import mlx_vlm
@@ -32,7 +35,8 @@ class VisionModelKit(ModelKit):
         vocab_only: bool,
         trust_remote_code: bool,
     ):
-        self._fix_qwen2_5_vl_image_processor(model_path)
+        fix_qwen2_5_vl_image_processor(model_path)
+        fix_qwen2_vl_preprocessor(model_path)
         self.config = mlx_vlm.utils.load_config(
             model_path, trust_remote_code=trust_remote_code
         )
@@ -40,47 +44,6 @@ class VisionModelKit(ModelKit):
         self.vocab_only = vocab_only
         self.model_path = model_path
         self._initializer()
-
-    @staticmethod
-    def _fix_qwen2_5_vl_image_processor(model_path: Path):
-        """
-        Register Qwen2_5_VLImageProcessor as Qwen2VLImageProcessor in AutoImageProcessor
-        This is needed because Qwen2_5_VLImageProcessor was deleted from transformers, but legacy versions of the model used this
-        Ref https://github.com/Blaizzy/mlx-vlm/issues/209#issuecomment-2678113857
-        Ref https://huggingface.co/mlx-community/Qwen2.5-VL-7B-Instruct-4bit/commit/fdcc572e8b05ba9daeaf71be8c9e4267c826ff9b
-        """
-        try:
-            # We are looking for a specific entry, so if any of this throws, we don't need to do anything
-            with open(model_path / "preprocessor_config.json", "r") as f:
-                image_processor_type = json.load(f)["image_processor_type"]
-        except:
-            return
-
-        if image_processor_type != "Qwen2_5_VLImageProcessor":
-            return
-
-        log_info(
-            f"Registering deprecated Qwen2_5_VLImageProcessor as Qwen2VLImageProcessor"
-        )
-        try:
-            from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
-                Qwen2VLImageProcessor,
-            )
-            from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
-                Qwen2_5_VLConfig,
-            )
-            from transformers.models.auto.processing_auto import AutoImageProcessor
-
-            class Qwen2_5_VLImageProcessor(Qwen2VLImageProcessor):
-                pass
-
-            AutoImageProcessor.register(
-                Qwen2_5_VLConfig, Qwen2_5_VLImageProcessor, exist_ok=True
-            )
-        except Exception as e:
-            log_warn(
-                f"Failed to register Qwen2_5_VLImageProcessor to AutoImageProcessor: {e}"
-            )
 
     def _vocab_only_init(self):
         self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
