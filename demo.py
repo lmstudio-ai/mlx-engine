@@ -138,23 +138,25 @@ class GenerationStatsCollector:
         print(f" - Total tokens generated: {self.total_tokens}")
         print(f" - Total time: {total_time:.2f}s")
 
+
 def resolve_model_path(model_arg):
     # If it's a full path or local file, return as-is
     if os.path.exists(model_arg):
         return model_arg
-        
+
     # Check common local directories
     local_paths = [
         os.path.expanduser("~/.lmstudio/models"),
-        os.path.expanduser("~/.cache/lm-studio/models")
+        os.path.expanduser("~/.cache/lm-studio/models"),
     ]
-    
+
     for path in local_paths:
         full_path = os.path.join(path, model_arg)
         if os.path.exists(full_path):
             return full_path
-                
+
     raise ValueError(f"Could not find model '{model_arg}' in local directories")
+
 
 if __name__ == "__main__":
     # Parse arguments
@@ -192,7 +194,7 @@ if __name__ == "__main__":
 
     # Tokenize the prompt
     prompt = args.prompt
-    
+
     # Handle the prompt according to the input type
     # If images are provided, add them to the prompt
     images_base64 = []

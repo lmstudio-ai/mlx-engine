@@ -3,12 +3,12 @@
 """
 
 __all__ = [
-    'load_model',
-    'load_draft_model', 
-    'is_draft_model_compatible',
-    'unload_draft_model',
-    'create_generator',
-    'tokenize'
+    "load_model",
+    "load_draft_model",
+    "is_draft_model_compatible",
+    "unload_draft_model",
+    "create_generator",
+    "tokenize",
 ]
 
 from pathlib import Path
@@ -41,4 +41,3 @@ def _set_outlines_cache_dir(cache_dir: Path | str):
 
 
 _set_outlines_cache_dir(Path("~/.cache/lm-studio/.internal/outlines"))
-
