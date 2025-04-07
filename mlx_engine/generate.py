@@ -3,7 +3,8 @@ import json
 from pathlib import Path
 import sys
 
-import mlx_lm
+from mlx_lm.generate import stream_generate
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
@@ -195,7 +196,7 @@ def create_generator(
             repetition_penalty_kwargs["repetition_context_size"] = (
                 repetition_context_size
             )
-    generate_args["logits_processors"] = mlx_lm.utils.make_logits_processors(
+    generate_args["logits_processors"] = make_logits_processors(
         logit_bias=None,
         **repetition_penalty_kwargs,
     )
@@ -219,7 +220,7 @@ def create_generator(
     )
 
     # Set up sampler
-    generate_args["sampler"] = mlx_lm.utils.make_sampler(
+    generate_args["sampler"] = make_sampler(
         **{
             k: v
             for k, v in {
@@ -324,7 +325,7 @@ def create_generator(
             top_logprobs=top_logprobs_buffer,
         )
 
-    for generation_result in mlx_lm.utils.stream_generate(
+    for generation_result in stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
         draft_model=draft_model,
