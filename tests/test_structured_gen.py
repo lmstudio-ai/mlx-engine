@@ -71,6 +71,7 @@ class TestStructuredGen(unittest.TestCase):
             prompt_tokens,
             json_schema=self.json_schema,
             max_tokens=1024,
+            seed=0,
         )
 
         generated_text = ""
