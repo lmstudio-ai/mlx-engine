@@ -6,7 +6,7 @@ from mlx_lm.models.cache import (
     trim_prompt_cache,
     can_trim_prompt_cache,
 )
-from mlx_lm.utils import generation_stream, maybe_quantize_kv_cache
+from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
