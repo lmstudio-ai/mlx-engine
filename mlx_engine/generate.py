@@ -79,7 +79,7 @@ def load_model(
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
 
-    if "vision_config" in config_json:
+    if "vision_config" in config_json and config_json["model_type"] != "llama4":
         if any([kv_bits, kv_group_size, quantized_kv_start]):
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
