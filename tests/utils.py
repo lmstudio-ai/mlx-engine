@@ -8,8 +8,9 @@ from mlx_engine.generate import load_model, load_draft_model, tokenize
 def model_getter(model_name: str):
     """Helper method to get a model, prompt user to download if not found"""
 
-    model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
-    model_path = model_path_prefix / model_name
+    with open(Path("~/.lmstudio-home-pointer").expanduser().resolve(), "r") as f:
+        lmstudio_home = Path(f.read().strip())
+    model_path = lmstudio_home / "models" / model_name
 
     # Check if model exists, if not prompt user to download
     if not model_path.exists():
