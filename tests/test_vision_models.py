@@ -20,7 +20,9 @@ class TestVisionModels(unittest.TestCase):
         with open(cls.toucan_path, "rb") as image_file:
             cls.image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
 
-    def model_helper(self, model_name: str, prompt: str, text_only=False):
+    def model_helper(
+        self, model_name: str, prompt: str, text_only=False, trust_remote_code=True
+    ):
         """Helper method to test a single vision model"""
         print(f"Testing model {model_name}")
 
@@ -45,7 +47,7 @@ class TestVisionModels(unittest.TestCase):
 
         # Load the model
         model_kit = load_model(
-            model_path=model_path, max_kv_size=2048, trust_remote_code=True
+            model_path=model_path, max_kv_size=2048, trust_remote_code=trust_remote_code
         )
 
         # Tokenize the prompt
@@ -226,6 +228,22 @@ class TestVisionModels(unittest.TestCase):
         """Test Gemma 3 model"""
         prompt = f"{self.text_only_prompt}"
         self.model_helper("mlx-community/gemma-3-4b-it-4bit", prompt, text_only=True)
+
+    def test_phi3_v(self):
+        prompt = f"<|user|>\n<|image_1|>{self.description_prompt}<|end|>\n<|assistant|>"
+        self.model_helper(
+            "mlx-community/Phi-3.5-vision-instruct-4bit", prompt, trust_remote_code=True
+        )
+
+    def test_phi3_v_text_only(self):
+        """Test Phi 3.5 model with only text"""
+        prompt = f"<|user|>\n{self.text_only_prompt}<|end|>\n<|assistant|>"
+        self.model_helper(
+            "mlx-community/Phi-3.5-vision-instruct-4bit",
+            prompt,
+            text_only=True,
+            trust_remote_code=True,
+        )
 
 
 """
