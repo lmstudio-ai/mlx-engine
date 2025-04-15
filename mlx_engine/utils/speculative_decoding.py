@@ -46,9 +46,6 @@ def configure_num_draft_tokens_in_generate_args(
                 f"model_kit (type {type(model_kit).__name__}) must be a text ModelKit instance"
             )
         elif draft_model is None:
-            log_info(
-                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
-                "no draft model loaded/activated for this generation"
-            )
+            pass
         else:
             generate_args["num_draft_tokens"] = num_draft_tokens
