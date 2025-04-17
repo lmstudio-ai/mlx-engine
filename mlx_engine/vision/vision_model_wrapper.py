@@ -3,7 +3,7 @@ from io import BytesIO
 import base64
 import PIL
 from mlx_engine.logging import log_info
-from mlx_vlm.models.base import KVCache, SimpleKVCache
+from mlx_vlm.models.cache import KVCache, SimpleKVCache
 from mlx_vlm.utils import prepare_inputs
 
 from typing import List, Optional

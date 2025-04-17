@@ -179,6 +179,7 @@ if __name__ == "__main__":
 
     # Load the model
     model_path = resolve_model_path(args.model)
+    print("Loading model...", end="", flush=True)
     model_kit = load_model(
         str(model_path),
         max_kv_size=args.max_kv_size,
@@ -187,6 +188,7 @@ if __name__ == "__main__":
         kv_group_size=args.kv_group_size,
         quantized_kv_start=args.quantized_kv_start,
     )
+    print("\rModel load complete ✓")
 
     # Load draft model if requested
     if args.draft_model:
