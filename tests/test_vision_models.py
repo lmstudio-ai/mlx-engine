@@ -154,11 +154,13 @@ class TestVisionModels(unittest.TestCase):
                 str(e),
             )
 
+    @unittest.skip("Unavailable since this requires trust_remote_code")
     def test_molmo(self):
         """Test Molmo 7B model"""
         prompt = self.description_prompt
         self.model_helper("mlx-community/Molmo-7B-D-0924-4bit", prompt)
 
+    @unittest.skip("Unavailable since this requires trust_remote_code")
     def test_molmo_text_only(self):
         """Test Molmo 7B model with only text"""
         prompt = self.text_only_prompt

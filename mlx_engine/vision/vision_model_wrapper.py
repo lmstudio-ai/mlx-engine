@@ -83,7 +83,7 @@ class VisionModelWrapper:
                         for n in self.language_model.layers
                     ]
                 else:
-                    cache = [KVCache(self.language_model.head_dim, n) for n in kv_heads]
+                    cache = [KVCache() for n in kv_heads]
 
             # Replace the mlx_lm cache with the one we created
             kwargs["cache"] = cache
