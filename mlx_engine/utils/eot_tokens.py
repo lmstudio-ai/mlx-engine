@@ -1,4 +1,4 @@
-# Taken from https://github.com/ggml-org/llama.cpp/blob/master/src/llama-vocab.cpp#L1807-L1814
+# Taken from https://github.com/ggml-org/llama.cpp/blob/971f245/src/llama-vocab.cpp#L1807-L1814
 EOT_TOKENS = [
     "<|eot_id|>",
     "<|im_end|>",
