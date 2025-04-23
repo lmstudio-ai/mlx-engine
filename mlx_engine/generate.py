@@ -9,6 +9,9 @@ from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
+from mlx_engine.processors.repetition_penalty_processor import (
+    RepetitionPenaltyProcessor,
+)
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
 from mlx_engine.stop_string_processor import (
@@ -214,10 +217,25 @@ def create_generator(
         prompt_tokens,
         images_b64,
         prompt_progress_callback,
-        repetition_context_size,
         generate_args,
         speculative_decoding_toggle,
     )
+
+    # exclude the last stream_generate_input tokens from the prompt to get already computed
+    already_computed_tokens = prompt_tokens[: -len(stream_generate_input)]
+    # Find and wrap the repetition penalty processor
+    for i, processor in enumerate(generate_args["logits_processors"]):
+        processor_name = (
+            processor.__name__ if hasattr(processor, "__name__") else str(processor)
+        )
+        if processor_name == "repetition_penalty_processor":
+            generate_args["logits_processors"][i] = RepetitionPenaltyProcessor(
+                original_repetition_penalty_processor=processor,
+                token_history=already_computed_tokens,
+                repetition_context_size=repetition_context_size,
+            )
+            print(f"Replaced repetition penalty processor at position {i}")
+            break
 
     # Set up sampler
     generate_args["sampler"] = make_sampler(
