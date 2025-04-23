@@ -220,14 +220,14 @@ def create_generator(
     # Setup logits processors
     generate_args["logits_processors"] = []
     if repetition_penalty and repetition_penalty != 0.0:
-        already_computed_tokens = (
+        cached_tokens = (
             prompt_tokens[: -len(stream_generate_input)]
             if len(stream_generate_input) > 0
             else prompt_tokens
         )
         generate_args["logits_processors"].append(
             RepetitionPenaltyProcessor(
-                token_history=already_computed_tokens, **repetition_penalty_kwargs
+                token_history=cached_tokens, **repetition_penalty_kwargs
             )
         )
 

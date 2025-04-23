@@ -15,7 +15,7 @@ class RepetitionPenaltyProcessor:
         self,
         token_history: list[int],
         repetition_penalty: float,
-        repetition_context_size: int = 20,
+        repetition_context_size: int,
     ):
         self.token_history = token_history
         self.repetition_context_size = repetition_context_size
