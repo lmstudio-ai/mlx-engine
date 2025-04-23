@@ -63,7 +63,7 @@ def model_load_and_tokenize_prompt(
     return model_kit, prompt_tokens
 
 
-def read_text_file(file_path: str) -> str:
+def read_text_file(file_path: str | Path) -> str:
     """
     Read content from a text file with error handling.
 
@@ -78,7 +78,7 @@ def read_text_file(file_path: str) -> str:
         Exception: For other reading errors
     """
     try:
-        # Convert string path to Path object for better path handling
+        # Ensure file_path is a Path object for better handling
         path = Path(file_path).expanduser().resolve()
         with open(path, "r", encoding="utf-8") as file:
             return file.read()

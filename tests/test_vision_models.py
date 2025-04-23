@@ -12,7 +12,7 @@ class TestVisionModels(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up test resources that will be shared across all test methods"""
-        cls.toucan_path = Path("demo-data/toucan.jpeg")
+        cls.toucan_path = Path(__file__).parent.parent / "demo-data" / "toucan.jpeg"
         cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
         cls.description_prompt = "Describe what you see in great detail"
         cls.text_only_prompt = "What is a toucan?"

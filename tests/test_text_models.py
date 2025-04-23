@@ -18,6 +18,7 @@ class TestTextModels(unittest.TestCase):
     def setUpClass(cls):
         """Set up test resources that will be shared across all test methods"""
         cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
+        cls.test_data_dir = Path(__file__).parent / "data"
 
     def test_repetition_penalty_applies(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
@@ -52,7 +53,7 @@ The quick brown fox jumped over the lazy dog. The quick brown fox jumped over th
     def test_prompt_caching(self):
         model_path = model_getter("mlx-community/gemma-3-text-4b-it-4bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
-        file_content = read_text_file("data/ben_franklin_autobiography_start.txt")
+        file_content = read_text_file(self.test_data_dir / "ben_franklin_autobiography_start.txt")
         prompt = f"""<bos><start_of_turn>user
 ```
 {file_content}
@@ -123,7 +124,7 @@ repeat<end_of_turn>
     def test_prompt_caching_trim_qwen2_5(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
-        file_content = read_text_file("data/ben_franklin_autobiography_start.txt")
+        file_content = read_text_file(self.test_data_dir / "ben_franklin_autobiography_start.txt")
         prompt = f"""<|im_start|>user
 ```
 {file_content}
