@@ -11,6 +11,7 @@ from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
+    replace_default_repetition_penalty_processor,
 )
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
@@ -221,21 +222,20 @@ def create_generator(
         speculative_decoding_toggle,
     )
 
-    # exclude the last stream_generate_input tokens from the prompt to get already computed
-    already_computed_tokens = prompt_tokens[: -len(stream_generate_input)]
-    # Find and wrap the repetition penalty processor
-    for i, processor in enumerate(generate_args["logits_processors"]):
-        processor_name = (
-            processor.__name__ if hasattr(processor, "__name__") else str(processor)
+    # Enables the repetition penalty processor to see cached tokens. Do this after processing_prompt to know which
+    # tokens have already been cached
+    replace_successful = replace_default_repetition_penalty_processor(
+        generate_args["logits_processors"],
+        prompt_tokens,
+        num_uncached_tokens=len(stream_generate_input),
+        repetition_context_size=repetition_context_size,
+    )
+    # If we don't find the repetition penalty processor as expected, there was an mlx-lm change to the processor name
+    # that we did not catch. This error should never be thrown in production since tests should catch
+    if not replace_successful and repetition_penalty is not None:
+        raise ValueError(
+            "Repetition penalty processor unable to be found and replaced, even though repetition_penalty is set"
         )
-        if processor_name == "repetition_penalty_processor":
-            generate_args["logits_processors"][i] = RepetitionPenaltyProcessor(
-                original_repetition_penalty_processor=processor,
-                token_history=already_computed_tokens,
-                repetition_context_size=repetition_context_size,
-            )
-            print(f"Replaced repetition penalty processor at position {i}")
-            break
 
     # Set up sampler
     generate_args["sampler"] = make_sampler(
