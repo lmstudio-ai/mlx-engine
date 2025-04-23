@@ -1,7 +1,21 @@
-import sys
-from typing import Optional, Literal
+"""
+Simple logging utilities for outputting formatted messages to stderr.
 
-LogLevel = Literal["INFO", "WARN", "ERROR"]
+This module provides functions for logging messages at different severity levels
+(info, warning, error) to standard error. Each function can optionally include
+a prefix to identify the source of the message.
+
+Example usage:
+    >>> log_info("Application started", "MyApp")  # [MyApp][INFO] Application started
+    >>> log_warn("Configuration missing", "MyApp")  # [MyApp][WARN] Configuration missing
+    >>> log_error("Failed to connect", "MyApp")  # [MyApp][ERROR] Failed to connect
+
+    The prefix is optional:
+    >>> log_info("Process complete")  # [INFO] Process complete
+"""
+
+import sys
+from typing import Optional
 
 
 def _format_message(prefix: Optional[str], level: str, message: str) -> str:
@@ -9,54 +23,16 @@ def _format_message(prefix: Optional[str], level: str, message: str) -> str:
     return f"{prefix_str}[{level}] {message}"
 
 
-def _log(level: LogLevel, message: str, prefix: Optional[str] = None) -> None:
-    """Generic log function that outputs to stderr.
-
-    Args:
-        level: The log level (INFO, WARN, ERROR)
-        message: The message to log
-        prefix: Optional prefix to prepend to the message in square brackets
-    """
-    print(_format_message(prefix, level, message), file=sys.stderr, flush=True)
-
-
 def log_info(message: str, prefix: Optional[str] = None) -> None:
-    """Log an info message to stderr.
-
-    Args:
-        message: The message to log
-        prefix: Optional prefix to prepend to the message in square brackets
-
-    Example:
-        >>> log_info("Hello, world!", "MyApp")  # Outputs: [MyApp][INFO] Hello, world!
-        >>> log_info("Hello, world!")  # Outputs: [INFO] Hello, world!
-    """
-    _log("INFO", message, prefix)
+    """Log an info message to stderr."""
+    print(_format_message(prefix, "INFO", message), file=sys.stderr, flush=True)
 
 
 def log_warn(message: str, prefix: Optional[str] = None) -> None:
-    """Log a warning message to stderr.
-
-    Args:
-        message: The message to log
-        prefix: Optional prefix to prepend to the message in square brackets
-
-    Example:
-        >>> log_warn("Something went wrong!", "MyApp")  # Outputs: [MyApp][WARN] Something went wrong!
-        >>> log_warn("Something went wrong!")  # Outputs: [WARN] Something went wrong!
-    """
-    _log("WARN", message, prefix)
+    """Log a warning message to stderr."""
+    print(_format_message(prefix, "WARN", message), file=sys.stderr, flush=True)
 
 
 def log_error(message: str, prefix: Optional[str] = None) -> None:
-    """Log an error message to stderr.
-
-    Args:
-        message: The message to log
-        prefix: Optional prefix to prepend to the message in square brackets
-
-    Example:
-        >>> log_error("An error occurred!", "MyApp")  # Outputs: [MyApp][ERROR] An error occurred!
-        >>> log_error("An error occurred!")  # Outputs: [ERROR] An error occurred!
-    """
-    _log("ERROR", message, prefix)
+    """Log an error message to stderr."""
+    print(_format_message(prefix, "ERROR", message), file=sys.stderr, flush=True)
