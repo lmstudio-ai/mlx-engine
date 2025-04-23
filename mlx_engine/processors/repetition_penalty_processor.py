@@ -35,7 +35,7 @@ class RepetitionPenaltyProcessor:
             self.repetition_context_size - len(tokens), 0
         )
         historical_tokens = mx.array(
-            self.token_history[-num_tokens_to_prepend_from_history:]
+            self.token_history[-num_tokens_to_prepend_from_history:], dtype=mx.int64
         )
         all_tokens_to_consider = mx.concat([historical_tokens, tokens])
         result = self.original_processor(all_tokens_to_consider, logits)

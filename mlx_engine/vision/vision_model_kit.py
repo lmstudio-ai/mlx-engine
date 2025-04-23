@@ -99,7 +99,6 @@ class VisionModelKit(ModelKit):
         prompt_tokens,
         images_b64: Optional[List[str]],
         prompt_progress_callback,
-        repetition_context_size,
         generate_args,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> mx.array:
