@@ -1,7 +1,12 @@
 import unittest
 import base64
 from pathlib import Path
-from mlx_engine.generate import load_model, tokenize, create_generator, is_draft_model_compatible
+from mlx_engine.generate import (
+    load_model,
+    tokenize,
+    create_generator,
+    is_draft_model_compatible,
+)
 from .utils import model_getter
 import sys
 import subprocess
@@ -281,7 +286,7 @@ if __name__ == "__main__":
         "test_bunny_llama_text_only",
         "test_nano_llava",
         "test_nano_llava_text_only",
-        "test_draft_model_not_compatible_vision"
+        "test_draft_model_not_compatible_vision",
     ]
 
     # Get the current script path

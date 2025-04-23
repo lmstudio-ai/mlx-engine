@@ -13,6 +13,7 @@ from mlx_engine.generate import (
     create_generator,
 )
 
+
 class TestTextModels(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -32,13 +33,13 @@ The quick brown fox jumped over the lazy dog. The quick brown fox jumped over th
         def generate() -> None:
             nonlocal generated_text
             for result in create_generator(
-                    model_kit=model_kit,
-                    prompt_tokens=prompt_tokens,
-                    repetition_penalty=3, # this will make it so that model shouldn't repeat. If set to 0, it will
-                    repetition_context_size=64,
-                    seed=0,
-                    max_tokens=20,
-                    temp=0.0,
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                repetition_penalty=3,  # this will make it so that model shouldn't repeat. If set to 0, it will
+                repetition_context_size=64,
+                seed=0,
+                max_tokens=20,
+                temp=0.0,
             ):
                 print(result.text, end="", flush=True)
                 generated_text += result.text
@@ -48,12 +49,16 @@ The quick brown fox jumped over the lazy dog. The quick brown fox jumped over th
 
         generate()
         self.assertGreater(len(generated_text), 0, "Model failed to generate any text")
-        self.assertNotIn("The quick brown fox jumped over the lazy dog.", generated_text)
+        self.assertNotIn(
+            "The quick brown fox jumped over the lazy dog.", generated_text
+        )
 
     def test_prompt_caching(self):
         model_path = model_getter("mlx-community/gemma-3-text-4b-it-4bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
-        file_content = read_text_file(self.test_data_dir / "ben_franklin_autobiography_start.txt")
+        file_content = read_text_file(
+            self.test_data_dir / "ben_franklin_autobiography_start.txt"
+        )
         prompt = f"""<bos><start_of_turn>user
 ```
 {file_content}
@@ -73,12 +78,12 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         def generate() -> None:
             nonlocal generated_text
             for result in create_generator(
-                    model_kit=model_kit,
-                    prompt_tokens=prompt_tokens,
-                    seed=0,
-                    max_tokens=10,
-                    temp=0.0,
-                    prompt_progress_callback=prompt_progress_callback,
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                max_tokens=10,
+                temp=0.0,
+                prompt_progress_callback=prompt_progress_callback,
             ):
                 print(result.text, end="", flush=True)
                 generated_text += result.text
@@ -124,7 +129,9 @@ repeat<end_of_turn>
     def test_prompt_caching_trim_qwen2_5(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
-        file_content = read_text_file(self.test_data_dir / "ben_franklin_autobiography_start.txt")
+        file_content = read_text_file(
+            self.test_data_dir / "ben_franklin_autobiography_start.txt"
+        )
         prompt = f"""<|im_start|>user
 ```
 {file_content}
@@ -149,12 +156,12 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         # accumulating to list allows pass by reference
         def generate(text_accumulator: list) -> None:
             for result in create_generator(
-                    model_kit=model_kit,
-                    prompt_tokens=prompt_tokens,
-                    seed=0,
-                    max_tokens=10,
-                    temp=0.0,
-                    prompt_progress_callback=prompt_progress_callback,
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                max_tokens=10,
+                temp=0.0,
+                prompt_progress_callback=prompt_progress_callback,
             ):
                 print(result.text, end="", flush=True)
                 text_accumulator.append(result.text)
@@ -166,7 +173,9 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         generate(text_accumulator=generated_text_list_1)
         generated_text_1 = "".join(generated_text_list_1)
         self.assertEqual(prompt_progress_callback_times_called, 4)
-        self.assertGreater(len(generated_text_1), 0, "Model failed to generate any text")
+        self.assertGreater(
+            len(generated_text_1), 0, "Model failed to generate any text"
+        )
         ben_franklin_in_response = "Benjamin Franklin" in generated_text_1
         self.assertTrue(
             ben_franklin_in_response,
@@ -178,7 +187,7 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         # this should trigger a cache trim
         prompt = f"""<|im_start|>user
 ```
-{file_content[:int(len(file_content) * 0.5)] + file_content[:int(len(file_content) * 0.5)]}
+{file_content[: int(len(file_content) * 0.5)] + file_content[: int(len(file_content) * 0.5)]}
 ```
 Who is this passage about? Only say the name, and nothing else<end_of_turn>
 <|im_end|>
@@ -196,8 +205,11 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         # Expect prompt cache ot be intact for the first half of the file_content, so we should get 1
         # intermediate callback this time
         self.assertEqual(prompt_progress_callback_times_called, 3)
-        self.assertGreater(len(generated_text_2), 0, "Model failed to generate any text")
+        self.assertGreater(
+            len(generated_text_2), 0, "Model failed to generate any text"
+        )
         self.assertEqual(generated_text_1, generated_text_2)
+
 
 class TestStructuredGen(unittest.TestCase):
     def setUp(self):
@@ -283,6 +295,7 @@ class TestStructuredGen(unittest.TestCase):
 
         # throw if not valid JSON
         json.loads(generated_text)
+
 
 class TestSpeculativeDecoding(unittest.TestCase):
     @classmethod

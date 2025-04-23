@@ -10,7 +10,6 @@ from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.processors.repetition_penalty_processor import (
-    RepetitionPenaltyProcessor,
     replace_default_repetition_penalty_processor,
 )
 from mlx_engine.utils.token import Token
