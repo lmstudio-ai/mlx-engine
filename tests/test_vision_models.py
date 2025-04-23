@@ -1,7 +1,8 @@
 import unittest
 import base64
 from pathlib import Path
-from mlx_engine.generate import load_model, tokenize, create_generator
+from mlx_engine.generate import load_model, tokenize, create_generator, is_draft_model_compatible
+from .utils import model_getter
 import sys
 import subprocess
 import os
@@ -229,6 +230,16 @@ class TestVisionModels(unittest.TestCase):
         prompt = f"{self.text_only_prompt}"
         self.model_helper("mlx-community/gemma-3-4b-it-4bit", prompt, text_only=True)
 
+    def test_draft_model_not_compatible_vision(self):
+        model_path = model_getter("mlx-community/Qwen2-VL-7B-Instruct-4bit")
+        draft_model_path = model_getter(
+            "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
+        )
+        model_kit = load_model(model_path=model_path)
+        self.assertFalse(
+            is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+        )
+
 
 """
 To find the correct prompt format for new models, run this command for your model in the terminal and check the prompt dump:
@@ -270,6 +281,7 @@ if __name__ == "__main__":
         "test_bunny_llama_text_only",
         "test_nano_llava",
         "test_nano_llava_text_only",
+        "test_draft_model_not_compatible_vision"
     ]
 
     # Get the current script path

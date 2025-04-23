@@ -234,7 +234,7 @@ class ModelKit:
             self.draft_model = None
             self.cache_wrapper.unset_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
-        mx.metal.clear_cache()
+        mx.clear_cache()
 
     @property
     def language_model(self):

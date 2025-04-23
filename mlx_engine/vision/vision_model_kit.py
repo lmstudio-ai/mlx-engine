@@ -81,7 +81,7 @@ class VisionModelKit(ModelKit):
         self.detokenizer = self.tokenizer.detokenizer
 
         self.cache_wrapper = None
-        mx.metal.clear_cache()
+        mx.clear_cache()
 
     def _initializer(self):
         if self.vocab_only:
