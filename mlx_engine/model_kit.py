@@ -8,7 +8,6 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 
-
 # https://github.com/ml-explore/mlx/blob/f288db8d34c0bcfa0867b6458ab0277c5e86ed45/mlx/fast.cpp#L782
 VALID_KV_BITS = (2, 3, 4, 6, 8)
 
@@ -161,7 +160,6 @@ class ModelKit:
         prompt_tokens,
         img_b64,
         prompt_progress_callback,
-        repetition_context_size,
         generate_args,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> mx.array:
@@ -196,7 +194,6 @@ class ModelKit:
         prompt_tokens = self.cache_wrapper.update_cache(
             mx.array(prompt_tokens),
             prompt_progress_callback,
-            num_tokens_to_exclude=repetition_context_size,
         )
         generate_args["prompt_cache"] = self.cache_wrapper.cache
 
@@ -237,7 +234,7 @@ class ModelKit:
             self.draft_model = None
             self.cache_wrapper.unset_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
-        mx.metal.clear_cache()
+        mx.clear_cache()
 
     @property
     def language_model(self):

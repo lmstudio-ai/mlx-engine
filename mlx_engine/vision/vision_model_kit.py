@@ -81,7 +81,7 @@ class VisionModelKit(ModelKit):
         self.detokenizer = self.tokenizer.detokenizer
 
         self.cache_wrapper = None
-        mx.metal.clear_cache()
+        mx.clear_cache()
 
     def _initializer(self):
         if self.vocab_only:
@@ -99,7 +99,6 @@ class VisionModelKit(ModelKit):
         prompt_tokens,
         images_b64: Optional[List[str]],
         prompt_progress_callback,
-        repetition_context_size,
         generate_args,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> mx.array:
