@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from mlx_engine.logging import log_info
-from utils import model_getter, read_text_file
+from .utils import model_getter, read_text_file
 from mlx_engine.generate import (
     load_model,
     tokenize,
