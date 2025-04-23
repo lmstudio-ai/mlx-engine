@@ -129,11 +129,10 @@ class CacheWrapper:
                 self.cache = make_prompt_cache(self.model, self.max_kv_size)
                 self.tokens = prompt_tokens
                 return self.tokens
-            else:
-                log_info(
-                    prefix="CacheWrapper",
-                    message=f"Trimmed {num_tokens_to_trim} tokens from the prompt cache",
-                )
+            log_info(
+                prefix="CacheWrapper",
+                message=f"Trimmed {num_tokens_to_trim} tokens from the prompt cache",
+            )
 
         # Keep track of the prompt tokens
         self.tokens = prompt_tokens

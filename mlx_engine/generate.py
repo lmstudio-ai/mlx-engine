@@ -4,13 +4,13 @@ from pathlib import Path
 import sys
 
 from mlx_lm.generate import stream_generate
-from mlx_lm.sample_utils import make_logits_processors, make_sampler
+from mlx_lm.sample_utils import make_sampler
 
 from mlx_engine.model_kit import ModelKit
 from mlx_engine.vision.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.processors.repetition_penalty_processor import (
-    replace_default_repetition_penalty_processor,
+    RepetitionPenaltyProcessor,
 )
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
@@ -199,10 +199,6 @@ def create_generator(
             repetition_penalty_kwargs["repetition_context_size"] = (
                 repetition_context_size
             )
-    generate_args["logits_processors"] = make_logits_processors(
-        logit_bias=None,
-        **repetition_penalty_kwargs,
-    )
 
     # Set up speculative decoding
     draft_model = determine_draft_model_for_generation(
@@ -221,19 +217,18 @@ def create_generator(
         speculative_decoding_toggle,
     )
 
-    # Enables the repetition penalty processor to see cached tokens. Do this after processing_prompt to know which
-    # tokens have already been cached
-    replace_successful = replace_default_repetition_penalty_processor(
-        generate_args["logits_processors"],
-        prompt_tokens,
-        num_uncached_tokens=len(stream_generate_input),
-        repetition_context_size=repetition_context_size,
-    )
-    # If we don't find the repetition penalty processor as expected, there was an mlx-lm change to the processor name
-    # that we did not catch. This error should never be thrown in production since tests should catch
-    if not replace_successful and repetition_penalty is not None:
-        raise ValueError(
-            "Repetition penalty processor unable to be found and replaced, even though repetition_penalty is set"
+    # Setup logits processors
+    generate_args["logits_processors"] = []
+    if repetition_penalty and repetition_penalty != 0.0:
+        already_computed_tokens = (
+            prompt_tokens[: -len(stream_generate_input)]
+            if len(stream_generate_input) > 0
+            else prompt_tokens
+        )
+        generate_args["logits_processors"].append(
+            RepetitionPenaltyProcessor(
+                token_history=already_computed_tokens, **repetition_penalty_kwargs
+            )
         )
 
     # Set up sampler

@@ -61,30 +61,3 @@ def model_load_and_tokenize_prompt(
     prompt_tokens = tokenize(model_kit, prompt)
 
     return model_kit, prompt_tokens
-
-
-def read_text_file(file_path: str | Path) -> str:
-    """
-    Read content from a text file with error handling.
-
-    Args:
-        file_path: Path to the text file to read
-
-    Returns:
-        The content of the file as a string
-
-    Raises:
-        FileNotFoundError: If the file does not exist
-        Exception: For other reading errors
-    """
-    try:
-        # Ensure file_path is a Path object for better handling
-        path = Path(file_path).expanduser().resolve()
-        with open(path, "r", encoding="utf-8") as file:
-            return file.read()
-    except FileNotFoundError:
-        print(f"Error: File not found at {file_path}")
-        raise
-    except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
-        raise

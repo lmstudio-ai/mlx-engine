@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from mlx_engine.logging import log_info
-from .utils import model_getter, model_load_and_tokenize_prompt, read_text_file
+from .utils import model_getter, model_load_and_tokenize_prompt
 from mlx_engine.generate import (
     load_model,
     load_draft_model,
@@ -53,18 +53,17 @@ The quick brown fox jumped over the lazy dog. The quick brown fox jumped over th
             "The quick brown fox jumped over the lazy dog.", generated_text
         )
 
-    def test_prompt_caching(self):
-        model_path = model_getter("mlx-community/gemma-3-text-4b-it-4bit")
+    def test_prompt_caching_happy_path_qwen2_5(self):
+        model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
-        file_content = read_text_file(
-            self.test_data_dir / "ben_franklin_autobiography_start.txt"
-        )
-        prompt = f"""<bos><start_of_turn>user
+        file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
+        file_content = file_path.read_text()
+        prompt = f"""<|im_start|>user
 ```
 {file_content}
 ```
-Who is this passage about? Only say the name, and nothing else<end_of_turn>
-<start_of_turn>model
+Who is this passage about? Only say the name, and nothing else<|im_end|>
+<|im_start|>assistant
 """
         prompt_tokens = tokenize(model_kit, prompt)
         generated_text = ""
@@ -107,10 +106,10 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         )
 
         prompt += generated_text
-        prompt += """<end_of_turn>
-<start_of_turn>user
-repeat<end_of_turn>
-<start_of_turn>model
+        prompt += """<|im_end|>
+<|im_start|>user
+repeat<|im_end|>
+<|im_start|>assistant
 """
         prompt_tokens = tokenize(model_kit, prompt)
         reset_state()
@@ -129,9 +128,8 @@ repeat<end_of_turn>
     def test_prompt_caching_trim_qwen2_5(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
-        file_content = read_text_file(
-            self.test_data_dir / "ben_franklin_autobiography_start.txt"
-        )
+        file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
+        file_content = file_path.read_text()
         prompt = f"""<|im_start|>user
 ```
 {file_content}
@@ -202,7 +200,7 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         prompt_progress_callback_times_called = 0
         generate(text_accumulator=generated_text_list_2)
         generated_text_2 = "".join(generated_text_list_2)
-        # Expect prompt cache ot be intact for the first half of the file_content, so we should get 1
+        # Expect prompt cache to be intact for the first half of the file_content, so we should get 1
         # intermediate callback this time
         self.assertEqual(prompt_progress_callback_times_called, 3)
         self.assertGreater(
