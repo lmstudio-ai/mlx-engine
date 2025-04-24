@@ -118,12 +118,13 @@ We use pre-commit hooks to maintain code quality. Before contributing, please:
 
 ## Testing
 
-To run tests, run the following command from the root of this repo:
+To run tests, run the following from the root of this repo:
 ```bash
-python -m unittest discover tests
+python -m pip install pytest
+python -m pytest tests/
 ```
 
 To test specific vision models:
 ```bash
-python -m unittest tests/test_vision_models.py -k pixtral
+python -m pytest tests/test_vision_models.py -k pixtral
 ```
