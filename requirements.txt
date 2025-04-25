@@ -22,9 +22,9 @@ jsonschema-specifications==2024.10.1
 jsonschema==4.23.0
 lark==1.2.2
 markupsafe==2.1.5
-mlx-lm==0.22.5
+mlx-lm==0.23.1
 mlx-vlm==0.1.23
-mlx==0.24.2
+mlx==0.25.0
 mpmath==1.3.0
 multidict==6.1.0
 nest-asyncio==1.6.0
