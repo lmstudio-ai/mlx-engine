@@ -10,7 +10,6 @@ from mlx_engine.generate import (
 from .utils import model_getter
 import sys
 import subprocess
-import os
 
 
 class TestVisionModels(unittest.TestCase):
@@ -229,7 +228,6 @@ class TestVisionModels(unittest.TestCase):
         prompt = f"{self.description_prompt}<start_of_image>"
         self.model_helper("mlx-community/gemma-3-4b-it-4bit", prompt)
 
-    @unittest.skip("This only outputs pad tokens, but it doesn't crash")
     def test_gemma3_text_only(self):
         """Test Gemma 3 model"""
         prompt = f"{self.text_only_prompt}"
@@ -250,66 +248,3 @@ class TestVisionModels(unittest.TestCase):
 To find the correct prompt format for new models, run this command for your model in the terminal and check the prompt dump:
 python -m mlx_vlm.generate --model ~/.cache/lm-studio/models/mlx-community/MODEL-NAME --max-tokens 100 --temp 0.0 --image http://images.cocodataset.org/val2017/000000039769.jpg --prompt "What do you see?"
 """
-
-
-def run_single_test(test_name):
-    """Run a single test in isolation"""
-    suite = unittest.TestSuite()
-    suite.addTest(TestVisionModels(test_name))
-    runner = unittest.TextTestRunner()
-    result = runner.run(suite)
-    if not result.wasSuccessful():
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    # If a test name is provided as an argument, run just that test
-    if len(sys.argv) > 1:
-        run_single_test(sys.argv[1])
-        sys.exit(0)
-
-    # List of all test methods
-    test_methods = [
-        "test_llama_vision_instruct",
-        "test_llama_vision_instruct_text_only",
-        "test_pixtral",
-        "test_pixtral_text_only",
-        "test_qwen2",
-        "test_qwen2_text_only",
-        "test_florence",
-        "test_florence_text_only",
-        "test_molmo",
-        "test_molmo_text_only",
-        "test_llava",
-        "test_llava_text_only",
-        "test_bunny_llama",
-        "test_bunny_llama_text_only",
-        "test_nano_llava",
-        "test_nano_llava_text_only",
-        "test_draft_model_not_compatible_vision",
-    ]
-
-    # Get the current script path
-    script_path = os.path.abspath(__file__)
-
-    # Run each test in a separate Python process, to control memory usage
-    for test_name in test_methods:
-        print(f"\nStarting process for {test_name}")
-
-        # Launch a new Python interpreter process for this test
-        result = subprocess.run(
-            [sys.executable, script_path, test_name], capture_output=True, text=True
-        )
-
-        # Print the output
-        print(result.stdout)
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
-
-        # Check if the test passed
-        if result.returncode != 0:
-            print(f"Test {test_name} failed!")
-            sys.exit(1)
-
-        # Force cleanup
-        print(f"Completed {test_name}\n")
