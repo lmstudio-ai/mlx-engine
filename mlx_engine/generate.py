@@ -6,8 +6,8 @@ import sys
 from mlx_lm.generate import stream_generate
 from mlx_lm.sample_utils import make_sampler
 
-from mlx_engine.model_kit import ModelKit
-from mlx_engine.vision.vision_model_kit import VisionModelKit
+from mlx_engine.model_kit.model_kit import ModelKit
+from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
 from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
@@ -24,7 +24,6 @@ from mlx_engine.utils.speculative_decoding import (
     determine_draft_model_for_generation,
     configure_num_draft_tokens_in_generate_args,
 )
-
 
 MAX_TOP_LOGPROBS = 10
 
@@ -72,8 +71,8 @@ def load_model(
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
-            - ModelKit for standard language models
-            - VisionModelKit for models that can process both text and images
+            - ModelKit: for text-only models and vision models with vision add-on support
+            - VisionModelKit: for vision models that are not yet supported by ModelKit
 
     Raises:
         FileNotFoundError: If config.json is not found in the specified model path
@@ -82,8 +81,12 @@ def load_model(
     """
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
+    model_type = config_json.get("model_type", None)
 
-    if "vision_config" in config_json:
+    # only use VisionModelKit if ModelKit doesn't have vision support for this model
+    if "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
+        model_type
+    ):
         if any([kv_bits, kv_group_size, quantized_kv_start]):
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
@@ -179,7 +182,6 @@ def create_generator(
 
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
-        ValueError: If num_draft_tokens is provided but no draft model is loaded
     """
     set_seed(seed)
 
@@ -210,20 +212,23 @@ def create_generator(
     )
 
     # Process prompt
-    stream_generate_input = model_kit.process_prompt(
+    input_tokens, input_embeddings = model_kit.process_prompt(
         prompt_tokens,
         images_b64,
         prompt_progress_callback,
         generate_args,
         speculative_decoding_toggle,
     )
+    if draft_model is None:
+        # input embeddings not yet supported for speculative decoding in mlx-lm
+        generate_args["input_embeddings"] = input_embeddings
 
     # Setup logits processors
     generate_args["logits_processors"] = []
     if repetition_penalty and repetition_penalty != 0.0:
         cached_tokens = (
-            prompt_tokens[: -len(stream_generate_input)]
-            if len(stream_generate_input) > 0
+            prompt_tokens[: -len(input_tokens)]
+            if len(input_tokens) > 0
             else prompt_tokens
         )
         generate_args["logits_processors"].append(
@@ -247,7 +252,7 @@ def create_generator(
         }
     )
 
-    # For vision models, immediately record the token once it's sampled
+    # If using VisionModelKit, immediately record the token once it's sampled
     if type(model_kit) is VisionModelKit:
         sampler_func = generate_args["sampler"]
 
@@ -262,7 +267,7 @@ def create_generator(
     is_structured_output_request = json_schema is not None
     if is_structured_output_request:
         generate_args["logits_processors"].append(
-            OutlinesLogitsProcessor(model_kit, json_schema, stream_generate_input)
+            OutlinesLogitsProcessor(model_kit, json_schema, input_tokens)
         )
 
     # Validate top_logprobs
@@ -346,14 +351,16 @@ def create_generator(
         model=model_kit.model,
         tokenizer=tokenizer,
         draft_model=draft_model,
-        prompt=stream_generate_input,
+        prompt=input_tokens,
         max_tokens=max_tokens,
         **generate_args,
     ):
         # Token processor
         token = generation_result.token
         text += generation_result.text
-        model_kit.update_cache_wrapper(token)
+        # cross-generation cache with images is not currenlty supported
+        if not images_b64:
+            model_kit.record_token_to_cache(token)
 
         logprobs = generation_result.logprobs
         token_buffer.append(
