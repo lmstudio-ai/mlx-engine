@@ -12,7 +12,7 @@ from mlx_vlm.models.gemma3 import (
     Model as Gemma3CombinedModel,  # for prepare_inputs_for_multimodal
 )
 from mlx_vlm.models.gemma3.gemma3 import Gemma3MultiModalProjector
-from mlx_vlm.utils import sanitize_weights, load_processor
+from mlx_vlm.utils import sanitize_weights, load_processor, get_class_predicate
 
 from pathlib import Path
 import mlx.core as mx
@@ -33,10 +33,8 @@ class Gemma3VisionAddOn(BaseVisionAddOn, nn.Module):
 
     def __init__(self, model_path: Path):
         super().__init__()
-        self.model_path = model_path
-        self.config = Gemma3ModelConfig.from_dict(
-            json.loads((model_path / "config.json").read_text())
-        )
+        config_dict = json.loads((model_path / "config.json").read_text())
+        self.config = Gemma3ModelConfig.from_dict(config_dict)
         self.config.vision_config = Gemma3VisionConfig.from_dict(
             self.config.vision_config
         )
@@ -47,10 +45,10 @@ class Gemma3VisionAddOn(BaseVisionAddOn, nn.Module):
         # load the weights for the vision tower
         # ref: https://github.com/Blaizzy/mlx-vlm/blob/d2391123cabac313729f9a2a8d57d396e2592f20/mlx_vlm/utils.py#L147
         # and https://github.com/Blaizzy/mlx-vlm/blob/d2391123cabac313729f9a2a8d57d396e2592f20/mlx_vlm/models/gemma3/gemma3.py#L86-L87
-        weight_files = glob.glob(str(self.model_path / "*.safetensors"))
+        weight_files = glob.glob(str(model_path / "*.safetensors"))
         if not weight_files:
             raise FileNotFoundError(
-                f"Failed to load Gemma3 vision model: {self.model_path} does not contain any safetensors files"
+                f"Failed to load Gemma3 vision model: {model_path} does not contain any safetensors files"
             )
         weights = {}
         for wf in weight_files:
@@ -64,7 +62,15 @@ class Gemma3VisionAddOn(BaseVisionAddOn, nn.Module):
         weights = sanitize_weights(
             Gemma3VisionTower, weights, self.config.vision_config
         )
-        # load weights using nn.Module method
+        # perform jit quantization if needed
+        if (quantization := config_dict.get("quantization", None)) is not None:
+            class_predicate = get_class_predicate(skip_vision=False, weights=weights)
+            nn.quantize(
+                self,
+                **quantization,
+                class_predicate=class_predicate,
+            )
+
         self.load_weights(list(weights.items()))
         # hardcode lazy loading to false for now, always load weights to memory here
         lazy = False
