@@ -125,6 +125,10 @@ class VisionModelKit(ModelKit):
         #   Send the prompt back reshaped, and save the real shape in `self.model.input_ids`
         return self.model.input_ids.reshape(-1), None
 
+    def is_cross_prompt_cache_active(self) -> bool:
+        """VisionModelKit does not support cross prompt caching"""
+        return False
+
     def record_token_to_cache(self, token: int) -> None:
         pass
 

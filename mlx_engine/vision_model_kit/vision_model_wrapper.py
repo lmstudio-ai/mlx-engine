@@ -1,11 +1,12 @@
 import mlx.core as mx
 from mlx_engine.logging import log_info
 from mlx_vlm.models.cache import KVCache, SimpleKVCache
-from mlx_vlm.utils import prepare_inputs
 
 from typing import List, Optional
 
-from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
+from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
+    common_process_prompt_with_images,
+)
 
 
 class VisionModelWrapper:
@@ -163,22 +164,15 @@ class VisionModelWrapper:
         if images_b64 is None:
             images_b64 = []
 
-        detokenizer.reset()
-        [detokenizer.add_token(token) for token in prompt_tokens]
-        detokenizer.finalize()
-        prompt = detokenizer.text
+        # Handle the case with no images
+        if len(images_b64) == 0:
+            detokenizer.reset()
+            [detokenizer.add_token(token) for token in prompt_tokens]
+            detokenizer.finalize()
+            prompt = detokenizer.text
 
-        log_info(prefix="VisionModelWrapper", message=f"Prompt dump: {prompt}\n")
+            log_info(prefix="VisionModelWrapper", message=f"Prompt dump: {prompt}\n")
 
-        images = convert_to_pil(images_b64)
-        images = custom_resize(images)
-
-        if hasattr(self.vision_model.config, "image_token_index"):
-            image_token_index = self.vision_model.config.image_token_index
-        else:
-            image_token_index = None
-
-        if len(images) == 0:
             try:
                 if hasattr(processor, "process"):
                     # Needed for Molmo
@@ -194,21 +188,19 @@ class VisionModelWrapper:
                     )
                 raise e
         else:
-            inputs = prepare_inputs(
+            # Use the common function for image processing
+            processed = common_process_prompt_with_images(
+                prompt_tokens=prompt_tokens,
+                images_b64=images_b64,
                 processor=processor,
-                images=images,
-                prompts=prompt,
-                image_token_index=image_token_index,
-                resize_shape=None,
+                config=self.vision_model.config,
             )
-            self.input_ids = inputs["input_ids"]
-            self.pixel_values = inputs["pixel_values"]
-            self.mask = inputs["attention_mask"]
-            self.model_inputs = {
-                k: v
-                for k, v in inputs.items()
-                if k not in ["input_ids", "pixel_values", "attention_mask"]
-            }
+
+            # Set class attributes from the processed result
+            self.input_ids = processed.input_ids
+            self.pixel_values = processed.pixel_values
+            self.mask = processed.attention_mask
+            self.model_inputs = processed.other_inputs
 
     @property
     def vision_model(self):

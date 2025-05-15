@@ -358,8 +358,8 @@ def create_generator(
         # Token processor
         token = generation_result.token
         text += generation_result.text
-        # cross-generation cache with images is not currenlty supported
-        if not images_b64:
+        # record generated token to cache, if cache is active
+        if model_kit.is_cross_prompt_cache_active():
             model_kit.record_token_to_cache(token)
 
         logprobs = generation_result.logprobs

@@ -10,6 +10,7 @@ from mlx_engine.generate import (
 from .utils import model_getter
 import sys
 import subprocess
+from textwrap import dedent
 
 
 class TestVisionModels(unittest.TestCase):
@@ -330,27 +331,25 @@ You are a helpful assistant.<|im_end|>
             return generated_text, num_prompt_processing_callbacks
 
         # Generation 1 - model creates a long story
-        prompt = """<bos><start_of_turn>user
-Tell me a 500-word story<end_of_turn>
-<start_of_turn>model
-"""
+        prompt = dedent("""\
+            <bos><start_of_turn>user
+            Tell me a 500-word story<end_of_turn>
+            <start_of_turn>model
+            """)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
         self.assertEqual(num_prompt_processing_callbacks, 2)  # single batch - 0, 100
         self.assertIn("silas", generated_text.lower())
 
-        # Generation 2 - ask for a detail about the story, should not reprocesses
-        prompt += (
-            generated_text
-            + """<end_of_turn>
-<start_of_turn>user
-What was the main characters name?<end_of_turn>
-<start_of_turn>model
-"""
-        )
+        # Generation 2 - ask for a detail about the story, should not reprocess
+        prompt += generated_text + dedent("""\
+            <end_of_turn>
+            <start_of_turn>user
+            What was the main characters name?<end_of_turn>
+            <start_of_turn>model
+            """)
         num_tokens = len(model_kit.tokenize(prompt))
-        self.assertGreater(
-            num_tokens, 512
-        )  # with no caching this would cause a progress callback
+        # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
+        self.assertGreater(num_tokens, 512)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
         self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
         self.assertIn("silas", generated_text.lower())
@@ -389,7 +388,9 @@ What was the main characters name?<end_of_turn>
         # Generation 1 - send model a long excerpt to summarize
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
-        prompt = f"""<bos><start_of_turn>user
+        # don't use dedent below b/c file content doesn't match indentation on each newline
+        prompt = f"""\
+<bos><start_of_turn>user
 ```
 {file_content}
 ```
@@ -405,14 +406,13 @@ Summarize this in one sentence<end_of_turn>
         self.assertIn("benjamin franklin", generated_text.lower())
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
-        prompt += (
-            generated_text
-            + """<end_of_turn>
-<start_of_turn>user
-What was the main characters name?<end_of_turn>
-<start_of_turn>model
-"""
-        )
+        prompt += generated_text + dedent("""\
+                <end_of_turn>
+                <start_of_turn>user
+                What was the main characters name?<end_of_turn>
+                <start_of_turn>model
+                """)
+        print(prompt)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
         self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
         self.assertIn("benjamin franklin", generated_text.lower())

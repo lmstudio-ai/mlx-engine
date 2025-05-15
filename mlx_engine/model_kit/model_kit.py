@@ -31,7 +31,6 @@ class ModelKit:
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled. Defaults to 0.
     """
 
-    SUPPORTED_VISION_ARCHITECTURES = ["gemma3"]
     VISION_ADD_ON_MAP = {
         "gemma3": Gemma3VisionAddOn,
     }
@@ -41,6 +40,7 @@ class ModelKit:
     tokenizer: TokenizerWrapper = None
     detokenizer: StreamingDetokenizer = None
     cache_wrapper: Optional[CacheWrapper] = None
+    _cross_prompt_cache_active: bool = False
     max_kv_size: Optional[int] = None
     kv_bits: Optional[int] = None
     kv_group_size: Optional[int] = None
@@ -137,6 +137,7 @@ class ModelKit:
         ### TEXT-ONLY PROCESS_PROMPT ###
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
         if is_text_only_processing:
+            self._cross_prompt_cache_active = True
             return process_prompt_text_only(
                 prompt_tokens,
                 self.cache_wrapper,
@@ -150,14 +151,21 @@ class ModelKit:
             raise ValueError(
                 "Vision add-on is not loaded, but images were provided for processing"
             )
+        self._cross_prompt_cache_active = False
         embeddings = self.vision_add_on.compute_embeddings(
             self.model, prompt_tokens, images_b64
         )
-        return [], embeddings
+        return mx.array([]), embeddings
+
+    def is_cross_prompt_cache_active(self) -> bool:
+        """
+        Check if cross-prompt caching is currently enabled.
+        Can be overridden by subclasses for custom behavior.
+        """
+        return self._cross_prompt_cache_active
 
     def record_token_to_cache(self, token: int) -> None:
         self.cache_wrapper.record_generated_token(token)
-        pass
 
     @staticmethod
     def is_supported_vision_arch(model_arch: str) -> bool:
@@ -170,7 +178,7 @@ class ModelKit:
         Returns:
             bool: True if vision is supported, False otherwise
         """
-        return model_arch in ModelKit.SUPPORTED_VISION_ARCHITECTURES
+        return model_arch in ModelKit.VISION_ADD_ON_MAP
 
     def is_draft_model_compatible(self, path: str | Path) -> bool:
         path = Path(path)

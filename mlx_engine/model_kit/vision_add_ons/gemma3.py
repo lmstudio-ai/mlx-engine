@@ -17,7 +17,7 @@ from mlx_vlm.utils import sanitize_weights, load_processor
 from pathlib import Path
 import mlx.core as mx
 
-from mlx_engine.logging import log_info, log_error
+from mlx_engine.logging import log_info
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
@@ -49,9 +49,9 @@ class Gemma3VisionAddOn(BaseVisionAddOn, nn.Module):
         # and https://github.com/Blaizzy/mlx-vlm/blob/d2391123cabac313729f9a2a8d57d396e2592f20/mlx_vlm/models/gemma3/gemma3.py#L86-L87
         weight_files = glob.glob(str(self.model_path / "*.safetensors"))
         if not weight_files:
-            message = f"Failed to load Gemma3 vision model: {self.model_path} does not contain any safetensors files"
-            log_error(prefix=self.GEMMA3_LOG_PREFIX, message=message)
-            raise FileNotFoundError(message)
+            raise FileNotFoundError(
+                f"Failed to load Gemma3 vision model: {self.model_path} does not contain any safetensors files"
+            )
         weights = {}
         for wf in weight_files:
             weights.update(mx.load(wf))
@@ -65,9 +65,7 @@ class Gemma3VisionAddOn(BaseVisionAddOn, nn.Module):
             Gemma3VisionTower, weights, self.config.vision_config
         )
         # load weights using nn.Module method
-        self.load_weights(
-            list(weights.items()), strict=False
-        )  # allow weights not in model to be in the file
+        self.load_weights(list(weights.items()))
         # hardcode lazy loading to false for now, always load weights to memory here
         lazy = False
         if not lazy:
