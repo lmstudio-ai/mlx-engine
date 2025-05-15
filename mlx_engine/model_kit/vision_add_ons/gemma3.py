@@ -81,7 +81,7 @@ class Gemma3VisionAddOn(BaseVisionAddOn, nn.Module):
         self.eval()
         log_info(
             prefix=self.GEMMA3_LOG_PREFIX,
-            message=f"Gemma3 vision model loaded successfully from {self.model_path}",
+            message=f"Gemma3 vision model loaded successfully from {model_path}",
         )
 
     def compute_embeddings(
