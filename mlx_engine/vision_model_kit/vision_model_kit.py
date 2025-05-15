@@ -1,6 +1,6 @@
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Tuple
 
-from mlx_engine.model_kit import ModelKit
+from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.logging import log_info
 from ._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
@@ -101,13 +101,14 @@ class VisionModelKit(ModelKit):
         prompt_progress_callback,
         generate_args,
         speculative_decoding_toggle: Optional[bool] = None,
-    ) -> mx.array:
+    ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Call this before starting evaluation
 
         This method opens the image from the base64-encoded string, and adds the special image token to the prompt
 
-        Returns the input for the `generate_step` function
+        Returns the processed prompt tokens to be input to the `generate_step` function, and optionally input
+        embeddings. For VisionModelKit, the input embeddings are always none.
         """
         if self.has_processed_prompt:
             self._reset_for_prediction()
@@ -122,9 +123,13 @@ class VisionModelKit(ModelKit):
 
         # The VLM input_ids shape is important, but mlx_lm expects a flattened array
         #   Send the prompt back reshaped, and save the real shape in `self.model.input_ids`
-        return self.model.input_ids.reshape(-1)
+        return self.model.input_ids.reshape(-1), None
 
-    def update_cache_wrapper(self, token: int) -> None:
+    def is_cross_prompt_cache_active(self) -> bool:
+        """VisionModelKit does not support cross prompt caching"""
+        return False
+
+    def record_token_to_cache(self, token: int) -> None:
         pass
 
     def record_sampled_token(self, token: int) -> None:

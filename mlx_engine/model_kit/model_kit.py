@@ -1,23 +1,26 @@
-from typing import List, Optional, Tuple
+import json
+from typing import Optional, List, Tuple
 
-from mlx_engine.logging import log_info, log_warn
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
+
 from mlx_engine.cache_wrapper import CacheWrapper
 from pathlib import Path
-import mlx.core as mx
 import mlx.nn as nn
+import mlx.core as mx
 
-# https://github.com/ml-explore/mlx/blob/f288db8d34c0bcfa0867b6458ab0277c5e86ed45/mlx/fast.cpp#L782
-VALID_KV_BITS = (2, 3, 4, 6, 8)
+from mlx_engine.logging import log_info, log_warn
+from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
+from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
+from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
-# https://github.com/ml-explore/mlx/blob/f288db8d34c0bcfa0867b6458ab0277c5e86ed45/mlx/fast.cpp#L775
-VALID_KV_GROUP_SIZE = (32, 64, 128)
+LOG_PREFIX = "ModelKit"
 
 
 class ModelKit:
     """
-    Collection of objects and methods that are needed for operating a text model.
+    Collection of objects and methods that are needed for operating a model.
 
     Args:
         model_path (Path): Path to the model directory containing model files.
@@ -28,25 +31,33 @@ class ModelKit:
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled. Defaults to 0.
     """
 
+    VISION_ADD_ON_MAP = {
+        "gemma3": Gemma3VisionAddOn,
+    }
+
     # model state tracking
     model: nn.Module = None
     tokenizer: TokenizerWrapper = None
     detokenizer: StreamingDetokenizer = None
     cache_wrapper: Optional[CacheWrapper] = None
+    _cross_prompt_cache_active: bool = False
     max_kv_size: Optional[int] = None
     kv_bits: Optional[int] = None
     kv_group_size: Optional[int] = None
     quantized_kv_start: Optional[int] = None
     draft_model: Optional[nn.Module] = None
 
+    # multi-modal add-ons
+    vision_add_on: Optional[BaseVisionAddOn] = None
+
     def _vocab_only_init(self, model_path: Path):
         log_info(
-            prefix="ModelKit",
+            prefix=LOG_PREFIX,
             message=f"Loading model (vocab-only) from {model_path}...",
         )
         self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(model_path)
         self.detokenizer = self.tokenizer.detokenizer
-        log_info(prefix="ModelKit", message="Model (vocab-only) loaded successfully")
+        log_info(prefix=LOG_PREFIX, message="Model (vocab-only) loaded successfully")
 
     def _full_model_init(
         self,
@@ -56,21 +67,20 @@ class ModelKit:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
     ):
-        kv_bits, kv_group_size, quantized_kv_start = (
-            self._get_kv_cache_quantization_params(
-                kv_bits, kv_group_size, quantized_kv_start
-            )
+        kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
+            kv_bits,
+            kv_group_size,
+            quantized_kv_start,
         )
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
             log_warn(
-                prefix="ModelKit",
+                prefix=LOG_PREFIX,
                 message="max_kv_size is ignored when using KV cache quantization",
             )
             max_kv_size = None
-
         self.model_path = model_path
-        log_info(prefix="ModelKit", message=f"Loading model from {model_path}...")
+        log_info(prefix=LOG_PREFIX, message=f"Loading model from {model_path}...")
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(
@@ -83,7 +93,12 @@ class ModelKit:
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
-        log_info(prefix="ModelKit", message="Model loaded successfully")
+        config_json = json.loads((model_path / "config.json").read_text())
+        model_type = config_json.get("model_type", None)
+        vision_add_on_class = self.VISION_ADD_ON_MAP.get(model_type)
+        if vision_add_on_class:
+            self.vision_add_on = vision_add_on_class(model_path)
+        log_info(prefix=LOG_PREFIX, message="Model loaded successfully")
 
     def __init__(
         self,
@@ -105,50 +120,6 @@ class ModelKit:
                 quantized_kv_start,
             )
 
-    @staticmethod
-    def _get_kv_cache_quantization_params(
-        kv_bits: Optional[int],
-        kv_group_size: Optional[int],
-        quantized_kv_start: Optional[int],
-    ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-        """
-        Validates and processes KV cache quantization parameters.
-
-        Args:
-            kv_bits: Number of bits for quantization. If None, disables quantization.
-            kv_group_size: Group size for quantization. Defaults to 64 if quantization enabled.
-            quantized_kv_start: Step to begin quantization. Defaults to 0 if quantization enabled.
-
-        Returns:
-            Tuple of (kv_bits, kv_group_size, quantized_kv_start), all None if quantization disabled.
-
-        Raises:
-            ValueError: If kv_bits is invalid or missing when other params are set.
-        """
-        if any([kv_group_size, quantized_kv_start]) and kv_bits is None:
-            raise ValueError(
-                "Enabling KV Cache Quantization requires kv_bits to be set"
-            )
-
-        if kv_bits is None:
-            return None, None, None
-
-        # defaults taken from here:
-        # https://github.com/ml-explore/mlx-examples/blob/3d793ec/llms/mlx_lm/utils.py#L352-L353
-        if kv_group_size is None:
-            kv_group_size = 64
-        if quantized_kv_start is None:
-            quantized_kv_start = 0
-
-        if kv_bits not in VALID_KV_BITS:
-            raise ValueError(f"Invalid kv_bits value. Must be one of {VALID_KV_BITS}")
-        if kv_group_size not in VALID_KV_GROUP_SIZE:
-            raise ValueError(
-                f"Invalid kv_group_size value. Must be one of {VALID_KV_GROUP_SIZE}"
-            )
-
-        return kv_bits, kv_group_size, quantized_kv_start
-
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
         if isinstance(ids, int):
@@ -158,57 +129,70 @@ class ModelKit:
     def process_prompt(
         self,
         prompt_tokens,
-        img_b64,
+        images_b64: Optional[List[str]],
         prompt_progress_callback,
         generate_args,
         speculative_decoding_toggle: Optional[bool] = None,
-    ) -> mx.array:
-        """
-        This method processes the prompt, adding its tokens to the cache history
-
-        Call this before starting evaluation
-
-        Returns the uncached tokens as input for the `generate_step` function, and
-        updates generate_args with the cache history
-        """
-        if len(prompt_tokens) == 0:
-            raise ValueError("Prompt tokens must be non-empty")
-
-        # Make sure cache's draft model setting aligns with speculative decoding toggle
-        should_use_draft_model = (
-            speculative_decoding_toggle
-            if speculative_decoding_toggle is not None
-            else self.draft_model is not None
+    ) -> Tuple[mx.array, Optional[mx.array]]:
+        ### TEXT-ONLY PROCESS_PROMPT ###
+        is_text_only_processing = images_b64 is None or len(images_b64) == 0
+        if is_text_only_processing:
+            self._cross_prompt_cache_active = True
+            return process_prompt_text_only(
+                prompt_tokens,
+                self.cache_wrapper,
+                generate_args,
+                self.draft_model,
+                speculative_decoding_toggle,
+                prompt_progress_callback,
+            ), None
+        ### WITH IMAGES PROMPT PROCESSING ###s
+        if self.vision_add_on is None:
+            raise ValueError(
+                "Vision add-on is not loaded, but images were provided for processing"
+            )
+        self._cross_prompt_cache_active = False
+        embeddings = self.vision_add_on.compute_embeddings(
+            self.model, prompt_tokens, images_b64
         )
-        if should_use_draft_model:
-            if not self.draft_model:
-                raise ValueError(
-                    "Speculative decoding toggle is enabled for prompt processing but no "
-                    "draft model is loaded"
-                )
-            self.cache_wrapper.set_draft_model(self.draft_model)
-        else:
-            self.cache_wrapper.unset_draft_model()
+        return mx.array([]), embeddings
 
-        # Check for common tokens with the previous cache and re-use the cache if possible
-        prompt_tokens = self.cache_wrapper.update_cache(
-            mx.array(prompt_tokens),
-            prompt_progress_callback,
-        )
-        generate_args["prompt_cache"] = self.cache_wrapper.cache
+    def is_cross_prompt_cache_active(self) -> bool:
+        """
+        Check if cross-prompt caching is currently enabled.
+        Can be overridden by subclasses for custom behavior.
+        """
+        return self._cross_prompt_cache_active
 
-        return prompt_tokens
-
-    def update_cache_wrapper(self, token: int) -> None:
+    def record_token_to_cache(self, token: int) -> None:
         self.cache_wrapper.record_generated_token(token)
+
+    @staticmethod
+    def is_supported_vision_arch(model_arch: str) -> bool:
+        """
+        Determines if the specified model architecture has vision support.
+
+        Args:
+            model_arch (str): The model architecture identifier to check
+
+        Returns:
+            bool: True if vision is supported, False otherwise
+        """
+        return model_arch in ModelKit.VISION_ADD_ON_MAP
 
     def is_draft_model_compatible(self, path: str | Path) -> bool:
         path = Path(path)
         if self.tokenizer is None:
             log_warn(
-                prefix="ModelKit",
+                prefix=LOG_PREFIX,
                 message="Draft model compatibility check requires at least a vocab-only "
                 "loaded main model",
+            )
+            return False
+        if self.vision_add_on is not None:
+            log_warn(
+                prefix=LOG_PREFIX,
+                message="Draft models are currently unsupported for vision models",
             )
             return False
         draft_tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(path)
@@ -217,7 +201,7 @@ class ModelKit:
         return True
 
     def load_draft_model(self, path: str | Path) -> None:
-        log_info(prefix="ModelKit", message=f"Loading draft model from {path}...")
+        log_info(prefix=LOG_PREFIX, message=f"Loading draft model from {path}...")
         path = Path(path)
         if self.model is None:
             raise ValueError("Main model must be loaded before loading a draft model")
@@ -225,17 +209,13 @@ class ModelKit:
             raise ValueError("Draft model is not compatible with main model")
         self.draft_model, _ = mlx_lm.utils.load(path)
         self.cache_wrapper.set_draft_model(self.draft_model)
-        log_info(prefix="ModelKit", message="Draft model loaded")
+        log_info(prefix=LOG_PREFIX, message="Draft model loaded")
 
     def unload_draft_model(self) -> None:
         if self.draft_model is None:
-            log_info(prefix="ModelKit", message="No loaded draft model to unload")
+            log_info(prefix=LOG_PREFIX, message="No loaded draft model to unload")
         else:
             self.draft_model = None
             self.cache_wrapper.unset_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
         mx.clear_cache()
-
-    @property
-    def language_model(self):
-        return self.model

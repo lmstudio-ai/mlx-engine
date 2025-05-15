@@ -1,6 +1,6 @@
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.model_kit import ModelKit
+from mlx_engine.model_kit.model_kit import ModelKit
 import mlx.core as mx
 import json
 

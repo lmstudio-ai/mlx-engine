@@ -3,7 +3,7 @@ from typing import Optional
 import mlx.nn as nn
 
 from mlx_engine.logging import log_info
-from mlx_engine.model_kit import ModelKit
+from mlx_engine.model_kit.model_kit import ModelKit
 
 
 def determine_draft_model_for_generation(
@@ -39,13 +39,11 @@ def configure_num_draft_tokens_in_generate_args(
     """
     Modifies generate_args in place to include num_draft_tokens if applicable
     """
-    if num_draft_tokens is not None:
-        if type(model_kit) is not ModelKit:
-            log_info(
-                message=f"num_draft_tokens setting '{num_draft_tokens}' ignored, "
-                f"model_kit (type {type(model_kit).__name__}) must be a text ModelKit instance"
-            )
-        elif draft_model is None:
-            pass
-        else:
-            generate_args["num_draft_tokens"] = num_draft_tokens
+    # Only configure draft tokens when all required conditions are met
+    should_add_num_draft_tokens_to_args = (
+        type(model_kit) is ModelKit
+        and draft_model is not None
+        and num_draft_tokens is not None
+    )
+    if should_add_num_draft_tokens_to_args:
+        generate_args["num_draft_tokens"] = num_draft_tokens
