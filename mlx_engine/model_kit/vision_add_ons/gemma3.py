@@ -71,6 +71,7 @@ class Gemma3VisionAddOn(BaseVisionAddOn, nn.Module):
                 class_predicate=class_predicate,
             )
 
+        # load weights using nn.Module method
         self.load_weights(list(weights.items()))
         # hardcode lazy loading to false for now, always load weights to memory here
         lazy = False
