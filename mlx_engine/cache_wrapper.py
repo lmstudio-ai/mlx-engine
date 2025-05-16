@@ -237,6 +237,7 @@ class CacheWrapper:
         self,
         prompt_tokens: mx.array,
         prompt_progress_callback,
+        *,
         num_tokens_to_exclude: int = 1,
     ) -> mx.array:
         """
@@ -262,8 +263,9 @@ class CacheWrapper:
         )
 
         # Prefill the cache with the non-excluded prompt tokens
-        prompt_progress_callback(0)
+        num_tokens_to_exclude = min(num_tokens_to_exclude, len(prompt_tokens))
         prefill_tokens = prompt_tokens[:-num_tokens_to_exclude]
+        prompt_progress_callback(0)
         with mx.stream(generation_stream):
             if self.draft_model is not None:
                 # Fill draft model cache (0% to 50% progress)
