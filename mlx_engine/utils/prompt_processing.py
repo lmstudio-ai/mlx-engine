@@ -7,15 +7,13 @@ from mlx_engine.cache_wrapper import CacheWrapper
 
 
 def process_prompt_text_only(
-    prompt_tokens: List[int],
+    prompt_tokens: mx.array,
     cache_wrapper: CacheWrapper,
     generate_args: dict = None,
     draft_model: Optional[nn.Module] = None,
     speculative_decoding_toggle: Optional[bool] = None,
     prompt_progress_callback: Optional[Callable[[float], None]] = None,
 ):
-    if len(prompt_tokens) == 0:
-        raise ValueError("Prompt tokens must be non-empty")
     if cache_wrapper is None:
         raise ValueError("Cache wrapper is not initialized, cannot process prompt")
     if generate_args is None:
@@ -38,7 +36,7 @@ def process_prompt_text_only(
 
     # Check for common tokens with the previous cache and re-use the cache if possible
     prompt_tokens = cache_wrapper.update_cache(
-        mx.array(prompt_tokens),
+        prompt_tokens,
         prompt_progress_callback,
     )
     generate_args["prompt_cache"] = cache_wrapper.cache

@@ -138,8 +138,15 @@ class ModelKit:
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
         if is_text_only_processing:
             self._cross_prompt_cache_active = True
+            if len(prompt_tokens) == 0:
+                log_warn(
+                    prefix="ModelKit",
+                    message="Received empty prompt. Generation quality will be poor",
+                )
+                # Models expect some sort of input, so add whitespace
+                prompt_tokens = self.tokenize(" ")
             return process_prompt_text_only(
-                prompt_tokens,
+                mx.array(prompt_tokens),
                 self.cache_wrapper,
                 generate_args,
                 self.draft_model,
