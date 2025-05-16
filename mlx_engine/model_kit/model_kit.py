@@ -141,7 +141,7 @@ class ModelKit:
             if len(prompt_tokens) == 0:
                 log_warn(
                     prefix="ModelKit",
-                    message="Received empty prompt. Generation quality will be poor",
+                    message="Received empty prompt. Generation quality will likely be poor",
                 )
                 # Models expect some sort of input, so add whitespace
                 prompt_tokens = self.tokenize(" ")
