@@ -12,6 +12,7 @@ import mlx.core as mx
 from mlx_engine.logging import log_info, log_warn
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
@@ -33,6 +34,7 @@ class ModelKit:
 
     VISION_ADD_ON_MAP = {
         "gemma3": Gemma3VisionAddOn,
+        "pixtral": PixtralVisionAddOn,
     }
 
     # model state tracking
