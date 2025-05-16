@@ -96,7 +96,10 @@ class ModelKit:
         config_json = json.loads((model_path / "config.json").read_text())
         model_type = config_json.get("model_type", None)
         vision_add_on_class = self.VISION_ADD_ON_MAP.get(model_type)
-        if vision_add_on_class:
+        should_load_vision_add_on = (
+            vision_add_on_class is not None and "vision_config" in config_json
+        )
+        if should_load_vision_add_on:
             self.vision_add_on = vision_add_on_class(model_path)
         log_info(prefix=LOG_PREFIX, message="Model loaded successfully")
 
