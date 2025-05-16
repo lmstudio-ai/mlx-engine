@@ -1,4 +1,4 @@
-from typing import Optional, List, Callable
+from typing import Optional, Callable
 
 from mlx import nn
 import mlx.core as mx
