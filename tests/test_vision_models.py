@@ -15,9 +15,20 @@ from textwrap import dedent
 
 class TestVisionModels(unittest.TestCase):
     @classmethod
+    def setModelPathPrefix(cls):
+        valid_locations = ["~/.cache/lm-studio/models", "~/.lmstudio/models"]
+        for loc in valid_locations:
+            path = Path(loc).expanduser().resolve()
+            if path.is_dir():
+                cls.model_path_prefix = path
+                break
+        else:
+            raise RuntimeError("No model directory found.")
+
+    @classmethod
     def setUpClass(cls):
         """Set up test resources that will be shared across all test methods"""
-        cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
+        cls.setModelPathPrefix()
         cls.description_prompt = "What is this"
         cls.text_only_prompt = "What is a toucan?"
         cls.test_data_dir = Path(__file__).parent / "data"
@@ -131,6 +142,68 @@ class TestVisionModels(unittest.TestCase):
         self.toucan_test_runner(
             "mlx-community/pixtral-12b-4bit", prompt, text_only=True
         )
+
+    def test_mistral3(self):
+        prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
+        self.toucan_test_runner(
+            "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit", prompt
+        )
+
+    def test_mistral3_text_only(self):
+        prompt = f"<s>[INST]{self.text_only_prompt}[IMG][/INST]"
+        self.toucan_test_runner(
+            "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
+
+    def test_mistral3_text_only_generation_caching(self):
+        """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
+        model_path = model_getter(
+            "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit"
+        )
+
+        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+
+        def generate_text(prompt):
+            prompt_tokens = tokenize(model_kit, prompt)
+            num_prompt_processing_callbacks = 0
+
+            def progress_callback(progress: float) -> None:
+                nonlocal num_prompt_processing_callbacks
+                num_prompt_processing_callbacks += 1
+                print(f"Prompt processing progress: {progress}")
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=1000,
+                prompt_progress_callback=progress_callback,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return generated_text, num_prompt_processing_callbacks
+
+        # Generation 1 - model creates a long story
+        prompt = "<s>[INST]Tell me a 500 word story[/INST]"
+        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
+        self.assertEqual(num_prompt_processing_callbacks, 2)  # single batch - 0%, 100%
+        self.assertIn("clara", generated_text.lower())
+
+        # Generation 2 - ask for a detail about the story, should not reprocess
+        prompt += generated_text + "[INST]What was the main characters name?[/INST]"
+        num_tokens = len(model_kit.tokenize(prompt))
+        # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
+        self.assertGreater(num_tokens, 512)
+        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
+        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0%, 100%
+        self.assertIn("**clara**", generated_text.lower())
 
     def test_qwen2(self):
         """Test Qwen2 VL 7B Instruct model"""
