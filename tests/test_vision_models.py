@@ -193,7 +193,7 @@ You are a helpful assistant.<|im_end|>
         # Test case 2: Second image added in continued conversation
         prompt += """Toucan.<|im_end|>
 <|im_start|>user
-<|vision_start|><|image_pad|><|vision_end|>Use one word to describe each of the images you've seen.<|im_end|>
+<|vision_start|><|image_pad|><|vision_end|>In a few words, describe all of the images you've seen so far<|im_end|>
 <|im_start|>assistant
 """
         images_b64 = [self.toucan_image_b64, self.chameleon_image_b64]
