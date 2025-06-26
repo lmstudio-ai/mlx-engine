@@ -193,7 +193,7 @@ You are a helpful assistant.<|im_end|>
         # Test case 2: Second image added in continued conversation
         prompt += """Toucan.<|im_end|>
 <|im_start|>user
-<|vision_start|><|image_pad|><|vision_end|>Use one word to describe each of the images you've seen.<|im_end|>
+<|vision_start|><|image_pad|><|vision_end|>In a few words, describe all of the images you've seen so far<|im_end|>
 <|im_start|>assistant
 """
         images_b64 = [self.toucan_image_b64, self.chameleon_image_b64]
@@ -201,11 +201,13 @@ You are a helpful assistant.<|im_end|>
         self.assertIn("toucan", unified_generated_text.lower())
         self.assertIn("chameleon", unified_generated_text.lower())
 
+    @unittest.skip("Unavailable since this requires trust_remote_code")
     def test_florence(self):
         """Test Florence 2 Large model"""
         prompt = self.description_prompt
         self.toucan_test_runner("mlx-community/Florence-2-base-ft-4bit", prompt)
 
+    @unittest.skip("Unavailable since this requires trust_remote_code")
     def test_florence_text_only(self):
         """Test Florence 2 Large model with only text"""
         prompt = self.text_only_prompt
@@ -416,6 +418,18 @@ Summarize this in one sentence<end_of_turn>
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
         self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
         self.assertIn("benjamin franklin", generated_text.lower())
+
+    def test_gemma3n(self):
+        """Test gemma 3n model"""
+        prompt = f"<bos><start_of_turn>user\n<image_soft_token>{self.description_prompt}<end_of_turn>\n<start_of_turn>model\n"
+        self.toucan_test_runner("lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt)
+
+    def test_gemma3n_text_only(self):
+        """Test gemma 3n model text only"""
+        prompt = f"<bos><start_of_turn>user\n{self.text_only_prompt}<end_of_turn>\n<start_of_turn>model\n"
+        self.toucan_test_runner(
+            "lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt, text_only=True
+        )
 
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):
