@@ -427,7 +427,9 @@ Summarize this in one sentence<end_of_turn>
     def test_gemma3n_text_only(self):
         """Test gemma 3n model text only"""
         prompt = f"<bos><start_of_turn>user\n{self.text_only_prompt}<end_of_turn>\n<start_of_turn>model\n"
-        self.toucan_test_runner("lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt, text_only=True)
+        self.toucan_test_runner(
+            "lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt, text_only=True
+        )
 
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):
