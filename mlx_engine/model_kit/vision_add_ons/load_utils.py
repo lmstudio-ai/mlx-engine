@@ -10,6 +10,147 @@ from mlx_vlm.utils import sanitize_weights, load_processor, get_class_predicate
 from mlx_engine.logging import log_info
 
 
+def load_and_parse_config(
+    model_path: Path,
+    model_config_class: Any,
+    vision_config_class: Any,
+    text_config_class: Any,
+) -> Tuple[Any, dict]:
+    """
+    Load and parse vision model configuration from config.json.
+
+    Args:
+        model_path: Path to the model directory
+        model_config_class: Configuration class for the model
+        vision_config_class: Configuration class for vision component
+        text_config_class: Configuration class for text component
+
+    Returns:
+        Tuple containing:
+            - The fully initialized config object
+            - The raw config dictionary (needed for quantization later)
+    """
+    config_path = model_path / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Configuration file not found at {config_path}")
+
+    config_dict = json.loads(config_path.read_text())
+    config = model_config_class.from_dict(config_dict)
+    config.vision_config = vision_config_class.from_dict(config.vision_config)
+    config.text_config = text_config_class.from_dict(config.text_config)
+
+    return config, config_dict
+
+
+class VisionComponents(nn.Module):
+    def __init__(self, vision_tower: nn.Module, multi_modal_projector: nn.Module):
+        super().__init__()
+        self.vision_tower = vision_tower
+        self.multi_modal_projector = multi_modal_projector
+
+
+def create_vision_components(
+    config: Any,
+    vision_tower_class: Type[nn.Module],
+    multi_modal_projector_class: Type[nn.Module],
+) -> VisionComponents:
+    """
+    Create vision model components and wrap them in a container module.
+
+    Args:
+        config: The fully initialized config object
+        vision_tower_class: The vision tower model class
+        multi_modal_projector_class: The multi-modal projector class
+
+    Returns:
+        The container module with both components
+    """
+    components = VisionComponents(
+        vision_tower_class(config.vision_config), multi_modal_projector_class(config)
+    )
+    return components
+
+
+def load_and_filter_weights(
+    model_path: Path,
+    components: nn.Module,
+) -> dict:
+    """
+    Load model weights from safetensors files and filter for vision-related weights.
+
+    Args:
+        model_path: Path to the model directory
+        components: The vision components container module
+
+    Returns:
+        Dictionary containing filtered vision-related weights
+    """
+    # Load model weights
+    weight_files = glob.glob(str(model_path / "*.safetensors"))
+    if not weight_files:
+        raise FileNotFoundError(
+            f"Failed to load vision add-on: {model_path} does not contain any safetensors files"
+        )
+
+    # Load and filter weights
+    weights = {}
+    for wf in weight_files:
+        weights.update(mx.load(wf))
+
+    # Filter only vision-related weights
+    vision_weights = {
+        k: v
+        for k, v in weights.items()
+        if any(k.startswith(name) for name in components.children().keys())
+    }
+
+    return vision_weights
+
+
+def maybe_apply_quantization(
+    components: nn.Module,
+    config_dict: dict,
+    vision_weights: dict,
+) -> None:
+    """
+    Apply quantization to vision components if specified in config.
+
+    Args:
+        components: The vision components container module
+        config_dict: Raw config dictionary containing quantization settings
+        vision_weights: The vision-related weights dictionary
+    """
+    # Apply quantization if specified in config
+    if (quantization := config_dict.get("quantization", None)) is not None:
+        class_predicate = get_class_predicate(skip_vision=False, weights=vision_weights)
+        nn.quantize(
+            components,
+            **quantization,
+            class_predicate=class_predicate,
+        )
+
+
+def prepare_components(
+    components: nn.Module,
+    vision_weights: dict,
+) -> None:
+    """
+    Prepare vision components by loading weights and setting to evaluation mode.
+
+    Args:
+        components: The vision components container module
+        vision_weights: The vision-related weights dictionary
+    """
+    # Load weights into the model
+    components.load_weights(list(vision_weights.items()))
+
+    # Always load weights to memory here
+    mx.eval(components.parameters())
+
+    # Set model to evaluation mode
+    components.eval()
+
+
 def load_vision_addon(
     model_path: Path,
     model_config_class: Any,
@@ -39,76 +180,35 @@ def load_vision_addon(
             - The processor for handling images and text
     """
     # Load and parse configuration
-    config_path = model_path / "config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Configuration file not found at {config_path}")
-
-    config_dict = json.loads(config_path.read_text())
-    config = model_config_class.from_dict(config_dict)
-    config.vision_config = vision_config_class.from_dict(config.vision_config)
-    config.text_config = text_config_class.from_dict(config.text_config)
+    config, config_dict = load_and_parse_config(
+        model_path, model_config_class, vision_config_class, text_config_class
+    )
 
     # Create model components
-    vision_tower = vision_tower_class(config.vision_config)
-    multi_modal_projector = multi_modal_projector_class(config)
-
-    # Combine components into a container module for loading weights
-    class VisionComponents(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.vision_tower = vision_tower
-            self.multi_modal_projector = multi_modal_projector
-
-    components = VisionComponents()
+    components = create_vision_components(
+        config, vision_tower_class, multi_modal_projector_class
+    )
 
     # Load processor
     processor = load_processor(model_path=model_path, add_detokenizer=True)
 
-    # Load model weights
-    weight_files = glob.glob(str(model_path / "*.safetensors"))
-    if not weight_files:
-        raise FileNotFoundError(
-            f"Failed to load vision add-on: {model_path} does not contain any safetensors files"
-        )
-
     # Load and filter weights
-    weights = {}
-    for wf in weight_files:
-        weights.update(mx.load(wf))
-
-    # Filter only vision-related weights
-    vision_weights = {
-        k: v
-        for k, v in weights.items()
-        if k.startswith("vision_tower") or k.startswith("multi_modal_projector")
-    }
+    vision_weights = load_and_filter_weights(model_path, components)
 
     # Sanitize weights for vision tower
     vision_weights = sanitize_weights(
-        vision_tower_class, vision_weights, config.vision_config
+        components.vision_tower.__class__, vision_weights, config.vision_config
     )
 
     # Apply quantization if specified in config
-    if (quantization := config_dict.get("quantization", None)) is not None:
-        class_predicate = get_class_predicate(skip_vision=False, weights=vision_weights)
-        nn.quantize(
-            components,
-            **quantization,
-            class_predicate=class_predicate,
-        )
+    maybe_apply_quantization(components, config_dict, vision_weights)
 
-    # Load weights into the model
-    components.load_weights(list(vision_weights.items()))
-
-    # Always load weights to memory here
-    mx.eval(components.parameters())
-
-    # Set model to evaluation mode
-    components.eval()
+    # Prepare components (load weights and set to eval mode)
+    prepare_components(components, vision_weights)
 
     log_info(
         prefix=log_prefix,
         message=f"Vision add-on loaded successfully from {model_path}",
     )
 
-    return vision_tower, multi_modal_projector, config, processor
+    return components.vision_tower, components.multi_modal_projector, config, processor

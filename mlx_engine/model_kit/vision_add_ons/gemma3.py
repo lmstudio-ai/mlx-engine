@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 from pathlib import Path
 
 from mlx import nn
@@ -49,7 +49,7 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
         text_model: nn.Module,
         prompt_tokens: mx.array,
         images_b64: List[str],
-    ) -> mx.array:
+    ) -> Tuple[mx.array, mx.array]:
         """Compute embeddings for text with images."""
         input_ids, pixel_values, attention_mask, other_model_inputs = (
             common_process_prompt_with_images(
@@ -81,4 +81,4 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
             input_ids,
             attention_mask,
         )
-        return final_inputs_embeds.squeeze(0)  # remove batch dimension
+        return (mx.array([]), final_inputs_embeds.squeeze(0))  # remove batch dimension

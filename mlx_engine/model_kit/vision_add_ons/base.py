@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import List
+from typing import List, Tuple
 
 import mlx.core as mx
 from mlx import nn
@@ -22,7 +22,7 @@ class BaseVisionAddOn:
         text_model: nn.Module,
         prompt_tokens: mx.array,
         images_b64: List[str],
-    ) -> mx.array:
+    ) -> Tuple[mx.array, mx.array]:
         """
         Returns input embeddings for the language model after text/image merging of the prompt
         """
