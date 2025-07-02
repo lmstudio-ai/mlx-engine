@@ -32,6 +32,7 @@ def _patch_intermediate_size_value():
     Here, we minimally patch the gemma3n TextConfig's from_dict method to read the list and just use the first value.
     """
 
+    @classmethod
     def fix_intermediate_size_from_dict(cls, params):
         config_dict = {
             k: v for k, v in params.items() if k in inspect.signature(cls).parameters

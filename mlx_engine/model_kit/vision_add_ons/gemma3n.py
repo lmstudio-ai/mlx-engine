@@ -9,7 +9,7 @@ from mlx_vlm.models.gemma3n import (
     ModelConfig as Gemma3nModelConfig,
     VisionConfig as Gemma3nVisionConfig,
     TextConfig as Gemma3nTextConfig,
-    Model as Gemma3nCombinedModel,  # for prepare_inputs_for_multimodal
+    Model as Gemma3nCombinedModel,
 )
 from mlx_vlm.models.gemma3n.gemma3n import Gemma3nMultimodalEmbedder
 from mlx_vlm.utils import sanitize_weights, load_processor
