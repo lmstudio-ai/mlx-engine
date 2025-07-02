@@ -23,5 +23,6 @@ class BaseVisionAddOn:
         images_b64: list[str],
     ) -> tuple[mx.array, mx.array]:
         """
-        Returns input embeddings for the language model after text/image merging of the prompt
+        Returns input ids and input embeddings for the language model after text/image merging of the prompt.
+        The former may be empty for models that do not require input_ids during generation.
         """

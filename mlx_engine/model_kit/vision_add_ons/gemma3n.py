@@ -86,7 +86,7 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
         prompt_tokens: mx.array,
         images_b64: list[str],
     ) -> tuple[mx.array, mx.array]:
-        """Compute embeddings for text with images."""
+        """Compute input_ids and embeddings for text with images."""
         input_ids, pixel_values, attention_mask, other_model_inputs = (
             common_process_prompt_with_images(
                 prompt_tokens=prompt_tokens,

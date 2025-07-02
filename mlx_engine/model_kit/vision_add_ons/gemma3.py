@@ -80,4 +80,5 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
             input_ids,
             attention_mask,
         )
+        # gemma3 generation does not require input_ids, so we return an empty array
         return mx.array([]), final_inputs_embeds.squeeze(0)  # remove batch dimension

@@ -84,4 +84,5 @@ class PixtralVisionAddOn(BaseVisionAddOn):
         final_inputs_embeds = PixtralCombinedModel.merge_input_ids_with_image_features(
             self.config.image_token_index, image_features, input_embeddings, input_ids
         )
+        # pixtral generation does not require input_ids, so we return an empty array
         return mx.array([]), final_inputs_embeds.squeeze(0)  # remove batch dimension
