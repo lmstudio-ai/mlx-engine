@@ -8,8 +8,6 @@ from mlx_engine.generate import (
     is_draft_model_compatible,
 )
 from .utils import model_getter
-import sys
-import subprocess
 from textwrap import dedent
 
 
@@ -17,7 +15,6 @@ class TestVisionModels(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up test resources that will be shared across all test methods"""
-        cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
         cls.description_prompt = "What is this"
         cls.text_only_prompt = "What is a toucan?"
         cls.test_data_dir = Path(__file__).parent / "data"
@@ -38,25 +35,7 @@ class TestVisionModels(unittest.TestCase):
     def toucan_test_runner(self, model_name: str, prompt: str, text_only=False):
         """Helper method to test a single vision model"""
         print(f"Testing model {model_name}")
-
-        model_path = self.model_path_prefix / model_name
-
-        # Check if model exists, if not prompt user to download
-        if not model_path.exists():
-            print(f"\nModel {model_name} not found at {model_path}")
-
-            def greenify(text):
-                return f"\033[92m{text}\033[0m"
-
-            response = input(
-                f"Would you like to download the model {greenify(model_name)}? (y/N): "
-            )
-            if response.lower() == "y":
-                print(f"Downloading model with command: lms get {model_name}")
-                subprocess.run(["lms", "get", model_name], check=True)
-            else:
-                print(f"Model {model_name} not found")
-                sys.exit(1)
+        model_path = model_getter(model_name=model_name)
 
         # Load the model
         model_kit = load_model(
@@ -289,12 +268,12 @@ You are a helpful assistant.<|im_end|>
                 str(e),
             )
 
-    def test_gemma3(self):
+    def test_gemma3_vision(self):
         """Test Gemma 3 model"""
         prompt = f"<bos><start_of_turn>user\n{self.description_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n"
         self.toucan_test_runner("mlx-community/gemma-3-4b-it-4bit", prompt)
 
-    def test_gemma3_text_only(self):
+    def test_gemma3_text_only_short(self):
         """Test Gemma 3 model"""
         prompt = f"<bos><start_of_turn>user\n{self.text_only_prompt}<end_of_turn>\n<start_of_turn>model\n"
         self.toucan_test_runner(
@@ -419,17 +398,137 @@ Summarize this in one sentence<end_of_turn>
         self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
         self.assertIn("benjamin franklin", generated_text.lower())
 
-    def test_gemma3n(self):
+    def test_gemma3n_vision(self):
         """Test gemma 3n model"""
         prompt = f"<bos><start_of_turn>user\n<image_soft_token>{self.description_prompt}<end_of_turn>\n<start_of_turn>model\n"
-        self.toucan_test_runner("lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt)
+        self.toucan_test_runner("lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt)
 
     def test_gemma3n_text_only(self):
         """Test gemma 3n model text only"""
         prompt = f"<bos><start_of_turn>user\n{self.text_only_prompt}<end_of_turn>\n<start_of_turn>model\n"
         self.toucan_test_runner(
-            "lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt, text_only=True
+            "lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt, text_only=True
         )
+
+    # TODO(will): Parameterize and de-dup
+    def test_gemma3n_text_only_generation_caching(self):
+        """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
+        model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
+        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+
+        def generate_text(prompt):
+            prompt_tokens = tokenize(model_kit, prompt)
+            num_prompt_processing_callbacks = 0
+
+            def progress_callback(progress: float) -> None:
+                nonlocal num_prompt_processing_callbacks
+                num_prompt_processing_callbacks += 1
+                print(f"Prompt processing progress: {progress}")
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=1000,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_callback=progress_callback,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return generated_text, num_prompt_processing_callbacks
+
+        # Generation 1 - model creates a long story
+        prompt = dedent("""\
+            <bos><start_of_turn>user
+            Tell me a 500-word story<end_of_turn>
+            <start_of_turn>model
+            """)
+        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
+        self.assertEqual(num_prompt_processing_callbacks, 2)  # single batch - 0, 100
+        self.assertIn("silas", generated_text.lower())
+
+        # Generation 2 - ask for a detail about the story, should not reprocess
+        prompt += generated_text + dedent("""\
+            <end_of_turn>
+            <start_of_turn>user
+            What was the main characters name?<end_of_turn>
+            <start_of_turn>model
+            """)
+        num_tokens = len(model_kit.tokenize(prompt))
+        # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
+        self.assertGreater(num_tokens, 512)
+        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
+        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
+        self.assertIn("silas", generated_text.lower())
+
+    # TODO(will): Parameterize and de-dup
+    def test_gemma3n_text_only_long_original_prompt_caching(self):
+        """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
+        model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
+        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+
+        def generate_text(prompt):
+            prompt_tokens = tokenize(model_kit, prompt)
+            num_prompt_processing_callbacks = 0
+
+            def progress_callback(progress: float) -> None:
+                nonlocal num_prompt_processing_callbacks
+                num_prompt_processing_callbacks += 1
+                print(f"Prompt processing progress: {progress}")
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=1000,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_callback=progress_callback,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return generated_text, num_prompt_processing_callbacks
+
+        # Generation 1 - send model a long excerpt to summarize
+        file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
+        file_content = file_path.read_text()
+        # don't use dedent below b/c file content doesn't match indentation on each newline
+        prompt = f"""\
+<bos><start_of_turn>user
+```
+{file_content}
+```
+Summarize this in one sentence<end_of_turn>
+<start_of_turn>model
+"""
+        num_tokens = len(model_kit.tokenize(prompt))
+        self.assertGreater(num_tokens, 1024)
+        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
+        self.assertEqual(
+            4, num_prompt_processing_callbacks
+        )  # 4 batches, so 0, x, x, 100
+        self.assertIn("benjamin franklin", generated_text.lower())
+
+        # Generation 2 - ask for a detail about the excerpt, should not reprocess
+        prompt += generated_text + dedent("""\
+                <end_of_turn>
+                <start_of_turn>user
+                What was the main characters name?<end_of_turn>
+                <start_of_turn>model
+                """)
+        print(prompt)
+        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
+        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
+        self.assertIn("benjamin franklin", generated_text.lower())
 
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):

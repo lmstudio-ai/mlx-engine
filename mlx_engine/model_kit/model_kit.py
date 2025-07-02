@@ -13,6 +13,7 @@ from mlx_engine.logging import log_info, log_warn
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
+from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
@@ -34,6 +35,7 @@ class ModelKit:
 
     VISION_ADD_ON_MAP = {
         "gemma3": Gemma3VisionAddOn,
+        "gemma3n": Gemma3nVisionAddOn,
         "pixtral": PixtralVisionAddOn,
     }
 
@@ -83,6 +85,9 @@ class ModelKit:
             max_kv_size = None
         self.model_path = model_path
         log_info(prefix=LOG_PREFIX, message=f"Loading model from {model_path}...")
+        config_json = json.loads((model_path / "config.json").read_text())
+        model_type = config_json.get("model_type", None)
+
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(
@@ -95,8 +100,6 @@ class ModelKit:
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
-        config_json = json.loads((model_path / "config.json").read_text())
-        model_type = config_json.get("model_type", None)
         vision_add_on_class = self.VISION_ADD_ON_MAP.get(model_type)
         should_load_vision_add_on = (
             vision_add_on_class is not None and "vision_config" in config_json
@@ -164,10 +167,10 @@ class ModelKit:
                 "Vision add-on is not loaded, but images were provided for processing"
             )
         self._cross_prompt_cache_active = False
-        embeddings = self.vision_add_on.compute_embeddings(
+        input_ids, embeddings = self.vision_add_on.compute_embeddings(
             self.model, prompt_tokens, images_b64
         )
-        return mx.array([]), embeddings
+        return input_ids, embeddings
 
     def is_cross_prompt_cache_active(self) -> bool:
         """
