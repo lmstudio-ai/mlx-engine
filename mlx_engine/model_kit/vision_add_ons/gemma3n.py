@@ -26,13 +26,6 @@ from mlx_engine.model_kit.vision_add_ons.load_utils import (
 )
 
 
-class Gemma3nVisionProjector(Gemma3nMultimodalEmbedder):
-    """Compatability layer between embedder and expected projector interface"""
-
-    def __init__(self, config: Gemma3nModelConfig):
-        super().__init__(config.vision_config, config.text_config)
-
-
 class Gemma3nVisionComponents(nn.Module):
     def __init__(self, vision_tower: nn.Module, embed_vision: nn.Module):
         super().__init__()
@@ -60,7 +53,9 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
 
         components = Gemma3nVisionComponents(
             vision_tower=Gemma3nVisionTower(config.vision_config),
-            embed_vision=Gemma3nVisionProjector(config),
+            embed_vision=Gemma3nMultimodalEmbedder(
+                config.vision_config, config.text_config
+            ),
         )
         processor = load_processor(model_path=model_path, add_detokenizer=True)
         vision_weights = load_and_filter_weights(model_path, components)
