@@ -173,7 +173,7 @@ class ModelKit:
                 "Vision add-on is not loaded, but images were provided for processing"
             )
         self._cross_prompt_cache_active = False
-        (input_ids, embeddings) = self.vision_add_on.compute_embeddings(
+        input_ids, embeddings = self.vision_add_on.compute_embeddings(
             self.model, prompt_tokens, images_b64
         )
         return input_ids, embeddings
