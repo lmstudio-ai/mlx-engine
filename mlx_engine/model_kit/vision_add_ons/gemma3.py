@@ -49,7 +49,7 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
         prompt_tokens: mx.array,
         images_b64: list[str],
     ) -> tuple[mx.array, mx.array]:
-        """Compute embeddings for text with images."""
+        """Compute input_ids and embeddings for text with images."""
         input_ids, pixel_values, attention_mask, other_model_inputs = (
             common_process_prompt_with_images(
                 prompt_tokens=prompt_tokens,
@@ -80,5 +80,5 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
             input_ids,
             attention_mask,
         )
-        # gemma3 generation does not require input_ids, so we return an empty array
-        return mx.array([]), final_inputs_embeds.squeeze(0)  # remove batch dimension
+        # remove batch dimension
+        return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)

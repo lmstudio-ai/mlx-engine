@@ -134,6 +134,5 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
         final_inputs_embeds = Gemma3nCombinedModel.prepare_inputs_for_multimodal(
             inputs_embeds, image_features, "image", special_modality_mask
         )
-        return input_ids.squeeze(0), final_inputs_embeds.squeeze(
-            0
-        )  # remove batch dimension
+        # remove batch dimension
+        return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)

@@ -24,5 +24,4 @@ class BaseVisionAddOn:
     ) -> tuple[mx.array, mx.array]:
         """
         Returns input ids and input embeddings for the language model after text/image merging of the prompt.
-        The former may be empty for models that do not require input_ids during generation.
         """
