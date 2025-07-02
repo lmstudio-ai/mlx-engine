@@ -14,7 +14,6 @@ from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
-from mlx_engine.model_kit.patches.gemma3n import do_patch as do_patch_gemma3n
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
@@ -38,10 +37,6 @@ class ModelKit:
         "gemma3": Gemma3VisionAddOn,
         "gemma3n": Gemma3nVisionAddOn,
         "pixtral": PixtralVisionAddOn,
-    }
-
-    PATCHES = {
-        "gemma3n": do_patch_gemma3n,
     }
 
     # model state tracking
@@ -93,7 +88,6 @@ class ModelKit:
         config_json = json.loads((model_path / "config.json").read_text())
         model_type = config_json.get("model_type", None)
 
-        self.PATCHES.get(model_type, lambda: None)()
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(
