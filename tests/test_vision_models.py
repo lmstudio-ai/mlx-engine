@@ -401,19 +401,14 @@ Summarize this in one sentence<end_of_turn>
     def test_gemma3n_vision(self):
         """Test gemma 3n model"""
         prompt = f"<bos><start_of_turn>user\n<image_soft_token>{self.description_prompt}<end_of_turn>\n<start_of_turn>model\n"
-        self.toucan_test_runner("lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt)
+        self.toucan_test_runner("lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt)
 
     def test_gemma3n_text_only(self):
         """Test gemma 3n model text only"""
         prompt = f"<bos><start_of_turn>user\n{self.text_only_prompt}<end_of_turn>\n<start_of_turn>model\n"
         self.toucan_test_runner(
-            "lmstudio-community/gemma-3n-E2B-it-MLX-bf16", prompt, text_only=True
+            "lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt, text_only=True
         )
-
-    def test_gemma3n_vision_quant(self):
-        """Test gemma 3n model"""
-        prompt = f"<bos><start_of_turn>user\n<image_soft_token>{self.description_prompt}<end_of_turn>\n<start_of_turn>model\n"
-        self.toucan_test_runner("lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt)
 
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_generation_caching(self):
