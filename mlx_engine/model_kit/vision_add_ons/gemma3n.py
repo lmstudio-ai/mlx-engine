@@ -93,7 +93,8 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
         assert input_ids is not None
 
         # See mlx_vlm.models.gemma3n.gemma3n.Model.get_input_embeddings
-        # The implementation differs slightly from mlx-vlm in the bounds on the vision_mask
+        # This implementation was based on commit mlx-vlm commit ebafa5a789ed1a8e050b8366ae4e845dbe640b90
+        # It differs slightly from mlx-vlm in the bounds on the vision_mask.
         # However, the two calculations should be equivalent (vision vocab offset + size) == audio vocab offset
         inputs_embeds = text_model.model.language_model.embed_tokens(input_ids)
         vision_mask = mx.logical_and(
