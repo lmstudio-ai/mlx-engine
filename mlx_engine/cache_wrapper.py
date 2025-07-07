@@ -296,5 +296,15 @@ class CacheWrapper:
     def record_generated_token(self, token):
         """
         Add the generated token to the token list, so that we can map the token to the KV cache.
+        
+        Also loop when the cache does so that we accurately track what's in cache. 
         """
+        # TODO(christian-lms): ensure that this works as intended when over length
+        # TODO(christian-lms): verify rolling window and truncate middle have n_keep as below
+        # TODO(christian-lms): this won't work until we pipe in keep from generate
+        n_keep = self.cache[0].keep
+        # this behavior is common to rolling window (n_keep = 0) and truncate middle
+        # (n_keep > 0), and we should never get here with stop at max
+        if len(self.tokens) >= n_keep:
+            self.tokens = mx.concat([self.tokens[:n_keep], self.tokens[n_keep+1:]])
         self.tokens = mx.concat([self.tokens, mx.array([token])])
