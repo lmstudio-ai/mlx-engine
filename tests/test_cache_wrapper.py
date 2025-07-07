@@ -37,6 +37,9 @@ class TestCacheWrapper(unittest.TestCase):
         self.assertEqual(
             result, 4
         )  # Should find 4 matching tokens (5-1 due to num_tokens_to_exclude)
+        
+    # TODO(christian-lms): write tests for cache shifting, which is high-level
+    # implemented in cachewrapper and so belongs here
 
 
 if __name__ == "__main__":
