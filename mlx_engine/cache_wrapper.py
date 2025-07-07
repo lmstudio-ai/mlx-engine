@@ -43,7 +43,6 @@ def maybe_get_rope(model: nn.Module, layer_idx: int) -> Optional[nn.Module]:
     """
     # we can assume model has attribute layers because make_prompt_cache does
     if layer_idx > len(model.layers):
-        # TODO(christian-lms): fail silently or throw here?
         return None
     layer = model.layers[layer_idx]
     if not isinstance(layer, nn.Module):
@@ -197,7 +196,12 @@ def make_prompt_cache(
         cache = []
         for layer in range(num_layers):
             rope = maybe_get_rope(model, layer)
+            # TODO(christian-lms): it is known that this will fail for some models
+            # like llama4 which has no rope module for every fourth layer.
+            # this will be figured out Later(tm) once the initial functionality works
             if rope is None:
+                log_warn("Attempted to build a KV cache of shiftable caches, but found"
+                         f"None at layer {layer} of model {model}")
                 return [KVCache() for _ in range(num_layers)]
             # TODO(christian-lms): change keep on the fly, must be setattr elsewhere
             cache.append(ShiftingKVCache(rope, max_size=max_kv_size, keep=4))
