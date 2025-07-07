@@ -48,10 +48,26 @@ def maybe_get_rope(model: nn.Module, layer_idx: int) -> Optional[nn.Module]:
 
 class ShiftingKVCache(RotatingKVCache):
     def __init__(self, rope: nn.Module, max_size=None, keep=0, step=256):
-        self.rope = rope
+        self._rope = rope
         self.reuse_offset = 0
         self.reuse_queue = []
-        super().__init__(self, max_size, keep, step)
+        super().__init__(max_size, keep, step)
+
+    def rope(self, v: mx.array, shift_by: int) -> mx.array:
+        # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
+        if shift_by == 0:
+            return v
+        
+        # apply RoPE to each token individually with the same offset
+        shifted_tokens = []
+        seq_len = v.shape[2]  # sequence dimension
+        
+        for i in range(seq_len):
+            token = v[:, :, i:i+1, :]  # shape [batch, heads, 1, head_dim]
+            shifted_token = self._rope(token, shift_by)
+            shifted_tokens.append(shifted_token)
+        
+        return mx.concatenate(shifted_tokens, axis=2)
     
     def is_trimmable(self) -> bool:
         return True
@@ -59,7 +75,6 @@ class ShiftingKVCache(RotatingKVCache):
     def _trim(self, trim_size, v, append=None):
         to_cat = []
         shift_by = -trim_size
-        assert shift_by <= 0
         if trim_size > 0:
             to_cat = [v[..., : self.keep, :], self.rope(v[..., trim_size + self.keep :, :], shift_by)]
         else:
@@ -75,7 +90,7 @@ class ShiftingKVCache(RotatingKVCache):
         if self._idx == v.shape[2]:
             return v
         elif self._idx < self.offset:
-            shift_by = self.keep - self.idx
+            shift_by = self.keep - self._idx
             assert shift_by <= 0
             return mx.concatenate(
                 [
@@ -152,14 +167,21 @@ class ShiftingKVCache(RotatingKVCache):
         self._idx = self.keys.shape[2]
     
     def trim(self, n) -> int:
+        # TODO(christian-lms): should trim respect keep? currently, no
         n = min(self.offset, n)
         if n <= 0:
             return 0
         
+        # TODO(christian-lms): so you used to need to wrap around because the code
+        # didn't know how much it was trying to trim, so it would go over the maximum allowed.
+        # but i think this was in large part due to improperly tracking the tokens that were
+        # actually in the cache, so this should not be an issue anymore. therefore this trim code
+        # will trim exactly n off the end wthout any wrapping around. but you can uncomment the line
+        # if it turns out that this assumption is faulty
         if self.offset >= self.max_size:
             self.keys = self._temporal_order(self.keys)
             self.values = self._temporal_order(self.values)
-            n = n % (self.max_size - self.keep)
+            # n = n % (self.max_size - self.keep)
 
         # do trim: put us back into the state before the circular buffer is full
         new_length = self.keys.shape[2] - n
