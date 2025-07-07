@@ -61,6 +61,17 @@ class ShiftingKVCache(RotatingKVCache):
     def is_trimmable(self) -> bool:
         return True
     
+    def _trim(self, trim_size, v, append=None):
+        to_cat = []
+        shift_by = -trim_size
+        if trim_size > 0:
+            to_cat = [v[..., : self.keep, :], self.rope(v[..., trim_size + self.keep :, :], shift_by)]
+        else:
+            to_cat = [v]
+        if append is not None:
+            to_cat.append(append)
+        return mx.concatenate(to_cat, axis=2)
+    
     def _temporal_order(self, v) -> mx.array:
         """
         Rearrange the cache into temporal order, slicing off the end if unused.
@@ -102,7 +113,7 @@ class ShiftingKVCache(RotatingKVCache):
     def do_reuse(self) -> None:
         last_i: int = len(self.reuse_queue) - 1
         for i, (write_start_idx, reuse_start_idx, reuse_length) in enumerate(self.reuse_queue):
-            shift_by: int = write_start_idx - reuse_start_idx
+            shift_by: int = write_start_idx - reuse_start_idx  # < 0
             reuse_end_idx: int = reuse_start_idx + reuse_length
 
             keys_to_shift = self.keys[..., reuse_start_idx : reuse_end_idx, :]
