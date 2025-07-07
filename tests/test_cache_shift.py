@@ -22,19 +22,7 @@ class ShiftingCacheTest(unittest.TestCase):
     @classmethod
     def rope(cls, v: mx.array, shift_by: int = 0) -> mx.array:
         """Apply RoPE to the input tensor with an optional shift"""
-        # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
-        if shift_by == 0:
-            return v
-        # Apply RoPE to each token individually with the same offset
-        shifted_tokens = []
-        assert len(v.shape) == 4, "Expected input tensor to have 4 dimensions: [batch, heads, seq_len, head_dim]"
-        seq_len = v.shape[2]
-
-        for i in range(seq_len):
-            shifted_token = cls._rope(idx(v, i), shift_by)
-            shifted_tokens.append(shifted_token)
-        
-        return mx.concatenate(shifted_tokens, axis=2)
+        return mx.concatenate([cls._rope(v[:,:,i:i+1,:], shift_by) for i in range(v.shape[2])], axis=2)
         
     @classmethod
     def make_random_kv(cls, seqlen: int):

@@ -55,20 +55,8 @@ class ShiftingKVCache(RotatingKVCache):
 
     def rope(self, v: mx.array, shift_by: int) -> mx.array:
         # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
-        if shift_by == 0:
-            return v
-        
-        # apply RoPE to each token individually with the same offset
-        shifted_tokens = []
-        seq_len = v.shape[2]  # sequence dimension
-        
-        for i in range(seq_len):
-            token = v[:, :, i:i+1, :]  # shape [batch, heads, 1, head_dim]
-            shifted_token = self._rope(token, shift_by)
-            shifted_tokens.append(shifted_token)
-        
-        return mx.concatenate(shifted_tokens, axis=2)
-    
+        return mx.concatenate([self._rope(v[:,:,i:i+1,:], shift_by) for i in range(v.shape[2])], axis=2)
+
     def is_trimmable(self) -> bool:
         return True
     
