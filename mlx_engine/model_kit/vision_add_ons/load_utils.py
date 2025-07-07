@@ -6,7 +6,7 @@ from typing import Any, Tuple, Type
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.utils import sanitize_weights, load_processor, get_class_predicate
+from mlx_vlm.utils import sanitize_weights, load_processor, skip_multimodal_module
 from mlx_engine.logging import log_info
 
 
@@ -122,11 +122,29 @@ def maybe_apply_quantization(
     """
     # Apply quantization if specified in config
     if (quantization := config_dict.get("quantization", None)) is not None:
-        class_predicate = get_class_predicate(skip_vision=False, weights=vision_weights)
+        # Copied from mlx_vlm/utils.py at commit
+        # 65ecc837f24d0f8b138f300c7efef87f00fba74d
+        skip_vision = config_dict.get("vision_config", {}).get("skip_vision", False)
+
+        def get_class_predicate(p, m):
+            # Always skip vision and audio models
+            if skip_multimodal_module(p) and skip_vision:
+                return False
+            # Handle custom per layer quantizations
+            if p in config_dict["quantization"]:
+                return config_dict["quantization"][p]
+            if not hasattr(m, "to_quantized"):
+                return False
+            # Skip layers not divisible by 64
+            if hasattr(m, "weight") and m.weight.size % 64 != 0:
+                return False
+            # Handle legacy models which may not have everything quantized
+            return f"{p}.scales" in vision_weights
+
         nn.quantize(
             components,
             **quantization,
-            class_predicate=class_predicate,
+            class_predicate=get_class_predicate,
         )
 
 
