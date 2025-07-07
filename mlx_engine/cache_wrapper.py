@@ -64,6 +64,7 @@ class ShiftingKVCache(RotatingKVCache):
     def _trim(self, trim_size, v, append=None):
         to_cat = []
         shift_by = -trim_size
+        assert shift_by <= 0
         if trim_size > 0:
             to_cat = [v[..., : self.keep, :], self.rope(v[..., trim_size + self.keep :, :], shift_by)]
         else:
@@ -80,6 +81,7 @@ class ShiftingKVCache(RotatingKVCache):
             return v
         elif self._idx < self.offset:
             shift_by = self.keep - self.idx
+            assert shift_by <= 0
             return mx.concatenate(
                 [
                     v[..., : self.keep, :],
@@ -112,8 +114,10 @@ class ShiftingKVCache(RotatingKVCache):
     
     def do_reuse(self) -> None:
         last_i: int = len(self.reuse_queue) - 1
+
         for i, (write_start_idx, reuse_start_idx, reuse_length) in enumerate(self.reuse_queue):
-            shift_by: int = write_start_idx - reuse_start_idx  # < 0
+            shift_by: int = write_start_idx - reuse_start_idx
+            assert shift_by <= 0
             reuse_end_idx: int = reuse_start_idx + reuse_length
 
             keys_to_shift = self.keys[..., reuse_start_idx : reuse_end_idx, :]
@@ -121,7 +125,7 @@ class ShiftingKVCache(RotatingKVCache):
 
             # perform rope shift
             # N.B. we can also go back to the MLX-native "don't rope shift" method
-            # by 
+            # by removing RoPE here and removing the overrides for trim, temporal order
             shifted_keys = self.rope(keys_to_shift, shift_by)
             shifted_values = self.rope(values_to_shift, shift_by)
             
@@ -137,6 +141,7 @@ class ShiftingKVCache(RotatingKVCache):
                 shifted_values
             ]
             
+            # TODO(christian-lms): surely there is a better way to do this?
             # by not re-appending the end at the last one, we truncate the leftovers
             if i != last_i:
                 keycat.append(self.keys[..., reuse_end_idx : , :])
@@ -152,9 +157,8 @@ class ShiftingKVCache(RotatingKVCache):
         self._idx = self.keys.shape[2]
     
     def trim(self, n) -> int:
-        # TODO(christian-lms): fix me
         n = min(self.offset, n)
-        if n == 0:
+        if n <= 0:
             return 0
         
         if self.offset >= self.max_size:
@@ -164,10 +168,11 @@ class ShiftingKVCache(RotatingKVCache):
 
         # do trim: put us back into the state before the circular buffer is full
         new_length = self.keys.shape[2] - n
-        self.keys = self.keys[..., :new_length, :]
-        self.values = self.values[..., :new_length, :]
+        self.keys = self.keys[..., : new_length, :]
+        self.values = self.values[..., : new_length, :]
         
         self.offset -= n
+        # TODO(christian-lms): verify that this is reasonable
         self._idx = new_length
         return n
     
