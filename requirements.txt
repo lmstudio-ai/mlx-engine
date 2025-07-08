@@ -28,9 +28,7 @@ markupsafe==2.1.5
 # Temporarily point to the branches that support Gemma3n unification
 mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@main
 mlx-vlm @ git+https://github.com/will-lms/mlx-vlm.git@will/gemma3n-mm-embed-hooks
-# Temporarily point to main, with fixed layer norm race condition
-# Expected to be fixed in the release after 0.26.2
-mlx @ git+https://github.com/ml-explore/mlx.git@main
+mlx==0.26.1
 mpmath==1.3.0
 multidict==6.4.3
 nest-asyncio==1.6.0
