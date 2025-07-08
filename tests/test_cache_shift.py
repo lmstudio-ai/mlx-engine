@@ -1,7 +1,7 @@
 import unittest
 import mlx.core as mx
-import mlx.nn as nn
 from mlx_engine.cache import ShiftingKVCache
+from tests.test_cache_generic import TestCache
 
 
 def idx(v: mx.array, i: int):
@@ -9,36 +9,7 @@ def idx(v: mx.array, i: int):
     return v[:, :, i : i + 1, :]
 
 
-class ShiftingCacheTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        """Set up test resources that will be shared across all test methods"""
-        cls.kv_head_dim = 4
-        cls.bsz = 1
-        cls.n_kv_heads = 1
-        # cannot be used raw: must be wrapped in the cache.rope workaround impl
-        cls._rope = nn.RoPE(
-            dims=cls.kv_head_dim, traditional=False, base=100000, scale=1.0
-        )
-
-    @classmethod
-    def make_random_kv(cls, seqlen: int):
-        """Helper method to make a random key/value tensor of the right shape"""
-        return mx.random.normal(
-            (cls.bsz, cls.n_kv_heads, seqlen, cls.kv_head_dim),
-            scale=1.0,
-            dtype=mx.float32,
-        )
-
-    def assertArrEqual(self, a: mx.array, b: mx.array):
-        """Assert that two tensors are equal over the sequence length dimension"""
-        self.assertEqual(a.shape, b.shape)
-        self.assertTrue(mx.allclose(a, b), "Tensors are not equal")
-
-    # TODO: you can test to make sure that it's RoPEing right in the model overall by getting
-    # the post-shift value, then shifting it back to position 0 and checking the layer 0 kv
-    # matches the raw token embedding
-
+class TestShiftingKVCache(TestCache):
     def test_overwriting(self):
         cache = ShiftingKVCache(self._rope, max_size=3, keep=1)
         base_kv = self.make_random_kv(3)
@@ -135,3 +106,7 @@ class ShiftingCacheTest(unittest.TestCase):
         keys = cache.keys
         self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 5, self.kv_head_dim))
         self.assertArrEqual(keys, new_prompt_cache[:, :, :5, :])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
