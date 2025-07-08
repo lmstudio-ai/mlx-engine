@@ -50,41 +50,51 @@ class CacheWrapper:
         )
 
     @staticmethod
-    def _find_common_prefix(
-        current_tokens: mx.array, prompt_tokens: mx.array, num_tokens_to_exclude: int
+    def _find_matching_sequence_length(
+        tokens1: mx.array, 
+        tokens2: mx.array, 
+        start1: int = 0,
+        start2: int = 0,
+        num_tokens_to_exclude: int = 0
     ) -> int:
         """
-        Determine the common prefix length between the current tokens and the prompt tokens.
-
+        Find the length of matching token sequence between two token arrays.
+        
         Args:
-            current_tokens (mx.array): The cached tokens (self.tokens).
-            prompt_tokens (mx.array): The prompt tokens.
-            num_tokens_to_exclude (int): The minimum length of the remaining prompt tokens array.
-
+            tokens1: First token array
+            start1: Starting position in first array
+            tokens2: Second token array  
+            start2: Starting position in second array
+            num_tokens_to_exclude (int): The minimum length of the leftover non-matching
+                segment of tokens1, to be excluded from the match length.
+        
         Returns:
-            int: The length of the common prefix.
+            int: Length of matching sequence
         """
-        prompt_tokens = prompt_tokens
-        current_tokens = current_tokens
-        # Find the minimum length between the two arrays
-        min_length = min(len(current_tokens), len(prompt_tokens))
-
-        # Compare elements up to the minimum length
-        mask = prompt_tokens[:min_length] == current_tokens[:min_length]
-
-        # Find the index where the first mismatch occurs
+        # Calculate actual bounds
+        max_len1 = len(tokens1) - start1
+        max_len2 = len(tokens2) - start2
+        min_length = int(min(max_len1, max_len2))
+        
+        # Extract subsequences to compare
+        seq1 = tokens1[start1 : start1 + min_length]
+        seq2 = tokens2[start2 : start2 + min_length]
+        
+        # Find first mismatch
+        mask = seq1 == seq2
         if mx.any(mask == False):  # noqa E712
-            common_length = int(mx.argmax(mask == False))  # noqa E712
+            match_length = int(mx.argmax(mask == False))  # noqa E712
         else:
-            common_length = int(min_length)
-
-        # Ensure that the prompt is at least num_tokens_to_exclude long
-        uncached_prompt_tokens_length = len(prompt_tokens[common_length:])
+            match_length = min_length
+        
+        # Ensure that the leftover non-matching segment of tokens1
+        # is at least num_tokens_to_exclude long
+        leftover_tokens1_length = len(tokens1[match_length:])
         length_adjustment = max(
-            0, num_tokens_to_exclude - uncached_prompt_tokens_length
+            0, num_tokens_to_exclude - leftover_tokens1_length
         )
-        common_length = max(common_length - length_adjustment, 0)
-        return common_length
+        match_length = max(match_length - length_adjustment, 0)
+        return match_length
 
     def _get_unprocessed_tokens(
         self, prompt_tokens: mx.array, num_tokens_to_exclude: int, keep: int = 4
@@ -104,8 +114,8 @@ class CacheWrapper:
             return self.tokens
 
         # Find common KV between the last generation and the current prompt
-        common_prefix = self._find_common_prefix(
-            self.tokens, prompt_tokens, num_tokens_to_exclude
+        common_prefix = self._find_matching_sequence_length(
+            self.tokens, prompt_tokens, num_tokens_to_exclude=num_tokens_to_exclude
         )
 
         # Trim the cache if the common prefix is shorter than the current cache
