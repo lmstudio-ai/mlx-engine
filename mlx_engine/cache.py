@@ -50,6 +50,7 @@ class ShiftingKVCache(RotatingKVCache):
         self.reuse_queue = []
         super().__init__(max_size, keep, step)
 
+    # TODO(christian-lms): stop rope shifting your values!!!!!!!!!!!!!
     def rope(self, v: mx.array, shift_by: int) -> mx.array:
         # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
         return mx.concatenate(

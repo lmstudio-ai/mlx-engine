@@ -158,7 +158,11 @@ class TestCacheWrapper(TestCache):
             return v[:, :, a:b, :]
 
         should_be_kv = mx.concatenate(
-            [idx(cache_kv, 0, 2), idx(cache_kv, 3, 4), idx(cache_kv, 6, 9)]
+            [
+                idx(cache_kv, 0, 2),
+                cache.cache.rope(idx(cache_kv, 3, 4), -1),
+                cache.cache.rope(idx(cache_kv, 6, 9), -3),
+            ]
         )
 
         self.assertEqual(total_reused, 4)
