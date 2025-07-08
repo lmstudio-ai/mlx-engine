@@ -132,13 +132,13 @@ class TestCacheWrapper(TestCache):
 
     def test_cache_reuse(self):
         cache = CacheWrapper(DummyModel(), 10)
-        cache.cache = ShiftingKVCache(self._rope, max_size=10, keep=2)
+        cache.cache[0] = ShiftingKVCache(self._rope, max_size=10, keep=2)
 
         # set up pretend cache
         cached_tokens = mx.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         cache_kv = self.make_random_kv(10)
         cache.tokens = cached_tokens
-        cache.cache.update_and_fetch(cache_kv, cache_kv)
+        cache.cache[0].update_and_fetch(cache_kv, cache_kv)
 
         prompt_tokens = mx.array([1, 2, 4, 7, 8, 9, 11])
         prefix_len = cache._find_matching_sequence_length(
@@ -160,14 +160,14 @@ class TestCacheWrapper(TestCache):
         should_be_kv = mx.concatenate(
             [
                 idx(cache_kv, 0, 2),
-                cache.cache.rope(idx(cache_kv, 3, 4), -1),
-                cache.cache.rope(idx(cache_kv, 6, 9), -3),
+                cache.cache[0].rope(idx(cache_kv, 3, 4), -1),
+                cache.cache[0].rope(idx(cache_kv, 6, 9), -3),
             ]
         )
 
         self.assertEqual(total_reused, 4)
         self.assertArrEqual(cache.tokens, should_be_tokens)
-        self.assertArrEqual(cache.cache.keys, should_be_kv)
+        self.assertArrEqual(cache.cache[0].keys, should_be_kv)
 
 
 if __name__ == "__main__":
