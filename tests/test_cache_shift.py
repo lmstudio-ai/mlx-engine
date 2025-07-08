@@ -1,6 +1,5 @@
 import unittest
 import mlx.core as mx
-from copy import deepcopy
 from mlx_engine.cache import ShiftingKVCache, cat
 from tests.test_cache_generic import TestCache
 

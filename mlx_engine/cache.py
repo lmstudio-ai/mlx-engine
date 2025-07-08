@@ -72,6 +72,8 @@ class ShiftingKVCache(_BaseCache):
     def _trim(self, trim_size, append_k=None, append_v=None) -> None:
         k = self.keys
         v = self.values
+        if k is None or v is None:
+            return
         assert k.shape == v.shape
         shift_by = -trim_size
         if trim_size > 0:
@@ -99,6 +101,8 @@ class ShiftingKVCache(_BaseCache):
         """
         k = self.keys
         v = self.values
+        if k is None or v is None:
+            return
         assert k.shape == v.shape
         if self._idx == v.shape[2]:
             pass
@@ -178,17 +182,23 @@ class ShiftingKVCache(_BaseCache):
     def trim(self, n) -> int:
         # trim does not respect keep and it will stay this way
         n = min(self.offset, n)
+        print(f"debug: before: shape {self.keys.shape} keep {self.keep} n={n} {self.offset}os {self._idx}idx", file=sys.stderr)
         if n <= 0:
             return 0
 
         # do trim: put us back into the state before the circular buffer is full
         self._temporal_order()
-        new_length = self.keys.shape[2] - n
+        print(f"after TO: shape {self.keys.shape} keep {self.keep} n={n} {self.offset}os {self._idx}idx", file=sys.stderr)
+
+        # TODO(christian-lms): stupid hack that belies a bigger problem. mayeb 184 shoudl be min vs. sks2
+        new_length = max(self.keys.shape[2] - n, 0)
         self.keys = self.keys[..., :new_length, :]
         self.values = self.values[..., :new_length, :]
 
-        self.offset -= n
+        # TODO(christian-lms): maybe this is wrong??? maybe you have bigger problems elsewhere
+        self.offset = new_length
         self._idx = new_length
+        print(self.keys.shape, self.offset, self._idx, file=sys.stderr)
         return n
 
     def _update_concat(self, keys, values):
