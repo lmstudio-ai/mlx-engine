@@ -32,7 +32,13 @@ class TestVisionModels(unittest.TestCase):
                 chameleon_image_file.read()
             ).decode("utf-8")
 
-    def toucan_test_runner(self, model_name: str, prompt: str, text_only=False):
+    def toucan_test_runner(
+        self,
+        model_name: str,
+        prompt: str,
+        text_only=False,
+        supplemental_accept_phrases=None,
+    ):
         """Helper method to test a single vision model"""
         print(f"Testing model {model_name}")
         model_path = model_getter(model_name=model_name)
@@ -66,12 +72,13 @@ class TestVisionModels(unittest.TestCase):
         self.assertGreater(
             len(generated_text), 0, f"Model {model_name} failed to generate any text"
         )
-        bird_spotted = any(
-            word in generated_text.lower() for word in ["bird", "toucan", "quetzal"]
-        )
+        accept_phrases = ["toucan"]
+        if supplemental_accept_phrases:
+            accept_phrases += supplemental_accept_phrases
+        bird_spotted = any(word in generated_text.lower() for word in accept_phrases)
         self.assertTrue(
             bird_spotted,
-            f"Model {model_name} failed to identify either a bird in the image",
+            f"Model {model_name} failed to any of {accept_phrases} in the image",
         )
 
         return generated_text
@@ -99,10 +106,14 @@ class TestVisionModels(unittest.TestCase):
                 str(e),
             )
 
-    def test_pixtral(self):
+    def test_pixtral_vision(self):
         """Test Pixtral 12B model"""
         prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
-        self.toucan_test_runner("mlx-community/pixtral-12b-4bit", prompt)
+        self.toucan_test_runner(
+            "mlx-community/pixtral-12b-4bit",
+            prompt,
+            supplemental_accept_phrases=["bird"],
+        )
 
     def test_pixtral_text_only(self):
         """Test Pixtral 12B model with only text"""
@@ -111,7 +122,7 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/pixtral-12b-4bit", prompt, text_only=True
         )
 
-    def test_qwen2(self):
+    def test_qwen2_vision(self):
         """Test Qwen2 VL 7B Instruct model"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<image> {self.description_prompt}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner("mlx-community/Qwen2-VL-7B-Instruct-4bit", prompt)
@@ -123,7 +134,7 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/Qwen2-VL-7B-Instruct-4bit", prompt, text_only=True
         )
 
-    def test_qwen2_5(self):
+    def test_qwen2_5_vision(self):
         """Test Qwen2.5 VL 7B Instruct model"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<image> {self.description_prompt}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner("mlx-community/Qwen2.5-VL-7B-Instruct-4bit", prompt)
@@ -181,7 +192,7 @@ You are a helpful assistant.<|im_end|>
         self.assertIn("chameleon", unified_generated_text.lower())
 
     @unittest.skip("Unavailable since this requires trust_remote_code")
-    def test_florence(self):
+    def test_florence_vision(self):
         """Test Florence 2 Large model"""
         prompt = self.description_prompt
         self.toucan_test_runner("mlx-community/Florence-2-base-ft-4bit", prompt)
@@ -201,7 +212,7 @@ You are a helpful assistant.<|im_end|>
             )
 
     @unittest.skip("Unavailable since this requires trust_remote_code")
-    def test_molmo(self):
+    def test_molmo_vision(self):
         """Test Molmo 7B model"""
         prompt = self.description_prompt
         self.toucan_test_runner("mlx-community/Molmo-7B-D-0924-4bit", prompt)
@@ -214,10 +225,14 @@ You are a helpful assistant.<|im_end|>
             "mlx-community/Molmo-7B-D-0924-4bit", prompt, text_only=True
         )
 
-    def test_llava(self):
+    def test_llava_vision(self):
         """Test LLaVA v1.6 Mistral 7B model"""
         prompt = f"[INST] <image>\n{self.description_prompt} [/INST]"
-        self.toucan_test_runner("mlx-community/llava-v1.6-mistral-7b-4bit", prompt)
+        self.toucan_test_runner(
+            "mlx-community/llava-v1.6-mistral-7b-4bit",
+            prompt,
+            supplemental_accept_phrases=["bird"],
+        )
 
     def test_llava_text_only(self):
         """Test LLaVA v1.6 Mistral 7B model with only text"""
@@ -226,7 +241,7 @@ You are a helpful assistant.<|im_end|>
             "mlx-community/llava-v1.6-mistral-7b-4bit", prompt, text_only=True
         )
 
-    def test_bunny_llama(self):
+    def test_bunny_llama_vision(self):
         """Test Bunny Llama 3 8B V model"""
         prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n<image>\n{self.description_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
         self.toucan_test_runner("mlx-community/Bunny-Llama-3-8B-V-4bit", prompt)
@@ -238,7 +253,7 @@ You are a helpful assistant.<|im_end|>
             "mlx-community/Bunny-Llama-3-8B-V-4bit", prompt, text_only=True
         )
 
-    def test_nano_llava(self):
+    def test_nano_llava_vision(self):
         """Test Nano LLaVA 1.5 4B model"""
         prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n<image>\n{self.description_prompt}<|im_end|><|im_start|>assistant\n\n"
         self.toucan_test_runner("mlx-community/nanoLLaVA-1.5-4bit", prompt)
@@ -250,10 +265,14 @@ You are a helpful assistant.<|im_end|>
             "mlx-community/nanoLLaVA-1.5-4bit", prompt, text_only=True
         )
 
-    def test_paligemma2(self):
+    def test_paligemma2_vision(self):
         """Test Paligemma 2 model"""
         prompt = f"<image>{self.description_prompt}"
-        self.toucan_test_runner("mlx-community/paligemma2-3b-pt-896-4bit", prompt)
+        self.toucan_test_runner(
+            "mlx-community/paligemma2-3b-pt-896-4bit",
+            prompt,
+            supplemental_accept_phrases=["bird"],
+        )
 
     def test_paligemma2_text_only(self):
         """Test Paligemma 2 model with only text"""
