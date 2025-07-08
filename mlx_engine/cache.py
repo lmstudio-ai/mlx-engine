@@ -64,6 +64,9 @@ class ShiftingKVCache(_BaseCache):
         
     def rope_if(self, v: mx.array, shift_by: int, do: bool = False) -> mx.array:
         return self.rope(v, shift_by) if do else v
+    
+    # TODO(christian-lms): maybe the solution to the below is
+    # to make these fns operate on both k/v at once
 
     def _trim(self, trim_size, v, append=None, is_key=False):
         to_cat = []
@@ -77,6 +80,9 @@ class ShiftingKVCache(_BaseCache):
             to_cat = [v]
         if append is not None:
             to_cat.append(append)
+        # TODO(christian-lms): necessary? stupid hack anyway
+        if is_key and trim_size > 0:
+            self.offset -= trim_size
         return mx.concatenate(to_cat, axis=2)
 
     def _temporal_order(self, v, is_key=False) -> mx.array:
@@ -86,8 +92,11 @@ class ShiftingKVCache(_BaseCache):
         if self._idx == v.shape[2]:
             return v
         elif self._idx < self.offset:
-            shift_by = self.keep - self._idx
+            shift_by = self.keep - self._idx  # intentionally negative!!!
             assert shift_by <= 0
+            # TODO(christian-lms): necessary? stupid hack anyway
+            if is_key:
+                self.offset += shift_by
             return mx.concatenate(
                 [
                     v[..., : self.keep, :],
@@ -149,6 +158,7 @@ class ShiftingKVCache(_BaseCache):
         # clean up
         self.reuse_queue = []
         self._idx = self.keys.shape[2]
+        self.offset = self.keys.shape[2]
 
     def trim(self, n) -> int:
         # TODO(christian-lms): should trim respect keep? currently, no
@@ -246,6 +256,12 @@ class ShiftingKVCache(_BaseCache):
         if keys.shape[2] == 1:
             return self._update_in_place(keys, values)
         return self._update_concat(keys, values)
+    
+    def set_keep(self, keep):
+        # kv must be in temporal order, else we will keep the wrong thing
+        self.keys = self._temporal_order(self.keys, is_key=True)
+        self.values = self._temporal_order(self.values, is_key=False)
+        self.keep = keep
 
     @property
     def state(self):

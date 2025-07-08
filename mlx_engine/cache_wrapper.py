@@ -333,7 +333,8 @@ class CacheWrapper:
         # update keep tracking
         self.keep = keep
         for cache in self.cache:
-            setattr(cache, "keep", keep)
+            if hasattr(cache, "set_keep"):
+                cache.set_keep(keep)
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
