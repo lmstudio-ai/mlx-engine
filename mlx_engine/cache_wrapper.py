@@ -26,6 +26,7 @@ class CacheWrapper:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        keep: int = 4,
     ):
         """
         Initialize the CacheWrapper.
@@ -36,7 +37,8 @@ class CacheWrapper:
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
-        self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
+        self.keep = keep
+        self.cache: List[Any] = make_prompt_cache(model, max_kv_size, keep)
         self.model = model
         self.draft_model: Optional[nn.Module] = None
         self.max_kv_size = max_kv_size
@@ -85,7 +87,7 @@ class CacheWrapper:
         return common_length
 
     def _get_unprocessed_tokens(
-        self, prompt_tokens: mx.array, num_tokens_to_exclude: int
+        self, prompt_tokens: mx.array, num_tokens_to_exclude: int, keep: int = 4
     ):
         """
         Get the unprocessed tokens from the prompt.
@@ -115,7 +117,7 @@ class CacheWrapper:
                     message=f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: "
                     "Cache is not trimmable. Clearing the cache instead.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                self.cache = make_prompt_cache(self.model, self.max_kv_size, keep=self.keep)
                 self.tokens = prompt_tokens
                 return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
@@ -126,7 +128,7 @@ class CacheWrapper:
                     message=f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected "
                     " ({num_tokens_to_trim}). Clearing the cache.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                self.cache = make_prompt_cache(self.model, self.max_kv_size, keep=self.keep)
                 self.tokens = prompt_tokens
                 return self.tokens
             log_info(
@@ -221,9 +223,9 @@ class CacheWrapper:
             message="Clearing current prompt cache and adding draft model to the cache",
         )
         self.tokens = None
-        self.cache: List[Any] = make_prompt_cache(self.model)
+        self.cache: List[Any] = make_prompt_cache(self.model, keep=self.keep)
         if draft_model is not None:
-            self.cache += make_prompt_cache(draft_model)
+            self.cache += make_prompt_cache(draft_model, keep=self.keep)
         self.draft_model = draft_model
 
     def unset_draft_model(self):
@@ -239,6 +241,7 @@ class CacheWrapper:
         prompt_progress_callback,
         *,
         num_tokens_to_exclude: int = 1,
+        keep: int = 4
     ) -> mx.array:
         """
         Set up the KV cache for the next generation.
@@ -248,14 +251,16 @@ class CacheWrapper:
             prompt_tokens (mx.array): The prompt tokens.
             prompt_progress_callback (Callable): A callback function to report prompt processing progress.
             num_tokens_to_exclude (int): The number of tokens that should not be added to the cache.
+            keep (int): The number of tokens to always keep in the prefix of the prompt cache.
 
         Returns:
             mx.array: The prompt tokens to be used for the next generation.
         """
         if prompt_progress_callback is None:
-
             def prompt_progress_callback(x):
                 return None
+            
+        self.keep = keep
             
         # TODO(christian-lms): truncation logic goes here now
 

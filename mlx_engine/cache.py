@@ -83,8 +83,6 @@ class ShiftingKVCache(RotatingKVCache):
             return mx.concatenate(
                 [
                     v[..., : self.keep, :],
-                    # TODO(christian-lms): verify that i work
-                    # TODO(christian-lms): can you do this in 1 call to self.rope?
                     # N.B. this implicitly assumes the generation has not gone over twice
                     # the size of the rotating section of the cache, in which case the
                     # rotating section would be off by a multiple of (max_kv_size - keep)
@@ -184,6 +182,7 @@ class ShiftingKVCache(RotatingKVCache):
 def make_prompt_cache(
     model: nn.Module,
     max_kv_size: Optional[int] = None,
+    keep: int = 4,
 ) -> List[Any]:
     """
     Construct the model's cache for use in generation.
@@ -210,7 +209,7 @@ def make_prompt_cache(
                          f"None at layer {layer} of model {model}")
                 return [KVCache() for _ in range(num_layers)]
             # TODO(christian-lms): change keep on the fly, must be setattr elsewhere
-            cache.append(ShiftingKVCache(rope, max_size=max_kv_size, keep=4))
+            cache.append(ShiftingKVCache(rope, max_size=max_kv_size, keep=keep))
         return cache
     else:
         return [KVCache() for _ in range(num_layers)]
