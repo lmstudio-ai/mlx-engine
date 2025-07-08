@@ -90,6 +90,59 @@ class CacheWrapper:
         length_adjustment = max(0, num_tokens_to_exclude - leftover_tokens1_length)
         match_length = max(match_length - length_adjustment, 0)
         return match_length
+    
+    def _truncate_cache(
+        self,
+        prompt_tokens: mx.array, 
+        common_prefix_len: int,
+        non_prefix_reuse_min_seq_len: int = 256
+    ) -> tuple[mx.array, int]:
+        cache_size = len(self.tokens)
+        prompt_size = len(prompt_tokens)
+        
+        # start scanning from after the common prefix
+        cache_head_idx = common_prefix_len
+        prompt_head_idx = common_prefix_len
+        total_reused = 0
+
+        if self.verbose:
+            print(f"Looking for non-prefix sequences of length >= {non_prefix_reuse_min_seq_len}", file=sys.stderr)
+        
+        while cache_head_idx < cache_size and prompt_head_idx < prompt_size:
+            match_length = self._find_matching_sequence_length(
+                self.tokens, cache_head_idx,
+                prompt_tokens, prompt_head_idx
+            )
+            
+            if match_length < non_prefix_reuse_min_seq_len:
+                # sequence too short - advance cache pointer to find next potential match
+                cache_head_idx += 1
+            else:
+                if self.verbose:
+                    print(f"Reusing {match_length} tokens from cache", file=sys.stderr)
+                
+                # found reusable sequence - shift cache content
+                self.cache.reuse_section(
+                    source_pos=cache_head_idx,
+                    target_pos=prompt_head_idx,
+                    length=match_length
+                )
+
+                # update the tokens to reflect the reused sequence
+                for i in range(match_length):
+                    self.tokens[prompt_head_idx + i] = self.tokens[cache_head_idx + i]
+                
+                # advance pointers
+                cache_head_idx += match_length
+                prompt_head_idx += match_length
+                total_reused += match_length
+        
+        self.cache.do_reuse()
+        # TODO(christian-lms): ensure that this works
+        self.tokens = self.tokens[:common_prefix_len + total_reused]
+        prompt_tokens = prompt_tokens[total_reused:]
+
+        return prompt_tokens, total_reused
 
     def _get_unprocessed_tokens(
         self, prompt_tokens: mx.array, num_tokens_to_exclude: int
@@ -112,6 +165,18 @@ class CacheWrapper:
         common_prefix = self._find_matching_sequence_length(
             self.tokens, prompt_tokens, num_tokens_to_exclude=num_tokens_to_exclude
         )
+
+        if hasattr(self.cache, "reuse_section"):
+            prompt_tokens, n_reused_tokens = self._truncate_cache(
+                prompt_tokens,
+                common_prefix,
+            )
+            if n_reused_tokens > 0:
+                log_info(
+                    prefix="CacheWrapper",
+                    message=f"Reused {n_reused_tokens} tokens from the cache"
+                )
+                common_prefix += n_reused_tokens
 
         # TODO reuse logic goes here
 
