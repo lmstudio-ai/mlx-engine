@@ -52,7 +52,8 @@ class TestShiftingKVCache(TestCache):
         self.assertEqual(cache.offset, 4)
 
         # put the cache in temporal order -> 134 -> 123 (rope shift)
-        keys = cache._temporal_order(cache.keys, is_key=True)
+        cache._temporal_order()
+        keys = cache.keys
 
         self.assertArrEqual(idx(keys, 0), idx(base_kv, 0))
         self.assertArrEqual(idx(keys, 1), cache.rope(idx(base_kv, 2), -1))
@@ -74,12 +75,13 @@ class TestShiftingKVCache(TestCache):
         self.assertEqual(cache.offset, 4)
 
         # put the cache in temporal order -> 134 (no rope shift)
-        keys = cache._temporal_order(cache.keys, is_key=False)
+        cache._temporal_order()
+        values = cache.values
 
-        self.assertArrEqual(idx(keys, 0), idx(base_kv, 0))
-        self.assertArrEqual(idx(keys, 1), idx(base_kv, 2))
-        self.assertArrEqual(idx(keys, 2), overwrite)
-        self.assertEqual(cache.offset, 4)
+        self.assertArrEqual(idx(values, 0), idx(base_kv, 0))
+        self.assertArrEqual(idx(values, 1), idx(base_kv, 2))
+        self.assertArrEqual(idx(values, 2), overwrite)
+        self.assertEqual(cache.offset, 3)
 
     def test_trim_internal_shift_rope(self):
         """Test the RoPE shift in _trim (internal method)"""
@@ -91,7 +93,8 @@ class TestShiftingKVCache(TestCache):
         self.assertEqual(cache.offset, 3)
 
         # trim 1 from middle -> 13
-        keys = cache._trim(1, cache.keys, is_key=True)
+        cache._trim(1)
+        keys = cache.keys
 
         self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 2, self.kv_head_dim))
         self.assertArrEqual(idx(keys, 0), idx(base_kv, 0))
@@ -109,12 +112,13 @@ class TestShiftingKVCache(TestCache):
         self.assertEqual(cache.offset, 3)
 
         # trim 1 from middle -> 13 -> 12
-        keys = cache._trim(1, cache.keys, is_key=False)
-
-        self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 2, self.kv_head_dim))
-        self.assertArrEqual(idx(keys, 0), idx(base_kv, 0))
-        self.assertArrEqual(idx(keys, 1), idx(base_kv, 2))
-        self.assertEqual(cache.offset, 3)
+        cache._trim(1)
+        values = cache.values
+        
+        self.assertEqual(values.shape, (self.bsz, self.n_kv_heads, 2, self.kv_head_dim))
+        self.assertArrEqual(idx(values, 0), idx(base_kv, 0))
+        self.assertArrEqual(idx(values, 1), idx(base_kv, 2))
+        self.assertEqual(cache.offset, 2)
 
     def test_ensure_reasonable_size_and_shift(self):
         """Test behavior when the cache gets a KV batch-written that is much larger
@@ -141,7 +145,9 @@ class TestShiftingKVCache(TestCache):
         self.assertArrEqual(idx(keys, 2), cache.rope(idx(base_kv, 9), -7))
 
         # make sure pos embs are right
-        keys = cache._temporal_order(keys, is_key=True)
+        cache._temporal_order()
+        keys = cache.keys
+        
         self.assertArrEqual(idx(keys, 0), idx(base_kv, 0))
         self.assertArrEqual(idx(keys, 1), cache.rope(idx(base_kv, 9), -8))
         self.assertArrEqual(idx(keys, 2), cache.rope(overwrite, -1))
