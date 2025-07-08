@@ -1,12 +1,12 @@
 from typing import List, Optional, Any
 
 from mlx_engine.logging import log_warn
-from mlx_lm.models.cache import RotatingKVCache, KVCache
+from mlx_lm.models.cache import _BaseCache, KVCache
 import mlx.core as mx
 import mlx.nn as nn
 
 
-# TODO(christian-lms) DO NOT HARDCODE ME (or at least move it somewhere else)
+# unfortunate that this is hardcoded but what else is one to do
 MAYBE_ATTN_NAMES = ["self_attn", "attention", "attn", "mixer", "norm_attn_norm"]
 MAYBE_ROPE_NAMES = ["rope", "rotary_emb"]
 
@@ -43,13 +43,18 @@ def maybe_get_rope(model: nn.Module, layer_idx: int) -> Optional[nn.Module]:
     return _maybe_get_rope(layer)
 
 
-# TODO(christian-lms): you end up basically overriding EVERYTHING so maybe decouple
-class ShiftingKVCache(RotatingKVCache):
-    def __init__(self, rope: nn.Module, max_size=None, keep=0, step=256):
+class ShiftingKVCache(_BaseCache):
+    def __init__(self, rope: nn.Module, max_size=256, keep=0, step=256):
+        self.keep = keep
+        self.keys = None
+        self.values = None
+        self.offset = 0
+        self.max_size = max_size
+        self.step = step
+        self._idx = 0
         self._rope = rope
         self.reuse_offset = 0
         self.reuse_queue = []
-        super().__init__(max_size, keep, step)
 
     def rope(self, v: mx.array, shift_by: int) -> mx.array:
         # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
@@ -60,9 +65,6 @@ class ShiftingKVCache(RotatingKVCache):
         
     def rope_if(self, v: mx.array, shift_by: int, do: bool = False) -> mx.array:
         return self.rope(v, shift_by) if do else v
-
-    def is_trimmable(self) -> bool:
-        return True
 
     def _trim(self, trim_size, v, append=None, is_key=False):
         to_cat = []
@@ -102,68 +104,6 @@ class ShiftingKVCache(RotatingKVCache):
             )
         else:
             return v[..., : self._idx, :]
-    
-    def _update_concat(self, keys, values):
-        if self.keys is None:
-            self.keys = keys
-            self.values = values
-        else:
-            # Put the keys/values in temporal order to
-            # preserve context
-            self.keys = self._temporal_order(self.keys, is_key=True)
-            self.values = self._temporal_order(self.values, is_key=False)
-
-            # The largest size is self.max_size + S to ensure
-            # every token gets at least self.max_size context
-            trim_size = self._idx - self.max_size
-            self.keys = self._trim(trim_size, self.keys, keys, is_key=True)
-            self.values = self._trim(trim_size, self.values, values, is_key=False)
-        self.offset += keys.shape[2]
-        self._idx = self.keys.shape[2]
-        return self.keys, self.values
-
-    def _update_in_place(self, keys, values):
-        # May not have hit the max size yet, so potentially
-        # keep growing the cache
-        B, n_kv_heads, S, k_head_dim = keys.shape
-        prev = self.offset
-        if self.keys is None or (
-            prev >= self.keys.shape[2] and self.keys.shape[2] < self.max_size
-        ):
-            v_head_dim = values.shape[3]
-            new_size = min(self.step, self.max_size - prev)
-            k_shape = (B, n_kv_heads, new_size, k_head_dim)
-            v_shape = (B, n_kv_heads, new_size, v_head_dim)
-            new_k = mx.zeros(k_shape, keys.dtype)
-            new_v = mx.zeros(v_shape, values.dtype)
-            if self.keys is not None:
-                self.keys = mx.concatenate([self.keys, new_k], axis=2)
-                self.values = mx.concatenate([self.values, new_v], axis=2)
-            else:
-                self.keys, self.values = new_k, new_v
-            self._idx = prev
-
-        # Trim if needed
-        trim_size = self.keys.shape[2] - self.max_size
-        if trim_size > 0:
-            self.keys = self._trim(trim_size, self.keys, is_key=True)
-            self.values = self._trim(trim_size, self.values, is_key=False)
-            self._idx = self.max_size
-
-        # Rotate
-        if self._idx == self.max_size:
-            self._idx = self.keep
-
-        # Assign
-        self.keys[..., self._idx : self._idx + S, :] = keys
-        self.values[..., self._idx : self._idx + S, :] = values
-        self.offset += S
-        self._idx += S
-
-        # If the buffer is not full, slice off the end
-        if self.offset < self.max_size:
-            return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
-        return self.keys, self.values
 
     def reuse_section(
         self, write_start_idx: int, reuse_start_idx: int, reuse_length: int
@@ -244,6 +184,103 @@ class ShiftingKVCache(RotatingKVCache):
         # TODO(christian-lms): verify that this is reasonable
         self._idx = new_length
         return n
+    
+    def _update_concat(self, keys, values):
+        if self.keys is None:
+            self.keys = keys
+            self.values = values
+        else:
+            # Put the keys/values in temporal order to
+            # preserve context
+            self.keys = self._temporal_order(self.keys, is_key=True)
+            self.values = self._temporal_order(self.values, is_key=False)
+
+            # The largest size is self.max_size + S to ensure
+            # every token gets at least self.max_size context
+            trim_size = self._idx - self.max_size
+            self.keys = self._trim(trim_size, self.keys, keys, is_key=True)
+            self.values = self._trim(trim_size, self.values, values, is_key=False)
+        self.offset += keys.shape[2]
+        self._idx = self.keys.shape[2]
+        return self.keys, self.values
+
+    def _update_in_place(self, keys, values):
+        # May not have hit the max size yet, so potentially
+        # keep growing the cache
+        B, n_kv_heads, S, k_head_dim = keys.shape
+        prev = self.offset
+        if self.keys is None or (
+            prev >= self.keys.shape[2] and self.keys.shape[2] < self.max_size
+        ):
+            v_head_dim = values.shape[3]
+            new_size = min(self.step, self.max_size - prev)
+            k_shape = (B, n_kv_heads, new_size, k_head_dim)
+            v_shape = (B, n_kv_heads, new_size, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+            self._idx = prev
+
+        # Trim if needed
+        trim_size = self.keys.shape[2] - self.max_size
+        if trim_size > 0:
+            self.keys = self._trim(trim_size, self.keys, is_key=True)
+            self.values = self._trim(trim_size, self.values, is_key=False)
+            self._idx = self.max_size
+
+        # Rotate
+        if self._idx == self.max_size:
+            self._idx = self.keep
+
+        # Assign
+        self.keys[..., self._idx : self._idx + S, :] = keys
+        self.values[..., self._idx : self._idx + S, :] = values
+        self.offset += S
+        self._idx += S
+
+        # If the buffer is not full, slice off the end
+        if self.offset < self.max_size:
+            return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+        return self.keys, self.values
+
+    def update_and_fetch(self, keys, values):
+        if keys.shape[2] == 1:
+            return self._update_in_place(keys, values)
+        return self._update_concat(keys, values)
+
+    @property
+    def state(self):
+        if self.offset < self.keys.shape[2]:
+            return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+        else:
+            return self.keys, self.values
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values = v
+
+    @property
+    def meta_state(self):
+        return tuple(
+            map(str, (self.keep, self.max_size, self.step, self.offset, self._idx))
+        )
+
+    @meta_state.setter
+    def meta_state(self, v):
+        self.keep, self.max_size, self.step, self.offset, self._idx = map(
+            int,
+            v,
+        )
+
+    def is_trimmable(self) -> bool:
+        return True
+
+    def to_quantized(self, group_size: int = 64, bits: int = 4) -> Any:
+        raise NotImplementedError("ShiftingKVCache Quantization NYI")
 
 
 def make_prompt_cache(
