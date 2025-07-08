@@ -11,6 +11,11 @@ MAYBE_ATTN_NAMES = ["self_attn", "attention", "attn", "mixer", "norm_attn_norm"]
 MAYBE_ROPE_NAMES = ["rope", "rotary_emb"]
 
 
+def cat(v: mx.array):
+    """Alias for mx.concatenate(v, axis=2) since that's used all over the place"""
+    return mx.concatenate(v, axis=2)
+
+
 def _maybe_get_rope(layer: nn.Module) -> Optional[nn.Module]:
     for maybe_rope_name in MAYBE_ROPE_NAMES:
         if hasattr(layer, maybe_rope_name):
@@ -60,14 +65,11 @@ class ShiftingKVCache(_BaseCache):
         # a custom implementation somehow. also it allows us to easily use the
         # sustk scaled rope/yarn/llama3 rope impls in mlx_lm without having to
         # spin a custom implementation for those too (and any future rope variants)
-        return mx.concatenate(
+        return cat(
             [self._rope(v[:, :, i : i + 1, :], shift_by) for i in range(v.shape[2])],
-            axis=2,
         )
 
-    def _trim(
-        self, trim_size, append_k=None, append_v=None
-    ) -> None:
+    def _trim(self, trim_size, append_k=None, append_v=None) -> None:
         k = self.keys
         v = self.values
         assert k.shape == v.shape
@@ -89,7 +91,7 @@ class ShiftingKVCache(_BaseCache):
         if append_v is not None:
             assert append_k is not None
             # already done
-        self.keys, self.values = mx.concatenate(k_cat, axis=2), mx.concatenate(v_cat, axis=2)
+        self.keys, self.values = cat(k_cat), cat(v_cat)
 
     def _temporal_order(self) -> None:
         """
@@ -104,7 +106,7 @@ class ShiftingKVCache(_BaseCache):
             shift_by = self.keep - self._idx  # intentionally negative!!!
             assert shift_by <= 0
             self.offset += shift_by
-            kcat = mx.concatenate(
+            kcat = cat(
                 [
                     k[..., : self.keep, :],
                     # N.B. this implicitly assumes the generation has not gone over twice
@@ -115,15 +117,13 @@ class ShiftingKVCache(_BaseCache):
                     self.rope(k[..., self._idx :, :], shift_by),
                     self.rope(k[..., self.keep : self._idx, :], shift_by),
                 ],
-                axis=2,
             )
-            vcat = mx.concatenate(
+            vcat = cat(
                 [
                     v[..., : self.keep, :],
                     v[..., self._idx :, :],
                     v[..., self.keep : self._idx, :],
                 ],
-                axis=2,
             )
             self.keys, self.values = kcat, vcat
         else:
@@ -168,8 +168,7 @@ class ShiftingKVCache(_BaseCache):
             current_pos = write_start_idx + reuse_length
             self.offset += shift_by
 
-        self.keys = mx.concatenate(key_segments, axis=2)
-        self.values = mx.concatenate(value_segments, axis=2)
+        self.keys, self.values = cat(key_segments), cat(value_segments)
 
         # clean up
         self.reuse_queue = []
@@ -203,9 +202,7 @@ class ShiftingKVCache(_BaseCache):
             # The largest size is self.max_size + S to ensure
             # every token gets at least self.max_size context
             trim_size = self._idx - self.max_size
-            self._trim(
-                trim_size, append_k=keys, append_v=values
-            )
+            self._trim(trim_size, append_k=keys, append_v=values)
         self.offset += keys.shape[2]
         self._idx = self.keys.shape[2]
         return self.keys, self.values
@@ -225,8 +222,8 @@ class ShiftingKVCache(_BaseCache):
             new_k = mx.zeros(k_shape, keys.dtype)
             new_v = mx.zeros(v_shape, values.dtype)
             if self.keys is not None:
-                self.keys = mx.concatenate([self.keys, new_k], axis=2)
-                self.values = mx.concatenate([self.values, new_v], axis=2)
+                self.keys = cat([self.keys, new_k])
+                self.values = cat([self.values, new_v])
             else:
                 self.keys, self.values = new_k, new_v
             self._idx = prev

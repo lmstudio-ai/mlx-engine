@@ -113,9 +113,7 @@ class CacheWrapper:
 
                 # found reusable sequence - shift cache content
                 for cache in self.cache:
-                    cache.reuse_section(
-                        prompt_head_idx, cache_head_idx, match_length
-                    )
+                    cache.reuse_section(prompt_head_idx, cache_head_idx, match_length)
 
                 # update the tokens to reflect the reused sequence
                 for i in range(match_length):

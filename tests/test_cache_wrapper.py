@@ -1,7 +1,7 @@
 import unittest
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper
-from mlx_engine.cache import ShiftingKVCache
+from mlx_engine.cache import ShiftingKVCache, cat
 from tests.test_cache_generic import TestCache
 from tests.utils import DummyModel
 
@@ -126,7 +126,7 @@ class TestCacheWrapper(TestCache):
 
         # set up pretend prompt
         prompt_tokens = mx.array([1, 2, 4, 7, 8, 9, 11])
-        
+
         prefix_len = cache._find_matching_sequence_length(
             cached_tokens, prompt_tokens, 0
         )
@@ -143,29 +143,28 @@ class TestCacheWrapper(TestCache):
             return v[:, :, a:b, :]
 
         should_be_tokens = mx.array([1, 2, 4, 7, 8, 9])
-        should_be_kv = mx.concatenate(
+        should_be_kv = cat(
             [
                 idx(cache_kv, 0, 2),
                 cache.cache[0].rope(idx(cache_kv, 3, 4), -1),
                 cache.cache[0].rope(idx(cache_kv, 6, 9), -3),
             ],
-            axis=2,
         )
-        
+
         self.assertEqual(total_reused, 4)
         self.assertArrEqual(cache.tokens, should_be_tokens)
         self.assertArrEqual(cache.cache[0].keys, should_be_kv)
-        
+
         # ensure updating works as intended
         new_kv = self.make_random_kv(1)
         keys, _ = cache.cache[0].update_and_fetch(new_kv, new_kv)
-        should_be_kv = mx.concatenate([should_be_kv, new_kv], axis=2)
+        should_be_kv = cat([should_be_kv, new_kv])
         self.assertArrEqual(keys, should_be_kv)
-        
+
         # ensure batch concat works as intended
         new_kv = self.make_random_kv(2)
         keys, _ = cache.cache[0].update_and_fetch(new_kv, new_kv)
-        should_be_kv = mx.concatenate([should_be_kv, new_kv], axis=2)
+        should_be_kv = cat([should_be_kv, new_kv])
         self.assertArrEqual(keys, should_be_kv)
 
 
