@@ -92,7 +92,7 @@ class CacheWrapper:
         return match_length
 
     def _get_unprocessed_tokens(
-        self, prompt_tokens: mx.array, num_tokens_to_exclude: int, keep: int = 4
+        self, prompt_tokens: mx.array, num_tokens_to_exclude: int
     ):
         """
         Get the unprocessed tokens from the prompt.
@@ -112,6 +112,8 @@ class CacheWrapper:
         common_prefix = self._find_matching_sequence_length(
             self.tokens, prompt_tokens, num_tokens_to_exclude=num_tokens_to_exclude
         )
+
+        # TODO reuse logic goes here
 
         # Trim the cache if the common prefix is shorter than the current cache
         num_tokens_to_trim = self.cache[0].offset - common_prefix
@@ -272,8 +274,6 @@ class CacheWrapper:
 
         self.keep = keep
 
-        # TODO(christian-lms): truncation logic goes here now
-
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
             prompt_tokens, num_tokens_to_exclude
@@ -316,12 +316,8 @@ class CacheWrapper:
 
         Also loop when the cache does so that we accurately track what's in cache.
         """
-        # TODO(christian-lms): ensure that this works as intended when over length
-        # TODO(christian-lms): verify rolling window and truncate middle have n_keep as below
-        # TODO(christian-lms): this won't work until we pipe in keep from generate
-        n_keep = self.cache[0].keep
         # this behavior is common to rolling window (n_keep = 0) and truncate middle
         # (n_keep > 0), and we should never get here with stop at max
-        if len(self.tokens) >= n_keep:
-            self.tokens = mx.concat([self.tokens[:n_keep], self.tokens[n_keep + 1 :]])
+        if len(self.tokens) >= self.max_kv_size:
+            self.tokens = mx.concat([self.tokens[:self.keep], self.tokens[self.keep + 1 :]])
         self.tokens = mx.concat([self.tokens, mx.array([token])])

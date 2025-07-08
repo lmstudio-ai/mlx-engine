@@ -1,6 +1,7 @@
 import unittest
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper
+from tests.utils import DummyModel
 
 
 class TestCacheWrapper(unittest.TestCase):
@@ -105,8 +106,32 @@ class TestCacheWrapper(unittest.TestCase):
         )
         self.assertEqual(result, 2) # there are leftovers anyway
 
+    def test_record_generated_token_loops(self):
+        cache = CacheWrapper(
+            model=DummyModel(),
+            max_kv_size=5,
+            keep=2,
+        )
+        cache.tokens = mx.array([])
+        cache.record_generated_token(1)
+        cache.record_generated_token(2)
+        cache.record_generated_token(3)
+        cache.record_generated_token(4)
+        cache.record_generated_token(5)
+        self.assertListEqual(
+            cache.tokens.tolist(),
+            [1, 2, 3, 4, 5],
+        )
+        cache.record_generated_token(6)
+        self.assertListEqual(
+            cache.tokens.tolist(),
+            [1, 2, 4, 5, 6],
+        )
+
     # TODO(christian-lms): write tests for cache shifting, which is high-level
     # implemented in cachewrapper and so belongs here
+
+    # TODO(christian-lms): write tests for record_generated_token looping
 
 
 if __name__ == "__main__":
