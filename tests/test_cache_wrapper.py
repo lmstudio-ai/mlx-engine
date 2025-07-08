@@ -1,10 +1,37 @@
 import unittest
 import mlx.core as mx
+import mlx.nn as nn
 from mlx_engine.cache_wrapper import CacheWrapper
+from mlx_engine.cache import ShiftingKVCache
 from tests.utils import DummyModel
 
 
 class TestCacheWrapper(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Set up test resources that will be shared across all test methods"""
+        cls.kv_head_dim = 4
+        cls.bsz = 1
+        cls.n_kv_heads = 1
+        # cannot be used raw: must be wrapped in the cache.rope workaround impl
+        cls._rope = nn.RoPE(
+            dims=cls.kv_head_dim, traditional=False, base=100000, scale=1.0
+        )
+
+    @classmethod
+    def make_random_kv(cls, seqlen: int):
+        """Helper method to make a random key/value tensor of the right shape"""
+        return mx.random.normal(
+            (cls.bsz, cls.n_kv_heads, seqlen, cls.kv_head_dim),
+            scale=1.0,
+            dtype=mx.float32,
+        )
+
+    def assertArrEqual(self, a: mx.array, b: mx.array):
+        """Assert that two tensors are equal over the sequence length dimension"""
+        self.assertEqual(a.shape, b.shape)
+        self.assertTrue(mx.allclose(a, b), "Tensors are not equal")
+
     def test_find_matching_sequence_length_with_mismatch(self):
         """Test when there's a mismatch in the tokens"""
         # Create two arrays with a known common prefix [1, 2, 3]
@@ -104,7 +131,7 @@ class TestCacheWrapper(unittest.TestCase):
             start2=3,
             num_tokens_to_exclude=1,
         )
-        self.assertEqual(result, 2) # there are leftovers anyway
+        self.assertEqual(result, 2)  # there are leftovers anyway
 
     def test_record_generated_token_loops(self):
         cache = CacheWrapper(
@@ -128,10 +155,40 @@ class TestCacheWrapper(unittest.TestCase):
             [1, 2, 4, 5, 6],
         )
 
-    # TODO(christian-lms): write tests for cache shifting, which is high-level
-    # implemented in cachewrapper and so belongs here
+    def test_cache_reuse(self):
+        cache = CacheWrapper(DummyModel(), 10)
+        cache.cache = ShiftingKVCache(self._rope, max_size=10, keep=2)
 
-    # TODO(christian-lms): write tests for record_generated_token looping
+        # set up pretend cache
+        cached_tokens = mx.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        cache_kv = self.make_random_kv(10)
+        cache.tokens = cached_tokens
+        cache.cache.update_and_fetch(cache_kv, cache_kv)
+
+        prompt_tokens = mx.array([1, 2, 4, 7, 8, 9, 11])
+        prefix_len = cache._find_matching_sequence_length(
+            cached_tokens, prompt_tokens, 0
+        )
+        self.assertEqual(prefix_len, 2)
+
+        total_reused = cache._truncate_cache(
+            prompt_tokens=prompt_tokens,
+            common_prefix_len=prefix_len,
+            non_prefix_reuse_min_seq_len=1,
+        )
+
+        should_be_tokens = mx.array([1, 2, 4, 7, 8, 9])
+
+        def idx(v, a, b):
+            return v[:, :, a:b, :]
+
+        should_be_kv = mx.concatenate(
+            [idx(cache_kv, 0, 2), idx(cache_kv, 3, 4), idx(cache_kv, 6, 9)]
+        )
+
+        self.assertEqual(total_reused, 4)
+        self.assertArrEqual(cache.tokens, should_be_tokens)
+        self.assertArrEqual(cache.cache.keys, should_be_kv)
 
 
 if __name__ == "__main__":

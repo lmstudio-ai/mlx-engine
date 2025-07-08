@@ -96,7 +96,7 @@ class CacheWrapper:
         prompt_tokens: mx.array, 
         common_prefix_len: int,
         non_prefix_reuse_min_seq_len: int = 256
-    ) -> tuple[mx.array, int]:
+    ) -> int:
         cache_size = len(self.tokens)
         prompt_size = len(prompt_tokens)
         
@@ -140,9 +140,8 @@ class CacheWrapper:
         self.cache.do_reuse()
         # TODO(christian-lms): ensure that this works
         self.tokens = self.tokens[:common_prefix_len + total_reused]
-        prompt_tokens = prompt_tokens[total_reused:]
 
-        return prompt_tokens, total_reused
+        return total_reused
 
     def _get_unprocessed_tokens(
         self, prompt_tokens: mx.array, num_tokens_to_exclude: int
@@ -163,11 +162,13 @@ class CacheWrapper:
 
         # Find common KV between the last generation and the current prompt
         common_prefix = self._find_matching_sequence_length(
+            # TODO(christian-lms): BLOCKING: num_tokens_to_exclude must be moved after reuse
+            # this means you should move it out of _find_matching_sequence_length
             self.tokens, prompt_tokens, num_tokens_to_exclude=num_tokens_to_exclude
         )
-
+        
         if hasattr(self.cache, "reuse_section"):
-            prompt_tokens, n_reused_tokens = self._truncate_cache(
+            n_reused_tokens = self._truncate_cache(
                 prompt_tokens,
                 common_prefix,
             )
@@ -177,8 +178,6 @@ class CacheWrapper:
                     message=f"Reused {n_reused_tokens} tokens from the cache"
                 )
                 common_prefix += n_reused_tokens
-
-        # TODO reuse logic goes here
 
         # Trim the cache if the common prefix is shorter than the current cache
         num_tokens_to_trim = self.cache[0].offset - common_prefix
