@@ -56,7 +56,10 @@ class ShiftingKVCache(_BaseCache):
         self.reuse_queue = []
 
     def rope(self, v: mx.array, shift_by: int) -> mx.array:
-        # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
+        # you'd think this is inefficient, but it seems faster than spinning
+        # a custom implementation somehow. also it allows us to easily use the
+        # sustk scaled rope/yarn/llama3 rope impls in mlx_lm without having to
+        # spin a custom implementation for those too (and any future rope variants)
         return mx.concatenate(
             [self._rope(v[:, :, i : i + 1, :], shift_by) for i in range(v.shape[2])],
             axis=2,
@@ -100,7 +103,6 @@ class ShiftingKVCache(_BaseCache):
         elif self._idx < self.offset:
             shift_by = self.keep - self._idx  # intentionally negative!!!
             assert shift_by <= 0
-            # TODO(christian-lms): necessary? stupid hack anyway
             self.offset += shift_by
             kcat = mx.concatenate(
                 [
@@ -175,7 +177,7 @@ class ShiftingKVCache(_BaseCache):
         self.offset = self.keys.shape[2]
 
     def trim(self, n) -> int:
-        # TODO(christian-lms): should trim respect keep? currently, no
+        # trim does not respect keep and it will stay this way
         n = min(self.offset, n)
         if n <= 0:
             return 0
@@ -187,7 +189,6 @@ class ShiftingKVCache(_BaseCache):
         self.values = self.values[..., :new_length, :]
 
         self.offset -= n
-        # TODO(christian-lms): verify that this is reasonable
         self._idx = new_length
         return n
 
@@ -196,8 +197,7 @@ class ShiftingKVCache(_BaseCache):
             self.keys = keys
             self.values = values
         else:
-            # Put the keys/values in temporal order to
-            # preserve context
+            # Put the keys/values in temporal order to preserve context
             self._temporal_order()
 
             # The largest size is self.max_size + S to ensure

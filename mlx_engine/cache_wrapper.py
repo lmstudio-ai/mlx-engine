@@ -128,7 +128,6 @@ class CacheWrapper:
 
         for cache in self.cache:
             cache.do_reuse()
-        # TODO(christian-lms): ensure that this works
         self.tokens = self.tokens[: common_prefix_len + total_reused]
 
         return total_reused
