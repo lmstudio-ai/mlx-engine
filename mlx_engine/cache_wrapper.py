@@ -52,7 +52,6 @@ class CacheWrapper:
         tokens2: mx.array,
         start1: int = 0,
         start2: int = 0,
-        num_tokens_to_exclude: int = 0,
     ) -> int:
         """
         Find the length of matching token sequence between two token arrays.
@@ -62,8 +61,6 @@ class CacheWrapper:
             start1: Starting position in first array
             tokens2: Second token array
             start2: Starting position in second array
-            num_tokens_to_exclude (int): The minimum length of the leftover non-matching
-                segment of tokens1, to be excluded from the match length.
 
         Returns:
             int: Length of matching sequence
@@ -79,67 +76,61 @@ class CacheWrapper:
 
         # Find first mismatch
         mask = seq1 == seq2
-        if mx.any(mask == False):  # noqa E712
-            match_length = int(mx.argmax(mask == False))  # noqa E712
-        else:
-            match_length = min_length
+        return int(mx.argmax(mask == False)) if mx.any(mask == False) else min_length  # noqa E712
 
-        # Ensure that the leftover non-matching segment of tokens1
-        # is at least num_tokens_to_exclude long
-        leftover_tokens1_length = len(tokens1[match_length:])
-        length_adjustment = max(0, num_tokens_to_exclude - leftover_tokens1_length)
-        match_length = max(match_length - length_adjustment, 0)
-        return match_length
-    
     def _truncate_cache(
         self,
-        prompt_tokens: mx.array, 
+        prompt_tokens: mx.array,
         common_prefix_len: int,
-        non_prefix_reuse_min_seq_len: int = 256
+        non_prefix_reuse_min_seq_len: int = 256,
     ) -> int:
         cache_size = len(self.tokens)
         prompt_size = len(prompt_tokens)
-        
+
         # start scanning from after the common prefix
         cache_head_idx = common_prefix_len
         prompt_head_idx = common_prefix_len
         total_reused = 0
 
         if self.verbose:
-            print(f"Looking for non-prefix sequences of length >= {non_prefix_reuse_min_seq_len}", file=sys.stderr)
-        
+            print(
+                f"Looking for non-prefix sequences of length >= {non_prefix_reuse_min_seq_len}",
+                file=sys.stderr,
+            )
+
         while cache_head_idx < cache_size and prompt_head_idx < prompt_size:
             match_length = self._find_matching_sequence_length(
-                self.tokens, cache_head_idx,
-                prompt_tokens, prompt_head_idx
+                self.tokens, cache_head_idx, prompt_tokens, prompt_head_idx
             )
-            
+
             if match_length < non_prefix_reuse_min_seq_len:
                 # sequence too short - advance cache pointer to find next potential match
                 cache_head_idx += 1
             else:
                 if self.verbose:
                     print(f"Reusing {match_length} tokens from cache", file=sys.stderr)
-                
+
                 # found reusable sequence - shift cache content
-                self.cache.reuse_section(
-                    source_pos=cache_head_idx,
-                    target_pos=prompt_head_idx,
-                    length=match_length
-                )
+                for cache in self.cache:
+                    cache.reuse_section(
+                        source_pos=cache_head_idx,
+                        target_pos=prompt_head_idx,
+                        length=match_length,
+                    )
 
                 # update the tokens to reflect the reused sequence
                 for i in range(match_length):
                     self.tokens[prompt_head_idx + i] = self.tokens[cache_head_idx + i]
-                
+
                 # advance pointers
                 cache_head_idx += match_length
                 prompt_head_idx += match_length
                 total_reused += match_length
-        
-        self.cache.do_reuse()
+
+        for cache in self.cache:
+            cache.do_reuse()
         # TODO(christian-lms): ensure that this works
-        self.tokens = self.tokens[:common_prefix_len + total_reused]
+        self.tokens = self.tokens[: common_prefix_len + total_reused]
 
         return total_reused
 
@@ -162,12 +153,12 @@ class CacheWrapper:
 
         # Find common KV between the last generation and the current prompt
         common_prefix = self._find_matching_sequence_length(
-            # TODO(christian-lms): BLOCKING: num_tokens_to_exclude must be moved after reuse
-            # this means you should move it out of _find_matching_sequence_length
-            self.tokens, prompt_tokens, num_tokens_to_exclude=num_tokens_to_exclude
+            self.tokens,
+            prompt_tokens,
         )
-        
-        if hasattr(self.cache, "reuse_section"):
+
+        # do reuse but only if the cache has it
+        if hasattr(self.cache[0], "reuse_section"):
             n_reused_tokens = self._truncate_cache(
                 prompt_tokens,
                 common_prefix,
@@ -175,9 +166,13 @@ class CacheWrapper:
             if n_reused_tokens > 0:
                 log_info(
                     prefix="CacheWrapper",
-                    message=f"Reused {n_reused_tokens} tokens from the cache"
+                    message=f"Reused {n_reused_tokens} tokens from the cache",
                 )
                 common_prefix += n_reused_tokens
+
+        # exclude some tokens from end, e.g. for kicking off generation
+        if common_prefix >= len(prompt_tokens) - num_tokens_to_exclude:
+            common_prefix = len(prompt_tokens) - num_tokens_to_exclude
 
         # Trim the cache if the common prefix is shorter than the current cache
         num_tokens_to_trim = self.cache[0].offset - common_prefix
@@ -338,7 +333,8 @@ class CacheWrapper:
 
         # update keep tracking
         self.keep = keep
-        setattr(self.cache, "keep", keep)
+        for cache in self.cache:
+            setattr(cache, "keep", keep)
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
@@ -385,5 +381,7 @@ class CacheWrapper:
         # this behavior is common to rolling window (n_keep = 0) and truncate middle
         # (n_keep > 0), and we should never get here with stop at max
         if len(self.tokens) >= self.max_kv_size:
-            self.tokens = mx.concat([self.tokens[:self.keep], self.tokens[self.keep + 1 :]])
+            self.tokens = mx.concat(
+                [self.tokens[: self.keep], self.tokens[self.keep + 1 :]]
+            )
         self.tokens = mx.concat([self.tokens, mx.array([token])])
