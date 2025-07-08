@@ -43,6 +43,7 @@ def maybe_get_rope(model: nn.Module, layer_idx: int) -> Optional[nn.Module]:
     return _maybe_get_rope(layer)
 
 
+# TODO(christian-lms): you end up basically overriding EVERYTHING so maybe decouple
 class ShiftingKVCache(RotatingKVCache):
     def __init__(self, rope: nn.Module, max_size=None, keep=0, step=256):
         self._rope = rope
@@ -50,24 +51,26 @@ class ShiftingKVCache(RotatingKVCache):
         self.reuse_queue = []
         super().__init__(max_size, keep, step)
 
-    # TODO(christian-lms): stop rope shifting your values!!!!!!!!!!!!!
     def rope(self, v: mx.array, shift_by: int) -> mx.array:
         # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
         return mx.concatenate(
             [self._rope(v[:, :, i : i + 1, :], shift_by) for i in range(v.shape[2])],
             axis=2,
         )
+        
+    def rope_if(self, v: mx.array, shift_by: int, do: bool = False) -> mx.array:
+        return self.rope(v, shift_by) if do else v
 
     def is_trimmable(self) -> bool:
         return True
 
-    def _trim(self, trim_size, v, append=None):
+    def _trim(self, trim_size, v, append=None, is_key=False):
         to_cat = []
         shift_by = -trim_size
         if trim_size > 0:
             to_cat = [
                 v[..., : self.keep, :],
-                self.rope(v[..., trim_size + self.keep :, :], shift_by),
+                self.rope_if(v[..., trim_size + self.keep :, :], shift_by, do=is_key),
             ]
         else:
             to_cat = [v]
@@ -75,7 +78,7 @@ class ShiftingKVCache(RotatingKVCache):
             to_cat.append(append)
         return mx.concatenate(to_cat, axis=2)
 
-    def _temporal_order(self, v) -> mx.array:
+    def _temporal_order(self, v, is_key=False) -> mx.array:
         """
         Rearrange the cache into temporal order, slicing off the end if unused.
         """
@@ -92,13 +95,75 @@ class ShiftingKVCache(RotatingKVCache):
                     # rotating section would be off by a multiple of (max_kv_size - keep)
                     # depending on how many times it rolled over. I feel like it's pretty
                     # safe to assume that this is a rare case
-                    self.rope(v[..., self._idx :, :], shift_by),
-                    self.rope(v[..., self.keep : self._idx, :], shift_by),
+                    self.rope_if(v[..., self._idx :, :], shift_by, do=is_key),
+                    self.rope_if(v[..., self.keep : self._idx, :], shift_by, do=is_key),
                 ],
                 axis=2,
             )
         else:
             return v[..., : self._idx, :]
+    
+    def _update_concat(self, keys, values):
+        if self.keys is None:
+            self.keys = keys
+            self.values = values
+        else:
+            # Put the keys/values in temporal order to
+            # preserve context
+            self.keys = self._temporal_order(self.keys, is_key=True)
+            self.values = self._temporal_order(self.values, is_key=False)
+
+            # The largest size is self.max_size + S to ensure
+            # every token gets at least self.max_size context
+            trim_size = self._idx - self.max_size
+            self.keys = self._trim(trim_size, self.keys, keys, is_key=True)
+            self.values = self._trim(trim_size, self.values, values, is_key=False)
+        self.offset += keys.shape[2]
+        self._idx = self.keys.shape[2]
+        return self.keys, self.values
+
+    def _update_in_place(self, keys, values):
+        # May not have hit the max size yet, so potentially
+        # keep growing the cache
+        B, n_kv_heads, S, k_head_dim = keys.shape
+        prev = self.offset
+        if self.keys is None or (
+            prev >= self.keys.shape[2] and self.keys.shape[2] < self.max_size
+        ):
+            v_head_dim = values.shape[3]
+            new_size = min(self.step, self.max_size - prev)
+            k_shape = (B, n_kv_heads, new_size, k_head_dim)
+            v_shape = (B, n_kv_heads, new_size, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+            self._idx = prev
+
+        # Trim if needed
+        trim_size = self.keys.shape[2] - self.max_size
+        if trim_size > 0:
+            self.keys = self._trim(trim_size, self.keys, is_key=True)
+            self.values = self._trim(trim_size, self.values, is_key=False)
+            self._idx = self.max_size
+
+        # Rotate
+        if self._idx == self.max_size:
+            self._idx = self.keep
+
+        # Assign
+        self.keys[..., self._idx : self._idx + S, :] = keys
+        self.values[..., self._idx : self._idx + S, :] = values
+        self.offset += S
+        self._idx += S
+
+        # If the buffer is not full, slice off the end
+        if self.offset < self.max_size:
+            return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+        return self.keys, self.values
 
     def reuse_section(
         self, write_start_idx: int, reuse_start_idx: int, reuse_length: int
@@ -131,13 +196,12 @@ class ShiftingKVCache(RotatingKVCache):
             # N.B. we can also go back to the MLX-native "don't rope shift" method
             # by removing RoPE here and removing the overrides for trim, temporal order
             shifted_keys = self.rope(keys_to_shift, shift_by)
-            shifted_values = self.rope(values_to_shift, shift_by)
 
             # restructure cache with mx.concat
             # TODO(christian-lms): maybe it would be better to use inplace ops.
             # look into the mlx docs if that's even a thing
             keycat = [self.keys[..., :write_start_idx, :], shifted_keys]
-            valcat = [self.values[..., :write_start_idx, :], shifted_values]
+            valcat = [self.values[..., :write_start_idx, :], values_to_shift]
 
             # TODO(christian-lms): surely there is a better way to do this?
             # by not re-appending the end at the last one, we truncate the leftovers
@@ -145,8 +209,8 @@ class ShiftingKVCache(RotatingKVCache):
                 keycat.append(self.keys[..., reuse_end_idx:, :])
                 valcat.append(self.values[..., reuse_end_idx:, :])
 
-            self.keys = mx.concat(keycat, axis=2)
-            self.values = mx.concat(valcat, axis=2)
+            self.keys = mx.concatenate(keycat, axis=2)
+            self.values = mx.concatenate(valcat, axis=2)
 
             self.offset -= shift_by
         self.reuse_offset = 0
@@ -167,8 +231,8 @@ class ShiftingKVCache(RotatingKVCache):
         # will trim exactly n off the end wthout any wrapping around. but you can uncomment the line
         # if it turns out that this assumption is faulty
         if self.offset >= self.max_size:
-            self.keys = self._temporal_order(self.keys)
-            self.values = self._temporal_order(self.values)
+            self.keys = self._temporal_order(self.keys, is_key=True)
+            self.values = self._temporal_order(self.values, is_key=False)
             # n = n % (self.max_size - self.keep)
 
         # do trim: put us back into the state before the circular buffer is full
@@ -213,7 +277,6 @@ def make_prompt_cache(
                     f"None at layer {layer} of model {model}"
                 )
                 return [KVCache() for _ in range(num_layers)]
-            # TODO(christian-lms): change keep on the fly, must be setattr elsewhere
             cache.append(ShiftingKVCache(rope, max_size=max_kv_size, keep=keep))
         return cache
     else:

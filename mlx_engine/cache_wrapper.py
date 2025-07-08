@@ -336,7 +336,9 @@ class CacheWrapper:
             def prompt_progress_callback(x):
                 return None
 
+        # update keep tracking
         self.keep = keep
+        setattr(self.cache, "keep", keep)
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
