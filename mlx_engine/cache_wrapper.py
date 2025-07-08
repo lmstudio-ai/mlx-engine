@@ -2,10 +2,7 @@ from typing import List, Optional, Any
 
 from mlx_engine.logging import log_info, log_warn, log_error
 from mlx_engine.cache import make_prompt_cache
-from mlx_lm.models.cache import (
-    trim_prompt_cache,
-    can_trim_prompt_cache
-)
+from mlx_lm.models.cache import trim_prompt_cache, can_trim_prompt_cache
 from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
@@ -51,23 +48,23 @@ class CacheWrapper:
 
     @staticmethod
     def _find_matching_sequence_length(
-        tokens1: mx.array, 
-        tokens2: mx.array, 
+        tokens1: mx.array,
+        tokens2: mx.array,
         start1: int = 0,
         start2: int = 0,
-        num_tokens_to_exclude: int = 0
+        num_tokens_to_exclude: int = 0,
     ) -> int:
         """
         Find the length of matching token sequence between two token arrays.
-        
+
         Args:
             tokens1: First token array
             start1: Starting position in first array
-            tokens2: Second token array  
+            tokens2: Second token array
             start2: Starting position in second array
             num_tokens_to_exclude (int): The minimum length of the leftover non-matching
                 segment of tokens1, to be excluded from the match length.
-        
+
         Returns:
             int: Length of matching sequence
         """
@@ -75,24 +72,22 @@ class CacheWrapper:
         max_len1 = len(tokens1) - start1
         max_len2 = len(tokens2) - start2
         min_length = int(min(max_len1, max_len2))
-        
+
         # Extract subsequences to compare
         seq1 = tokens1[start1 : start1 + min_length]
         seq2 = tokens2[start2 : start2 + min_length]
-        
+
         # Find first mismatch
         mask = seq1 == seq2
         if mx.any(mask == False):  # noqa E712
             match_length = int(mx.argmax(mask == False))  # noqa E712
         else:
             match_length = min_length
-        
+
         # Ensure that the leftover non-matching segment of tokens1
         # is at least num_tokens_to_exclude long
         leftover_tokens1_length = len(tokens1[match_length:])
-        length_adjustment = max(
-            0, num_tokens_to_exclude - leftover_tokens1_length
-        )
+        length_adjustment = max(0, num_tokens_to_exclude - leftover_tokens1_length)
         match_length = max(match_length - length_adjustment, 0)
         return match_length
 
@@ -127,7 +122,9 @@ class CacheWrapper:
                     message=f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: "
                     "Cache is not trimmable. Clearing the cache instead.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size, keep=self.keep)
+                self.cache = make_prompt_cache(
+                    self.model, self.max_kv_size, keep=self.keep
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
@@ -138,7 +135,9 @@ class CacheWrapper:
                     message=f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected "
                     " ({num_tokens_to_trim}). Clearing the cache.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size, keep=self.keep)
+                self.cache = make_prompt_cache(
+                    self.model, self.max_kv_size, keep=self.keep
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             log_info(
@@ -251,7 +250,7 @@ class CacheWrapper:
         prompt_progress_callback,
         *,
         num_tokens_to_exclude: int = 1,
-        keep: int = 4
+        keep: int = 4,
     ) -> mx.array:
         """
         Set up the KV cache for the next generation.
@@ -267,11 +266,12 @@ class CacheWrapper:
             mx.array: The prompt tokens to be used for the next generation.
         """
         if prompt_progress_callback is None:
+
             def prompt_progress_callback(x):
                 return None
-            
+
         self.keep = keep
-            
+
         # TODO(christian-lms): truncation logic goes here now
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
@@ -313,8 +313,8 @@ class CacheWrapper:
     def record_generated_token(self, token):
         """
         Add the generated token to the token list, so that we can map the token to the KV cache.
-        
-        Also loop when the cache does so that we accurately track what's in cache. 
+
+        Also loop when the cache does so that we accurately track what's in cache.
         """
         # TODO(christian-lms): ensure that this works as intended when over length
         # TODO(christian-lms): verify rolling window and truncate middle have n_keep as below
@@ -323,5 +323,5 @@ class CacheWrapper:
         # this behavior is common to rolling window (n_keep = 0) and truncate middle
         # (n_keep > 0), and we should never get here with stop at max
         if len(self.tokens) >= n_keep:
-            self.tokens = mx.concat([self.tokens[:n_keep], self.tokens[n_keep+1:]])
+            self.tokens = mx.concat([self.tokens[:n_keep], self.tokens[n_keep + 1 :]])
         self.tokens = mx.concat([self.tokens, mx.array([token])])

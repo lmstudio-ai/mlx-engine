@@ -1,10 +1,7 @@
 from typing import List, Optional, Any
 
-from mlx_engine.logging import log_info, log_warn, log_error
-from mlx_lm.models.cache import (
-    RotatingKVCache,
-    KVCache
-)
+from mlx_engine.logging import log_warn
+from mlx_lm.models.cache import RotatingKVCache, KVCache
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -31,7 +28,7 @@ def maybe_get_rope(model: nn.Module, layer_idx: int) -> Optional[nn.Module]:
     """Attempt to find the RoPE module from a layer of an MLX-LM LLM.
 
     Args:
-        model (nn.Module): The LLM to search for the RoPE modules of. 
+        model (nn.Module): The LLM to search for the RoPE modules of.
         layer_idx (int): The layer of the LLM to get the RoPE module from.
 
     Returns:
@@ -55,22 +52,28 @@ class ShiftingKVCache(RotatingKVCache):
 
     def rope(self, v: mx.array, shift_by: int) -> mx.array:
         # TODO(christian-lms): this is reeeeeeallllyyyy stupid. spin a proper block impl
-        return mx.concatenate([self._rope(v[:,:,i:i+1,:], shift_by) for i in range(v.shape[2])], axis=2)
+        return mx.concatenate(
+            [self._rope(v[:, :, i : i + 1, :], shift_by) for i in range(v.shape[2])],
+            axis=2,
+        )
 
     def is_trimmable(self) -> bool:
         return True
-    
+
     def _trim(self, trim_size, v, append=None):
         to_cat = []
         shift_by = -trim_size
         if trim_size > 0:
-            to_cat = [v[..., : self.keep, :], self.rope(v[..., trim_size + self.keep :, :], shift_by)]
+            to_cat = [
+                v[..., : self.keep, :],
+                self.rope(v[..., trim_size + self.keep :, :], shift_by),
+            ]
         else:
             to_cat = [v]
         if append is not None:
             to_cat.append(append)
         return mx.concatenate(to_cat, axis=2)
-    
+
     def _temporal_order(self, v) -> mx.array:
         """
         Rearrange the cache into temporal order, slicing off the end if unused.
@@ -95,69 +98,67 @@ class ShiftingKVCache(RotatingKVCache):
             )
         else:
             return v[..., : self._idx, :]
-    
-    def reuse_section(self, write_start_idx: int, reuse_start_idx: int, reuse_length: int) -> None:
+
+    def reuse_section(
+        self, write_start_idx: int, reuse_start_idx: int, reuse_length: int
+    ) -> None:
         # offset indices to account for the fact that we move cache elements around
         write_start_idx -= self.reuse_offset
         reuse_start_idx -= self.reuse_offset
-        
+
         # update position offsets for future reuse sections
         shift_by = write_start_idx - reuse_start_idx
         self.reuse_offset += shift_by
 
         # queue for reuse: everything is done in one pass at the end in do_reuse
         self.reuse_queue.append((write_start_idx, reuse_start_idx, reuse_length))
-    
+
     def do_reuse(self) -> None:
         last_i: int = len(self.reuse_queue) - 1
 
-        for i, (write_start_idx, reuse_start_idx, reuse_length) in enumerate(self.reuse_queue):
+        for i, (write_start_idx, reuse_start_idx, reuse_length) in enumerate(
+            self.reuse_queue
+        ):
             shift_by: int = write_start_idx - reuse_start_idx
             assert shift_by <= 0
             reuse_end_idx: int = reuse_start_idx + reuse_length
 
-            keys_to_shift = self.keys[..., reuse_start_idx : reuse_end_idx, :]
-            values_to_shift = self.values[..., reuse_start_idx : reuse_end_idx, :]
+            keys_to_shift = self.keys[..., reuse_start_idx:reuse_end_idx, :]
+            values_to_shift = self.values[..., reuse_start_idx:reuse_end_idx, :]
 
             # perform rope shift
             # N.B. we can also go back to the MLX-native "don't rope shift" method
             # by removing RoPE here and removing the overrides for trim, temporal order
             shifted_keys = self.rope(keys_to_shift, shift_by)
             shifted_values = self.rope(values_to_shift, shift_by)
-            
+
             # restructure cache with mx.concat
             # TODO(christian-lms): maybe it would be better to use inplace ops.
             # look into the mlx docs if that's even a thing
-            keycat = [
-                self.keys[..., : write_start_idx, :],
-                shifted_keys
-            ]
-            valcat = [
-                self.values[..., : write_start_idx, :],
-                shifted_values
-            ]
-            
+            keycat = [self.keys[..., :write_start_idx, :], shifted_keys]
+            valcat = [self.values[..., :write_start_idx, :], shifted_values]
+
             # TODO(christian-lms): surely there is a better way to do this?
             # by not re-appending the end at the last one, we truncate the leftovers
             if i != last_i:
-                keycat.append(self.keys[..., reuse_end_idx : , :])
-                valcat.append(self.values[..., reuse_end_idx : , :])
+                keycat.append(self.keys[..., reuse_end_idx:, :])
+                valcat.append(self.values[..., reuse_end_idx:, :])
 
             self.keys = mx.concat(keycat, axis=2)
             self.values = mx.concat(valcat, axis=2)
-            
+
             self.offset -= shift_by
         self.reuse_offset = 0
         self.reuse_queue = []
         # TODO(christian-lms): dunno if this number is correct/reasonable/whatever
         self._idx = self.keys.shape[2]
-    
+
     def trim(self, n) -> int:
         # TODO(christian-lms): should trim respect keep? currently, no
         n = min(self.offset, n)
         if n <= 0:
             return 0
-        
+
         # TODO(christian-lms): so you used to need to wrap around because the code
         # didn't know how much it was trying to trim, so it would go over the maximum allowed.
         # but i think this was in large part due to improperly tracking the tokens that were
@@ -171,14 +172,15 @@ class ShiftingKVCache(RotatingKVCache):
 
         # do trim: put us back into the state before the circular buffer is full
         new_length = self.keys.shape[2] - n
-        self.keys = self.keys[..., : new_length, :]
-        self.values = self.values[..., : new_length, :]
-        
+        self.keys = self.keys[..., :new_length, :]
+        self.values = self.values[..., :new_length, :]
+
         self.offset -= n
         # TODO(christian-lms): verify that this is reasonable
         self._idx = new_length
         return n
-    
+
+
 def make_prompt_cache(
     model: nn.Module,
     max_kv_size: Optional[int] = None,
@@ -205,8 +207,10 @@ def make_prompt_cache(
             # like llama4 which has no rope module for every fourth layer.
             # this will be figured out Later(tm) once the initial functionality works
             if rope is None:
-                log_warn("Attempted to build a KV cache of shiftable caches, but found"
-                         f"None at layer {layer} of model {model}")
+                log_warn(
+                    "Attempted to build a KV cache of shiftable caches, but found"
+                    f"None at layer {layer} of model {model}"
+                )
                 return [KVCache() for _ in range(num_layers)]
             # TODO(christian-lms): change keep on the fly, must be setattr elsewhere
             cache.append(ShiftingKVCache(rope, max_size=max_kv_size, keep=keep))
