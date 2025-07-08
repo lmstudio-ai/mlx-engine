@@ -100,7 +100,7 @@ class CacheWrapper:
 
         while cache_head_idx < cache_size and prompt_head_idx < prompt_size:
             match_length = self._find_matching_sequence_length(
-                self.tokens, cache_head_idx, prompt_tokens, prompt_head_idx
+                prompt_tokens, self.tokens, prompt_head_idx, cache_head_idx
             )
 
             if match_length < non_prefix_reuse_min_seq_len:
@@ -109,13 +109,12 @@ class CacheWrapper:
             else:
                 if self.verbose:
                     print(f"Reusing {match_length} tokens from cache", file=sys.stderr)
+                print(f"idx {prompt_head_idx} {cache_head_idx}")
 
                 # found reusable sequence - shift cache content
                 for cache in self.cache:
                     cache.reuse_section(
-                        source_pos=cache_head_idx,
-                        target_pos=prompt_head_idx,
-                        length=match_length,
+                        prompt_head_idx, cache_head_idx, match_length
                     )
 
                 # update the tokens to reflect the reused sequence

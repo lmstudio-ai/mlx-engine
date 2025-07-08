@@ -53,7 +53,6 @@ class ShiftingKVCache(_BaseCache):
         self.step = step
         self._idx = 0
         self._rope = rope
-        self.reuse_offset = 0
         self.reuse_queue = []
 
     def rope(self, v: mx.array, shift_by: int) -> mx.array:
@@ -108,54 +107,47 @@ class ShiftingKVCache(_BaseCache):
     def reuse_section(
         self, write_start_idx: int, reuse_start_idx: int, reuse_length: int
     ) -> None:
-        # offset indices to account for the fact that we move cache elements around
-        write_start_idx -= self.reuse_offset
-        reuse_start_idx -= self.reuse_offset
-
-        # update position offsets for future reuse sections
-        shift_by = write_start_idx - reuse_start_idx
-        self.reuse_offset += shift_by
-
         # queue for reuse: everything is done in one pass at the end in do_reuse
         self.reuse_queue.append((write_start_idx, reuse_start_idx, reuse_length))
 
     def do_reuse(self) -> None:
-        last_i: int = len(self.reuse_queue) - 1
+        if not self.reuse_queue:
+            return
 
-        for i, (write_start_idx, reuse_start_idx, reuse_length) in enumerate(
-            self.reuse_queue
-        ):
-            shift_by: int = write_start_idx - reuse_start_idx
-            assert shift_by <= 0
-            reuse_end_idx: int = reuse_start_idx + reuse_length
-
-            keys_to_shift = self.keys[..., reuse_start_idx:reuse_end_idx, :]
-            values_to_shift = self.values[..., reuse_start_idx:reuse_end_idx, :]
-
-            # perform rope shift
-            # N.B. we can also go back to the MLX-native "don't rope shift" method
-            # by removing RoPE here and removing the overrides for trim, temporal order
-            shifted_keys = self.rope(keys_to_shift, shift_by)
-
-            # restructure cache with mx.concat
-            # TODO(christian-lms): maybe it would be better to use inplace ops.
-            # look into the mlx docs if that's even a thing
-            keycat = [self.keys[..., :write_start_idx, :], shifted_keys]
-            valcat = [self.values[..., :write_start_idx, :], values_to_shift]
-
-            # TODO(christian-lms): surely there is a better way to do this?
-            # by not re-appending the end at the last one, we truncate the leftovers
-            if i != last_i:
-                keycat.append(self.keys[..., reuse_end_idx:, :])
-                valcat.append(self.values[..., reuse_end_idx:, :])
-
-            self.keys = mx.concatenate(keycat, axis=2)
-            self.values = mx.concatenate(valcat, axis=2)
-
-            self.offset -= shift_by
-        self.reuse_offset = 0
+        # just in case, sort in write order        
+        self.reuse_queue.sort(key=lambda x: x[0])
+        
+        key_segments = []
+        value_segments = []
+        current_pos = 0
+        
+        for write_start_idx, reuse_start_idx, reuse_length in self.reuse_queue:
+            # add any gap before this write position
+            if current_pos < write_start_idx:
+                key_segments.append(self.keys[..., current_pos:write_start_idx, :])
+                value_segments.append(self.values[..., current_pos:write_start_idx, :])
+            
+            # add the reused segment with RoPE shift
+            shift_by = write_start_idx - reuse_start_idx  # intentionally negative!!!
+            reuse_end_idx = reuse_start_idx + reuse_length
+            
+            keys_to_reuse = self.keys[..., reuse_start_idx:reuse_end_idx, :]
+            values_to_reuse = self.values[..., reuse_start_idx:reuse_end_idx, :]
+            
+            # only keys require rope
+            shifted_keys = self.rope(keys_to_reuse, shift_by)
+            
+            key_segments.append(shifted_keys)
+            value_segments.append(values_to_reuse)
+            
+            current_pos = write_start_idx + reuse_length
+            self.offset += shift_by
+        
+        self.keys = mx.concatenate(key_segments, axis=2)
+        self.values = mx.concatenate(value_segments, axis=2)
+        
+        # clean up
         self.reuse_queue = []
-        # TODO(christian-lms): dunno if this number is correct/reasonable/whatever
         self._idx = self.keys.shape[2]
 
     def trim(self, n) -> int:
@@ -214,7 +206,10 @@ class ShiftingKVCache(_BaseCache):
         ):
             v_head_dim = values.shape[3]
             new_size = min(self.step, self.max_size - prev)
+            print(self.max_size)
+            print(prev)
             k_shape = (B, n_kv_heads, new_size, k_head_dim)
+            print(k_shape)
             v_shape = (B, n_kv_heads, new_size, v_head_dim)
             new_k = mx.zeros(k_shape, keys.dtype)
             new_v = mx.zeros(v_shape, values.dtype)
@@ -299,6 +294,17 @@ def make_prompt_cache(
             with a maximum size of ``max_kv_size``
     """
     if hasattr(model, "make_cache"):
+        # TODO(christian-lms): gah what are you gonna do about models that do this
+        # afm7 baichuan_m1 cohere2 gemma3(+friends) llama4 mamba plamo2 recurrent_gemma
+        # m1 mamba plamo2 recurrent_gemma are hybrid
+        # - afm7 is trivially overridable
+        # - cohere2 is swa on some layers but can probably be overridden
+        # - gemma3 see cohere2
+        # - llama4 uses chunked kv on some layers but can maybe be overridden
+        #   though these layers don't have rope modules
+        
+        # try to get the model name from model.args.model_type but i suppose this will
+        # not always work. that or literally model.__name__ hopefully
         return model.make_cache()
     num_layers = len(model.layers)
     if max_kv_size is not None:

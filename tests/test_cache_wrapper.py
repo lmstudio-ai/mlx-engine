@@ -35,9 +35,7 @@ class TestCacheWrapper(TestCache):
         result = CacheWrapper._find_matching_sequence_length(
             current_tokens, prompt_tokens
         )
-        self.assertEqual(
-            result, 4
-        )  # Should find 4 matching tokens (5-1 due to num_tokens_to_exclude)
+        self.assertEqual(result, 5)  # Should find 5 matching tokens
 
     def test_find_matching_sequence_length_no_match(self):
         """Test when no tokens match"""
@@ -116,7 +114,7 @@ class TestCacheWrapper(TestCache):
             [1, 2, 4, 5, 6],
         )
 
-    def test_cache_reuse(self):
+    def test_cache_reuse_heavy(self):
         cache = CacheWrapper(DummyModel(), 10)
         cache.cache[0] = ShiftingKVCache(self._rope, max_size=10, keep=2)
 
@@ -126,7 +124,9 @@ class TestCacheWrapper(TestCache):
         cache.tokens = cached_tokens
         cache.cache[0].update_and_fetch(cache_kv, cache_kv)
 
+        # set up pretend prompt
         prompt_tokens = mx.array([1, 2, 4, 7, 8, 9, 11])
+        
         prefix_len = cache._find_matching_sequence_length(
             cached_tokens, prompt_tokens, 0
         )
@@ -138,22 +138,35 @@ class TestCacheWrapper(TestCache):
             non_prefix_reuse_min_seq_len=1,
         )
 
-        should_be_tokens = mx.array([1, 2, 4, 7, 8, 9])
-
+        # prepare references
         def idx(v, a, b):
             return v[:, :, a:b, :]
 
+        should_be_tokens = mx.array([1, 2, 4, 7, 8, 9])
         should_be_kv = mx.concatenate(
             [
                 idx(cache_kv, 0, 2),
                 cache.cache[0].rope(idx(cache_kv, 3, 4), -1),
                 cache.cache[0].rope(idx(cache_kv, 6, 9), -3),
-            ]
+            ],
+            axis=2,
         )
-
+        
         self.assertEqual(total_reused, 4)
         self.assertArrEqual(cache.tokens, should_be_tokens)
         self.assertArrEqual(cache.cache[0].keys, should_be_kv)
+        
+        # ensure updating works as intended
+        new_kv = self.make_random_kv(1)
+        keys, _ = cache.cache[0].update_and_fetch(new_kv, new_kv)
+        should_be_kv = mx.concatenate([should_be_kv, new_kv], axis=2)
+        self.assertArrEqual(keys, should_be_kv)
+        
+        # ensure batch concat works as intended
+        new_kv = self.make_random_kv(2)
+        keys, _ = cache.cache[0].update_and_fetch(new_kv, new_kv)
+        should_be_kv = mx.concatenate([should_be_kv, new_kv], axis=2)
+        self.assertArrEqual(keys, should_be_kv)
 
 
 if __name__ == "__main__":
