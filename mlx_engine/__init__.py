@@ -15,6 +15,7 @@ from pathlib import Path
 import os
 
 from .utils.disable_hf_download import patch_huggingface_hub
+from .utils.remote_code_patch import register_models
 
 
 from .generate import (
@@ -27,6 +28,7 @@ from .generate import (
 )
 
 patch_huggingface_hub()
+register_models()
 
 
 def _set_outlines_cache_dir(cache_dir: Path | str):
