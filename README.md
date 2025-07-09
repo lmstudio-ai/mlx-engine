@@ -128,3 +128,9 @@ To test specific vision models:
 ```bash
 python -m pytest tests/test_vision_models.py -k pixtral
 ```
+
+## Attribution
+
+The following components are licensed under the Apache License 2.0:
+
+- Ernie 4.5 modeling code, located in `mlx_engine/external/models/ernie4_5`. Retrieved from [this link](https://huggingface.co/mlx-community/ERNIE-4.5-0.3B-PT-4bit/tree/main). Copyright 2025 Baidu, Inc.
