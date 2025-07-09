@@ -15,7 +15,7 @@ from pathlib import Path
 import os
 
 from .utils.disable_hf_download import patch_huggingface_hub
-from .utils.remote_code_patch import register_models
+from .utils.register_models import register_models
 
 
 from .generate import (
