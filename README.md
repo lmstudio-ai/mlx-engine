@@ -128,3 +128,7 @@ To test specific vision models:
 ```bash
 python -m pytest tests/test_vision_models.py -k pixtral
 ```
+
+## Attribution
+
+Ernie 4.5 modeling code is sourced from [Baidu](https://huggingface.co/baidu/ERNIE-4.5-0.3B-PT/tree/da6f3b1158d5d0d2bbf552bfc3364c9ec64e8aa5)
