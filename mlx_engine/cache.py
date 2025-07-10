@@ -4,6 +4,7 @@ from mlx_engine.logging import log_warn
 from mlx_lm.models.cache import _BaseCache, KVCache
 import mlx.core as mx
 import mlx.nn as nn
+import sys
 
 
 # unfortunate that this is hardcoded but what else is one to do
@@ -65,9 +66,10 @@ class ShiftingKVCache(_BaseCache):
         # a custom implementation somehow. also it allows us to easily use the
         # sustk scaled rope/yarn/llama3 rope impls in mlx_lm without having to
         # spin a custom implementation for those too (and any future rope variants)
-        return cat(
-            [self._rope(v[:, :, i : i + 1, :], shift_by) for i in range(v.shape[2])],
-        )
+        # return cat(
+        #     [self._rope(v[:, :, i : i + 1, :], shift_by) for i in range(v.shape[2])],
+        # )
+        return v
 
     def _trim(self, trim_size, append_k=None, append_v=None) -> None:
         k = self.keys
@@ -182,13 +184,11 @@ class ShiftingKVCache(_BaseCache):
     def trim(self, n) -> int:
         # trim does not respect keep and it will stay this way
         n = min(self.offset, n)
-        print(f"debug: before: shape {self.keys.shape} keep {self.keep} n={n} {self.offset}os {self._idx}idx", file=sys.stderr)
         if n <= 0:
             return 0
 
         # do trim: put us back into the state before the circular buffer is full
         self._temporal_order()
-        print(f"after TO: shape {self.keys.shape} keep {self.keep} n={n} {self.offset}os {self._idx}idx", file=sys.stderr)
 
         # TODO(christian-lms): stupid hack that belies a bigger problem. mayeb 184 shoudl be min vs. sks2
         new_length = max(self.keys.shape[2] - n, 0)
@@ -198,7 +198,6 @@ class ShiftingKVCache(_BaseCache):
         # TODO(christian-lms): maybe this is wrong??? maybe you have bigger problems elsewhere
         self.offset = new_length
         self._idx = new_length
-        print(self.keys.shape, self.offset, self._idx, file=sys.stderr)
         return n
 
     def _update_concat(self, keys, values):
@@ -269,6 +268,7 @@ class ShiftingKVCache(_BaseCache):
     def set_keep(self, keep):
         # kv must be in temporal order, else we will keep the wrong thing
         self._temporal_order()
+        print(f"setting keep to {keep} with offset {self.offset} and idx {self._idx}", file=sys.stderr)
         self.keep = keep
 
     @property
@@ -305,7 +305,7 @@ class ShiftingKVCache(_BaseCache):
 def make_prompt_cache(
     model: nn.Module,
     max_kv_size: Optional[int] = None,
-    keep: int = 4,
+    keep: int = 0,
 ) -> List[Any]:
     """
     Construct the model's cache for use in generation.

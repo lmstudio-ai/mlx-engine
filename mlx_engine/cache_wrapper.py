@@ -98,6 +98,9 @@ class CacheWrapper:
                 file=sys.stderr,
             )
 
+        print(f"self tokens: {self.tokens.tolist()}", file=sys.stderr)
+        print(f"prompt tokens: {prompt_tokens.tolist()}", file=sys.stderr)
+
         while cache_head_idx < cache_size and prompt_head_idx < prompt_size:
             match_length = self._find_matching_sequence_length(
                 prompt_tokens, self.tokens, prompt_head_idx, cache_head_idx
@@ -109,7 +112,6 @@ class CacheWrapper:
             else:
                 if self.verbose:
                     print(f"Reusing {match_length} tokens from cache", file=sys.stderr)
-                print(f"idx {prompt_head_idx} {cache_head_idx}")
 
                 # found reusable sequence - shift cache content
                 for cache in self.cache:
@@ -128,6 +130,7 @@ class CacheWrapper:
             cache.do_reuse()
         self.tokens = self.tokens[: common_prefix_len + total_reused]
 
+        print(f"self post tokens: {self.tokens.tolist()}", file=sys.stderr)
         return total_reused
 
     def _get_unprocessed_tokens(
@@ -159,12 +162,11 @@ class CacheWrapper:
                 prompt_tokens,
                 common_prefix,
             )
-            if n_reused_tokens > 0:
-                log_info(
-                    prefix="CacheWrapper",
-                    message=f"Reused {n_reused_tokens} tokens from the cache",
-                )
-                common_prefix += n_reused_tokens
+            log_info(
+                prefix="CacheWrapper",
+                message=f"Reused {n_reused_tokens} tokens from the cache",
+            )
+            common_prefix += n_reused_tokens
 
         # exclude some tokens from end, e.g. for kicking off generation
         if common_prefix >= len(prompt_tokens) - num_tokens_to_exclude:
