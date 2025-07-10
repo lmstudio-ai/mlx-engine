@@ -71,8 +71,10 @@ class ShiftingKVCache(RotatingKVCache):
 
     def set_keep(self, keep):
         # kv must be in temporal order, else we will keep the wrong thing
-        self.keys = self._temporal_order(self.keys)
-        self.values = self._temporal_order(self.values)
+        if self.keys is not None:
+            self.keys = self._temporal_order(self.keys)
+        if self.values is not None:
+            self.values = self._temporal_order(self.values)
         self.keep = keep
 
     def is_trimmable(self) -> bool:
