@@ -52,7 +52,7 @@ class ShiftingKVCache(RotatingKVCache):
         self.offset = self.keys.shape[2]
 
     def trim(self, n) -> int:
-        # trim does not respect keep and it will stay this way
+        # trim does not respect keep, which must be the case
         n = min(self.offset, n)
         if n <= 0:
             return 0

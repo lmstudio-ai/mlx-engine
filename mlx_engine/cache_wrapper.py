@@ -98,9 +98,6 @@ class CacheWrapper:
                 file=sys.stderr,
             )
 
-        print(f"self tokens: {self.tokens.tolist()}", file=sys.stderr)
-        print(f"prompt tokens: {prompt_tokens.tolist()}", file=sys.stderr)
-
         while cache_head_idx < cache_size and prompt_head_idx < prompt_size:
             match_length = self._find_matching_sequence_length(
                 prompt_tokens, self.tokens, prompt_head_idx, cache_head_idx
@@ -130,7 +127,6 @@ class CacheWrapper:
             cache.do_reuse()
         self.tokens = self.tokens[: common_prefix_len + total_reused]
 
-        print(f"self post tokens: {self.tokens.tolist()}", file=sys.stderr)
         return total_reused
 
     def _get_unprocessed_tokens(
