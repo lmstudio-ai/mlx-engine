@@ -116,7 +116,7 @@ class TestCacheWrapper(TestCache):
 
     def test_cache_reuse_heavy(self):
         cache = CacheWrapper(DummyModel(), 10)
-        cache.cache[0] = ShiftingKVCache(self._rope, max_size=10, keep=2)
+        cache.cache[0] = ShiftingKVCache(max_size=10, keep=2)
 
         # set up pretend cache
         cached_tokens = mx.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
@@ -146,8 +146,8 @@ class TestCacheWrapper(TestCache):
         should_be_kv = cat(
             [
                 idx(cache_kv, 0, 2),
-                cache.cache[0].rope(idx(cache_kv, 3, 4), -1),
-                cache.cache[0].rope(idx(cache_kv, 6, 9), -3),
+                idx(cache_kv, 3, 4),
+                idx(cache_kv, 6, 9),
             ],
         )
 

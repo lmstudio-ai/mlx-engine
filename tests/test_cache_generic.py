@@ -12,10 +12,6 @@ class TestCache(unittest.TestCase):
         cls.kv_head_dim = 4
         cls.bsz = 1
         cls.n_kv_heads = 1
-        # cannot be used raw: must be wrapped in the cache.rope workaround impl
-        cls._rope = nn.RoPE(
-            dims=cls.kv_head_dim, traditional=False, base=100000, scale=1.0
-        )
 
     @classmethod
     def make_random_kv(cls, seqlen: int):
