@@ -33,15 +33,11 @@ class ShiftingKVCache(RotatingKVCache):
                 key_segments.append(self.keys[..., current_pos:write_start_idx, :])
                 value_segments.append(self.values[..., current_pos:write_start_idx, :])
 
-            # add the reused segment with RoPE shift
-            shift_by = write_start_idx - reuse_start_idx  # intentionally negative!!!
             reuse_end_idx = reuse_start_idx + reuse_length
+            current_pos = write_start_idx + reuse_length
 
             key_segments.append(self.keys[..., reuse_start_idx:reuse_end_idx, :])
             value_segments.append(self.values[..., reuse_start_idx:reuse_end_idx, :])
-
-            current_pos = write_start_idx + reuse_length
-            self.offset += shift_by
 
         self.keys = mx.concatenate(key_segments, axis=2)
         self.values = mx.concatenate(value_segments, axis=2)
@@ -52,12 +48,12 @@ class ShiftingKVCache(RotatingKVCache):
         self.offset = self.keys.shape[2]
 
     def trim(self, n) -> int:
-        # trim does not respect keep, which must be the case
+        # trim must not respect keep
         n = min(self.offset, n)
         if n <= 0:
             return 0
 
-        # do trim: put us back into the state before the circular buffer is full
+        # put us back into the state before the circular buffer is full
         self.keys = self._temporal_order(self.keys)
         self.values = self._temporal_order(self.values)
 
