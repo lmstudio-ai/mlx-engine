@@ -7,6 +7,7 @@ from mlx_engine.generate import load_model, load_draft_model, tokenize
 
 class DummyModel:
     """Dummy model class for testing"""
+
     layers = [0]
 
 
