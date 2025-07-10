@@ -1,7 +1,7 @@
 import unittest
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper
-from mlx_engine.cache import ShiftingKVCache, cat
+from mlx_engine.cache import ShiftingKVCache
 from tests.test_cache_generic import TestCache
 from tests.utils import DummyModel
 
@@ -143,12 +143,13 @@ class TestCacheWrapper(TestCache):
             return v[:, :, a:b, :]
 
         should_be_tokens = mx.array([1, 2, 4, 7, 8, 9])
-        should_be_kv = cat(
+        should_be_kv = mx.concatenate(
             [
                 idx(cache_kv, 0, 2),
                 idx(cache_kv, 3, 4),
                 idx(cache_kv, 6, 9),
             ],
+            axis=2,
         )
 
         self.assertEqual(total_reused, 4)
@@ -158,13 +159,13 @@ class TestCacheWrapper(TestCache):
         # ensure updating works as intended
         new_kv = self.make_random_kv(1)
         keys, _ = cache.cache[0].update_and_fetch(new_kv, new_kv)
-        should_be_kv = cat([should_be_kv, new_kv])
+        should_be_kv = mx.concatenate([should_be_kv, new_kv], axis=2)
         self.assertArrEqual(keys, should_be_kv)
 
         # ensure batch concat works as intended
         new_kv = self.make_random_kv(2)
         keys, _ = cache.cache[0].update_and_fetch(new_kv, new_kv)
-        should_be_kv = cat([should_be_kv, new_kv])
+        should_be_kv = mx.concatenate([should_be_kv, new_kv], axis=2)
         self.assertArrEqual(keys, should_be_kv)
 
 

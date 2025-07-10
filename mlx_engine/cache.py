@@ -98,6 +98,8 @@ def make_prompt_cache(
         return model.make_cache()
     num_layers = len(model.layers)
     if max_kv_size is not None:
-        return [ShiftingKVCache(max_size=max_kv_size, keep=keep) for _ in range(num_layers)]
+        return [
+            ShiftingKVCache(max_size=max_kv_size, keep=keep) for _ in range(num_layers)
+        ]
     else:
         return [KVCache() for _ in range(num_layers)]

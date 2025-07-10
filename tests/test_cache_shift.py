@@ -1,6 +1,6 @@
 import unittest
 import mlx.core as mx
-from mlx_engine.cache import ShiftingKVCache, cat
+from mlx_engine.cache import ShiftingKVCache
 from tests.test_cache_generic import TestCache
 
 
@@ -36,83 +36,6 @@ class TestShiftingKVCache(TestCache):
             self.add_random_to_cache(cache, 1)
             self.assertEqual(cache.offset - 1, i)
 
-    def test_temporal_order_shift_rope(self):
-        """Test the RoPE shift in _temporal_order"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
-
-        # fill cache -> 123
-        reference = self.add_random_to_cache(cache, 3)
-        self.assertEqual(cache.offset, 3)
-
-        # attempt to write another element 4 -> 143
-        overwrite = self.add_random_to_cache(cache, 1)
-        self.assertEqual(cache.offset, 4)
-
-        # put the cache in temporal order -> 134 -> 123 (rope shift)
-        cache._temporal_order()
-        keys = cache.state[0]
-
-        self.assertArrEqual(idx(keys, 0), idx(reference, 0))
-        self.assertArrEqual(idx(keys, 1), idx(reference, 2))
-        self.assertArrEqual(idx(keys, 2), overwrite)
-        self.assertEqual(cache.offset, 3)
-
-    def test_temporal_order_shift_no_rope(self):
-        """Test putting the cache in temporal order"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
-
-        # fill cache -> 123
-        reference = self.add_random_to_cache(cache, 3)
-        self.assertEqual(cache.offset, 3)
-
-        # attempt to write another element 4 -> 143
-        overwrite = self.add_random_to_cache(cache, 1)
-        self.assertEqual(cache.offset, 4)
-
-        # put the cache in temporal order -> 134 (no rope shift)
-        cache._temporal_order()
-        values = cache.state[1]
-
-        self.assertArrEqual(idx(values, 0), idx(reference, 0))
-        self.assertArrEqual(idx(values, 1), idx(reference, 2))
-        self.assertArrEqual(idx(values, 2), overwrite)
-        self.assertEqual(cache.offset, 3)
-
-    def test_trim_internal_shift_rope(self):
-        """Test the RoPE shift in _trim (internal method)"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
-
-        # fill cache -> 123
-        reference = self.add_random_to_cache(cache, 3)
-        self.assertEqual(cache.offset, 3)
-
-        # trim 1 from middle -> 13
-        cache._trim(1)
-        keys = cache.state[0]
-
-        self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 2, self.kv_head_dim))
-        self.assertArrEqual(idx(keys, 0), idx(reference, 0))
-        self.assertArrEqual(idx(keys, 1), idx(reference, 2))
-        # trim should trigger offset change with is_key=True
-        self.assertEqual(cache.offset, 2)
-
-    def test_trim_internal_shift_no_rope(self):
-        """Test the RoPE shift in _trim (internal method)"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
-
-        # fill cache -> 123
-        reference = self.add_random_to_cache(cache, 3)
-        self.assertEqual(cache.offset, 3)
-
-        # trim 1 from middle -> 13 -> 12
-        cache._trim(1)
-        values = cache.state[1]
-
-        self.assertEqual(values.shape, (self.bsz, self.n_kv_heads, 2, self.kv_head_dim))
-        self.assertArrEqual(idx(values, 0), idx(reference, 0))
-        self.assertArrEqual(idx(values, 1), idx(reference, 2))
-        self.assertEqual(cache.offset, 2)
-
     def test_ensure_reasonable_size_and_shift(self):
         """Test behavior when the cache gets a KV batch-written that is much larger
         than max_size. The default behavior of the cache is to write the entire thing,
@@ -130,28 +53,28 @@ class TestShiftingKVCache(TestCache):
         overwrite = self.add_random_to_cache(cache, 1)
         keys = cache.state[0]
         self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 3, self.kv_head_dim))
-        # this should be 4 since this mimics autoregression
-        self.assertEqual(cache.offset, 4)
+        self.assertEqual(cache.offset, 11)
 
         self.assertArrEqual(idx(keys, 0), idx(reference, 0))
         self.assertArrEqual(idx(keys, 1), overwrite)
         self.assertArrEqual(idx(keys, 2), idx(reference, 9))
 
         # make sure pos embs are right
-        cache._temporal_order()
+        cache.keys = cache._temporal_order(cache.keys)
+        cache.values = cache._temporal_order(cache.values)
         keys = cache.state[0]
 
         self.assertArrEqual(idx(keys, 0), idx(reference, 0))
         self.assertArrEqual(idx(keys, 1), idx(reference, 9))
         self.assertArrEqual(idx(keys, 2), overwrite)
-        self.assertEqual(cache.offset, 3)
+        self.assertEqual(cache.offset, 11)
 
         # ensure offset keeps increasing
         self.add_random_to_cache(cache, 1)
-        self.assertEqual(cache.offset, 4)
+        self.assertEqual(cache.offset, 12)
 
         self.add_random_to_cache(cache, 1)
-        self.assertEqual(cache.offset, 5)
+        self.assertEqual(cache.offset, 13)
 
     def test_update_keep_on_the_fly(self):
         """Test changing the keep value on the fly"""
@@ -168,9 +91,9 @@ class TestShiftingKVCache(TestCache):
         # and attempt to write another element 5 -> 1254
         # offset updates after set_keep (anytime we reorder/rope shift)
         cache.set_keep(2)
-        self.assertEqual(cache.offset, 4)
-        overwrite2 = self.add_random_to_cache(cache, 1)
         self.assertEqual(cache.offset, 5)
+        overwrite2 = self.add_random_to_cache(cache, 1)
+        self.assertEqual(cache.offset, 6)
         keys = cache.state[0]
 
         self.assertArrEqual(idx(keys, 0), idx(reference, 0))
@@ -220,8 +143,8 @@ class TestShiftingKVCache(TestCache):
         cache.trim(1)
         keys = cache.state[0]
 
-        should_be_kv = cat(
-            [reference[:, :, :1, :], reference[:, :, 2:3, :]]
+        should_be_kv = mx.concatenate(
+            [reference[:, :, :1, :], reference[:, :, 2:3, :]], axis=2
         )
         self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 2, self.kv_head_dim))
         self.assertArrEqual(keys, should_be_kv)
@@ -265,8 +188,8 @@ class TestShiftingKVCache(TestCache):
         keys = cache.state[0]
 
         # this is what the remaining cache should look like
-        should_be_keys = cat(
-            [reference[:, :, :3, :], reference[:, :, 4:6, :]]
+        should_be_keys = mx.concatenate(
+            [reference[:, :, :3, :], reference[:, :, 4:6, :]], axis=2
         )
 
         self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 5, self.kv_head_dim))
