@@ -6,9 +6,11 @@ repos:
     # Run the linter.
     - id: ruff
       args: [ --fix ]
+      exclude: ^mlx_engine/external/
       stages: [pre-commit]
     # Run the formatter.
     - id: ruff-format
-      args: [--target-version, py311]
+      args: [--target-version, py311 ]
+      exclude: ^mlx_engine/external/
       stages: [pre-commit]
 

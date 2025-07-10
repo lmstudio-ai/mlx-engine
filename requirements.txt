@@ -25,10 +25,10 @@ jsonschema-specifications==2025.4.1
 jsonschema==4.24.0
 lark==1.2.2
 markupsafe==2.1.5
+mlx-lm==0.26.0
 # Temporarily point to the branches that support Gemma3n unification
-mlx-lm @ git+https://github.com/will-lms/mlx-lm.git@will/gemma3n-unified
 mlx-vlm @ git+https://github.com/will-lms/mlx-vlm.git@will/gemma3n-mm-embed-hooks
-mlx==0.26.1
+mlx==0.26.3
 mpmath==1.3.0
 multidict==6.4.3
 nest-asyncio==1.6.0

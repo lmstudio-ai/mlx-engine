@@ -127,8 +127,8 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
         )
 
         # Construct embeddings with image and text tokens interleaved per special modality mask
-        final_inputs_embeds = Gemma3nCombinedModel.prepare_inputs_for_multimodal(
-            inputs_embeds, image_features, "image", special_modality_mask
+        final_inputs_embeds = Gemma3nCombinedModel.merge_multimodal_and_text(
+            inputs_embeds, image_features, special_modality_mask, "image"
         )
         # remove batch dimension
         return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
