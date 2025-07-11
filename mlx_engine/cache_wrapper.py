@@ -114,7 +114,9 @@ class CacheWrapper:
                     message=f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: "
                     "Cache is not trimmable. Clearing the cache instead.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size, keep=self.keep)
+                self.cache = make_prompt_cache(
+                    self.model, self.max_kv_size, keep=self.keep
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
@@ -125,7 +127,9 @@ class CacheWrapper:
                     message=f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected "
                     " ({num_tokens_to_trim}). Clearing the cache.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size, keep=self.keep)
+                self.cache = make_prompt_cache(
+                    self.model, self.max_kv_size, keep=self.keep
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             log_info(
@@ -257,7 +261,7 @@ class CacheWrapper:
 
             def prompt_progress_callback(x):
                 return None
-            
+
         # update keep tracking
         self.keep = keep
         for cache in self.cache:
@@ -303,7 +307,7 @@ class CacheWrapper:
     def record_generated_token(self, token):
         """
         Add the generated token to the token list, so that we can map the token to the KV cache.
-                
+
         Also loop when the cache does so that we accurately track what's in cache.
         """
         # this behavior is common to rolling window (n_keep = 0) and truncate middle

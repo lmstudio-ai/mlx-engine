@@ -1,7 +1,6 @@
 from typing import List, Optional, Any
 
 from mlx_lm.models.cache import RotatingKVCache, KVCache
-import mlx.core as mx
 import mlx.nn as nn
 
 

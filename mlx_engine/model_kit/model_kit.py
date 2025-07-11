@@ -161,7 +161,7 @@ class ModelKit:
                 self.draft_model,
                 speculative_decoding_toggle,
                 prompt_progress_callback,
-                keep=keep
+                keep=keep,
             ), None
         ### WITH IMAGES PROMPT PROCESSING ###s
         if self.vision_add_on is None:
