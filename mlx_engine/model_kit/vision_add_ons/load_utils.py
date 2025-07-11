@@ -141,10 +141,15 @@ def maybe_apply_quantization(
             # Handle legacy models which may not have everything quantized
             return f"{p}.scales" in vision_weights
 
+        quantize_kwargs = {}
+        if "bits" in quantization:
+            quantize_kwargs["bits"] = quantization["bits"]
+        if "group_size" in quantization:
+            quantize_kwargs["group_size"] = quantization["group_size"]
         nn.quantize(
             components,
-            **quantization,
             class_predicate=get_class_predicate,
+            **quantize_kwargs,
         )
 
 
