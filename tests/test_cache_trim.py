@@ -1,6 +1,6 @@
 import unittest
 import mlx.core as mx
-from mlx_engine.cache import ShiftingKVCache
+from mlx_engine.cache import AlwaysTrimmableKVCache
 from tests.test_cache_generic import TestCache
 
 
@@ -9,10 +9,10 @@ def idx(v: mx.array, i: int):
     return v[:, :, i : i + 1, :]
 
 
-class TestShiftingKVCache(TestCache):
+class TestAlwaysTrimmableKVCache(TestCache):
     def test_overwriting(self):
         """Test overwriting when the cache reaches max_size"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
+        cache = AlwaysTrimmableKVCache(max_size=3, keep=1)
 
         # fill cache -> 123
         reference = self.add_random_to_cache(cache, 3)
@@ -30,7 +30,7 @@ class TestShiftingKVCache(TestCache):
 
     def test_ensure_update_increases_offset_indefinitely(self):
         """Test single-token updates that should increase offset"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
+        cache = AlwaysTrimmableKVCache(max_size=3, keep=1)
 
         for i in range(10):
             self.add_random_to_cache(cache, 1)
@@ -41,7 +41,7 @@ class TestShiftingKVCache(TestCache):
         than max_size. The default behavior of the cache is to write the entire thing,
         then trim it back down when the next KV is written.
         """
-        cache = ShiftingKVCache(max_size=3, keep=1)
+        cache = AlwaysTrimmableKVCache(max_size=3, keep=1)
 
         # fill cache -> 0123456789
         reference = self.add_random_to_cache(cache, 10)
@@ -78,7 +78,7 @@ class TestShiftingKVCache(TestCache):
 
     def test_update_keep_on_the_fly(self):
         """Test changing the keep value on the fly"""
-        cache = ShiftingKVCache(max_size=4, keep=1)
+        cache = AlwaysTrimmableKVCache(max_size=4, keep=1)
 
         # fill cache -> 1234
         reference = self.add_random_to_cache(cache, 4)
@@ -103,7 +103,7 @@ class TestShiftingKVCache(TestCache):
 
     def test_trim_before_full(self):
         """Test trimming from the end before the cache is full"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
+        cache = AlwaysTrimmableKVCache(max_size=3, keep=1)
 
         # fill cache -> 12
         reference = self.add_random_to_cache(cache, 2)
@@ -128,7 +128,7 @@ class TestShiftingKVCache(TestCache):
 
     def test_trim_after_overwrite(self):
         """Test trimming from the end when we've written past the cache max"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
+        cache = AlwaysTrimmableKVCache(max_size=3, keep=1)
 
         # fill cache -> 123
         reference = self.add_random_to_cache(cache, 3)
@@ -152,7 +152,7 @@ class TestShiftingKVCache(TestCache):
 
     def test_trim_after_full(self):
         """Test trimming from the end when the cache is oversize"""
-        cache = ShiftingKVCache(max_size=3, keep=1)
+        cache = AlwaysTrimmableKVCache(max_size=3, keep=1)
 
         # fill cache oversize already -> 1234
         reference = self.add_random_to_cache(cache, 4)

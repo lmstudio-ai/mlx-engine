@@ -1,7 +1,7 @@
 import unittest
 import mlx.core as mx
 from copy import deepcopy
-from mlx_engine.cache import ShiftingKVCache
+from mlx_engine.cache import AlwaysTrimmableKVCache
 
 
 class TestCache(unittest.TestCase):
@@ -26,7 +26,9 @@ class TestCache(unittest.TestCase):
         self.assertEqual(a.shape, b.shape)
         self.assertTrue(mx.allclose(a, b), "Tensors are not equal")
 
-    def add_random_to_cache(self, cache: ShiftingKVCache, seqlen: int) -> mx.array:
+    def add_random_to_cache(
+        self, cache: AlwaysTrimmableKVCache, seqlen: int
+    ) -> mx.array:
         """Add random values to the cache and return them"""
         base_kv = self.make_random_kv(seqlen)
         # base_kv is *assigned* to cache.keys/cache.values so returning base_kv

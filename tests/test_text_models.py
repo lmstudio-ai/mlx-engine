@@ -208,11 +208,10 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         )
         self.assertEqual(generated_text_1, generated_text_2)
 
-
     def test_cache_nuke_qwen2_5(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=32)
-        prompt = f"""<|im_start|>user
+        prompt = """<|im_start|>user
 Explain how the universe works. What was the Big Bang? What's redshifting?<end_of_turn>
 <|im_end|>
 <|im_start|>assistant
@@ -256,7 +255,7 @@ Explain how the universe works. What was the Big Bang? What's redshifting?<end_o
         gen1_cache_layer0 = model_kit.cache_wrapper.cache[0]
 
         ### Generation 2 - trims cache
-        prompt = f"""<|im_start|>user
+        prompt = """<|im_start|>user
 Explain how the universe works. What was the Big Bang?<end_of_turn>
 <|im_end|>
 <|im_start|>assistant
