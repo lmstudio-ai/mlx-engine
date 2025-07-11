@@ -1,10 +1,11 @@
 from typing import List, Optional, Any
 
 from mlx_engine.logging import log_info, log_warn, log_error
+from mlx_engine.cache import make_prompt_cache
 from mlx_lm.models.cache import (
-    make_prompt_cache,
     trim_prompt_cache,
     can_trim_prompt_cache,
+    RotatingKVCache,
 )
 from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
@@ -26,6 +27,7 @@ class CacheWrapper:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        keep: int = 4,
     ):
         """
         Initialize the CacheWrapper.
@@ -36,7 +38,9 @@ class CacheWrapper:
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
-        self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
+        self.keep = keep
+        self.cache: List[Any] = make_prompt_cache(model, max_kv_size, keep)
+        self.is_rotating = all(isinstance(c, RotatingKVCache) for c in self.cache)
         self.model = model
         self.draft_model: Optional[nn.Module] = None
         self.max_kv_size = max_kv_size
@@ -115,7 +119,11 @@ class CacheWrapper:
                     message=f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: "
                     "Cache is not trimmable. Clearing the cache instead.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                self.cache = make_prompt_cache(
+                    self.model,
+                    max_kv_size=self.max_kv_size if self.is_rotating else None,
+                    keep=self.keep,
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
@@ -126,7 +134,11 @@ class CacheWrapper:
                     message=f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected "
                     " ({num_tokens_to_trim}). Clearing the cache.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                self.cache = make_prompt_cache(
+                    self.model,
+                    max_kv_size=self.max_kv_size if self.is_rotating else None,
+                    keep=self.keep,
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             log_info(
@@ -221,9 +233,11 @@ class CacheWrapper:
             message="Clearing current prompt cache and adding draft model to the cache",
         )
         self.tokens = None
-        self.cache: List[Any] = make_prompt_cache(self.model)
+        self.cache: List[Any] = make_prompt_cache(self.model, keep=self.keep)
+        # the above will never return a rotating cache since there is no max_kv_size set
+        self.is_rotating = False
         if draft_model is not None:
-            self.cache += make_prompt_cache(draft_model)
+            self.cache += make_prompt_cache(draft_model, keep=self.keep)
         self.draft_model = draft_model
 
     def unset_draft_model(self):
@@ -239,6 +253,7 @@ class CacheWrapper:
         prompt_progress_callback,
         *,
         num_tokens_to_exclude: int = 1,
+        keep: int = 4,
     ) -> mx.array:
         """
         Set up the KV cache for the next generation.
@@ -248,6 +263,7 @@ class CacheWrapper:
             prompt_tokens (mx.array): The prompt tokens.
             prompt_progress_callback (Callable): A callback function to report prompt processing progress.
             num_tokens_to_exclude (int): The number of tokens that should not be added to the cache.
+            keep (int): The number of tokens to always keep in the prefix of the prompt cache.
 
         Returns:
             mx.array: The prompt tokens to be used for the next generation.
@@ -256,6 +272,12 @@ class CacheWrapper:
 
             def prompt_progress_callback(x):
                 return None
+
+        # update keep tracking
+        self.keep = keep
+        for cache in self.cache:
+            if hasattr(cache, "set_keep"):
+                cache.set_keep(keep)
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
@@ -296,5 +318,20 @@ class CacheWrapper:
     def record_generated_token(self, token):
         """
         Add the generated token to the token list, so that we can map the token to the KV cache.
+
+        Also loop when the cache does so that we accurately track what's in cache, if we're using
+        a RotatingKVCache or subclass of such. See the rotation implemented by MLX-LM here:
+        https://github.com/ml-explore/mlx-lm/blob/fd9b1909636d634ac2b848248b05939c9fbfbe19/mlx_lm/models/cache.py#L371
         """
+        # this behavior is common to rolling window (n_keep = 0) and truncate middle
+        # (n_keep > 0), and we should never get here with stop at max
+        if (
+            self.max_kv_size is not None
+            and self.is_rotating
+            and len(self.tokens) >= self.max_kv_size
+        ):
+            # rotate the token tracking buffer
+            self.tokens = mx.concat(
+                [self.tokens[: self.keep], self.tokens[self.keep + 1 :]]
+            )
         self.tokens = mx.concat([self.tokens, mx.array([token])])
