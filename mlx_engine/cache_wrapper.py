@@ -312,7 +312,7 @@ class CacheWrapper:
         """
         # this behavior is common to rolling window (n_keep = 0) and truncate middle
         # (n_keep > 0), and we should never get here with stop at max
-        if len(self.tokens) >= self.max_kv_size:
+        if self.max_kv_size is not None and len(self.tokens) >= self.max_kv_size:
             self.tokens = mx.concat(
                 [self.tokens[: self.keep], self.tokens[self.keep + 1 :]]
             )
