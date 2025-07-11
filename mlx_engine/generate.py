@@ -137,6 +137,7 @@ def create_generator(
     max_tokens: Optional[int] = 10000000,
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
+    keep: int = 4,
 ) -> Iterator[GenerationResult]:
     """
     Create a generator that streams text generation results from the model.
@@ -218,6 +219,7 @@ def create_generator(
         prompt_progress_callback,
         generate_args,
         speculative_decoding_toggle,
+        keep=keep,
     )
     if draft_model is None:
         # input embeddings not yet supported for speculative decoding in mlx-lm
