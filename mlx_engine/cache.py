@@ -20,6 +20,10 @@ class ShiftingKVCache(RotatingKVCache):
         if not self.reuse_queue:
             return
 
+        # just in case maybe
+        self.keys = self._temporal_order(self.keys)
+        self.values = self._temporal_order(self.values)
+
         # just in case, sort in write order
         self.reuse_queue.sort(key=lambda x: x[0])
 

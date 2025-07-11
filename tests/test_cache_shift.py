@@ -196,6 +196,34 @@ class TestShiftingKVCache(TestCache):
         self.assertArrEqual(keys, should_be_keys)
         self.assertEqual(cache.offset, 5)
 
+    def test_reuse_after_overwrite(self):
+        """Test basic reuse APIs after an overwrite"""
+        cache = ShiftingKVCache(max_size=8, keep=1)
+
+        # fill cache -> 12345678
+        reference = self.add_random_to_cache(cache, 8)
+        news = self.add_random_to_cache(cache, 1)  # overwrite to 13456789 after TO
+        self.assertArrEqual(
+            cache.state[0], mx.concatenate(
+                [reference[:, :, :1, :], news, reference[:, :, 2:8, :]], axis=2
+            )
+        )
+
+        # suppose the prompt coming in is now 13678
+        # reuse from 2 to 4 length 3
+        cache.reuse_section(2, 4, 3)
+        cache.do_reuse()
+        keys = cache.state[0]
+
+        # the remaining cache should be 13678
+        should_be_keys = mx.concatenate(
+            [reference[:, :, :1, :], reference[:,:,2:3,:], reference[:, :, 5:8, :]], axis=2
+        )
+
+        self.assertEqual(keys.shape, (self.bsz, self.n_kv_heads, 5, self.kv_head_dim))
+        self.assertArrEqual(keys, should_be_keys)
+        self.assertEqual(cache.offset, 5)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
