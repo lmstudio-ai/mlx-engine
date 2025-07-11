@@ -27,7 +27,7 @@ lark==1.2.2
 markupsafe==2.1.5
 mlx-lm==0.26.0
 # Temporarily point to the branches that support Gemma3n unification
-mlx-vlm @ git+https://github.com/will-lms/mlx-vlm.git@will/gemma3n-mm-embed-hooks
+mlx-vlm @ git+https://github.com/neilmehta24/mlx-vlm.git@gemma3n-reupload
 mlx==0.26.3
 mpmath==1.3.0
 multidict==6.4.3
