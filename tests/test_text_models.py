@@ -209,6 +209,80 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         self.assertEqual(generated_text_1, generated_text_2)
 
 
+    def test_cache_nuke_qwen2_5(self):
+        model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
+        model_kit = load_model(model_path=model_path, max_kv_size=32)
+        prompt = f"""<|im_start|>user
+Explain how the universe works. What was the Big Bang? What's redshifting?<end_of_turn>
+<|im_end|>
+<|im_start|>assistant
+"""
+        prompt_tokens = tokenize(model_kit, prompt)
+        log_info(
+            prefix="test_cache_nuke",
+            message=f"Generation 1 number of prompt tokens: {len(prompt_tokens)}",
+        )
+        generated_text_list_1 = []
+        prompt_progress_callback_times_called = 0
+
+        def prompt_progress_callback(progress: float) -> None:
+            nonlocal prompt_progress_callback_times_called
+            prompt_progress_callback_times_called += 1
+            print(f"Prompt Progress: {progress:.2f}")
+
+        # accumulating to list allows pass by reference
+        def generate(text_accumulator: list) -> None:
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                max_tokens=100,
+                temp=0.0,
+                prompt_progress_callback=prompt_progress_callback,
+            ):
+                print(result.text, end="", flush=True)
+                text_accumulator.append(result.text)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+
+        ### Generation 1 - fills cache
+        generate(text_accumulator=generated_text_list_1)
+        generated_text_1 = "".join(generated_text_list_1)
+        self.assertEqual(prompt_progress_callback_times_called, 2)
+        self.assertGreater(
+            len(generated_text_1), 0, "Model failed to generate any text"
+        )
+        gen1_cache_layer0 = model_kit.cache_wrapper.cache[0]
+
+        ### Generation 2 - trims cache
+        prompt = f"""<|im_start|>user
+Explain how the universe works. What was the Big Bang?<end_of_turn>
+<|im_end|>
+<|im_start|>assistant
+"""
+        prompt_tokens = tokenize(model_kit, prompt)
+        log_info(
+            prefix="test_cache_nuke",
+            message=f"Generation 2 number of prompt tokens: {len(prompt_tokens)}",
+        )
+        generated_text_list_2 = []
+        prompt_progress_callback_times_called = 0
+        generate(text_accumulator=generated_text_list_2)
+        generated_text_2 = "".join(generated_text_list_2)
+        # Expect prompt cache to be intact for the first half of the file_content, so we should get 1
+        # intermediate callback this time
+        self.assertEqual(prompt_progress_callback_times_called, 2)
+        self.assertGreater(
+            len(generated_text_2), 0, "Model failed to generate any text"
+        )
+        gen2_cache_layer0 = model_kit.cache_wrapper.cache[0]
+
+        # if we nuked cache, these will reference different locations in memory
+        # if we didn't, they'll refer to the same object
+        self.assertTrue(gen1_cache_layer0 is gen2_cache_layer0)
+
+
 class TestStructuredGen(unittest.TestCase):
     def setUp(self):
         self.prompt = "List three colors and their hex codes."
