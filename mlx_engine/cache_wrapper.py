@@ -308,7 +308,9 @@ class CacheWrapper:
         """
         Add the generated token to the token list, so that we can map the token to the KV cache.
 
-        Also loop when the cache does so that we accurately track what's in cache.
+        Also loop when the cache does so that we accurately track what's in cache, if we're using
+        a RotatingKVCache or subclass of such. See the rotation implemented by MLX-LM here:
+        https://github.com/ml-explore/mlx-lm/blob/fd9b1909636d634ac2b848248b05939c9fbfbe19/mlx_lm/models/cache.py#L371
         """
         # this behavior is common to rolling window (n_keep = 0) and truncate middle
         # (n_keep > 0), and we should never get here with stop at max
