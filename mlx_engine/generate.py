@@ -137,6 +137,7 @@ def create_generator(
     max_tokens: Optional[int] = 10000000,
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
+    keep: Optional[int] = 4,
 ) -> Iterator[GenerationResult]:
     """
     Create a generator that streams text generation results from the model.
@@ -171,6 +172,8 @@ def create_generator(
             if a draft model is loaded. If set to true, draft model must be loaded or else error.
             If set to false, speculative decoding is disabled even if a draft model is loaded.
         num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
+        keep (Optional[int]): Number of tokens to always keep in the prefix of the prompt cache.
+            Defaults to 4, which is the minimum number of tokens needed for a valid prompt.
 
     Yields:
         GenerationResult: A named tuple containing:
@@ -218,6 +221,7 @@ def create_generator(
         prompt_progress_callback,
         generate_args,
         speculative_decoding_toggle,
+        keep=keep,
     )
     if draft_model is None:
         # input embeddings not yet supported for speculative decoding in mlx-lm

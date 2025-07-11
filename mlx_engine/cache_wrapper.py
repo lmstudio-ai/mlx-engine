@@ -1,11 +1,8 @@
 from typing import List, Optional, Any
 
 from mlx_engine.logging import log_info, log_warn, log_error
-from mlx_lm.models.cache import (
-    make_prompt_cache,
-    trim_prompt_cache,
-    can_trim_prompt_cache,
-)
+from mlx_engine.cache import make_prompt_cache
+from mlx_lm.models.cache import trim_prompt_cache, can_trim_prompt_cache
 from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
@@ -26,6 +23,7 @@ class CacheWrapper:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        keep: int = 4,
     ):
         """
         Initialize the CacheWrapper.
@@ -36,7 +34,8 @@ class CacheWrapper:
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
-        self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
+        self.keep = keep
+        self.cache: List[Any] = make_prompt_cache(model, max_kv_size, keep)
         self.model = model
         self.draft_model: Optional[nn.Module] = None
         self.max_kv_size = max_kv_size
@@ -48,41 +47,87 @@ class CacheWrapper:
         )
 
     @staticmethod
-    def _find_common_prefix(
-        current_tokens: mx.array, prompt_tokens: mx.array, num_tokens_to_exclude: int
+    def _find_matching_sequence_length(
+        tokens1: mx.array,
+        tokens2: mx.array,
+        start1: int = 0,
+        start2: int = 0,
     ) -> int:
         """
-        Determine the common prefix length between the current tokens and the prompt tokens.
+        Find the length of matching token sequence between two token arrays.
 
         Args:
-            current_tokens (mx.array): The cached tokens (self.tokens).
-            prompt_tokens (mx.array): The prompt tokens.
-            num_tokens_to_exclude (int): The minimum length of the remaining prompt tokens array.
+            tokens1: First token array
+            start1: Starting position in first array
+            tokens2: Second token array
+            start2: Starting position in second array
 
         Returns:
-            int: The length of the common prefix.
+            int: Length of matching sequence
         """
-        prompt_tokens = prompt_tokens
-        current_tokens = current_tokens
-        # Find the minimum length between the two arrays
-        min_length = min(len(current_tokens), len(prompt_tokens))
+        # Calculate actual bounds
+        max_len1 = len(tokens1) - start1
+        max_len2 = len(tokens2) - start2
+        min_length = int(min(max_len1, max_len2))
 
-        # Compare elements up to the minimum length
-        mask = prompt_tokens[:min_length] == current_tokens[:min_length]
+        # Extract subsequences to compare
+        seq1 = tokens1[start1 : start1 + min_length]
+        seq2 = tokens2[start2 : start2 + min_length]
 
-        # Find the index where the first mismatch occurs
-        if mx.any(mask == False):  # noqa E712
-            common_length = int(mx.argmax(mask == False))  # noqa E712
-        else:
-            common_length = int(min_length)
+        # Find first mismatch
+        mask = seq1 == seq2
+        return int(mx.argmax(mask == False)) if mx.any(mask == False) else min_length  # noqa E712
 
-        # Ensure that the prompt is at least num_tokens_to_exclude long
-        uncached_prompt_tokens_length = len(prompt_tokens[common_length:])
-        length_adjustment = max(
-            0, num_tokens_to_exclude - uncached_prompt_tokens_length
-        )
-        common_length = max(common_length - length_adjustment, 0)
-        return common_length
+    def _truncate_cache(
+        self,
+        prompt_tokens: mx.array,
+        common_prefix_len: int,
+        non_prefix_reuse_min_seq_len: int = 256,
+    ) -> int:
+        cache_size = len(self.tokens)
+        prompt_size = len(prompt_tokens)
+
+        # start scanning from after the common prefix
+        cache_head_idx = common_prefix_len
+        prompt_head_idx = common_prefix_len
+        total_reused = 0
+
+        if self.verbose:
+            print(
+                f"Looking for non-prefix sequences of length >= {non_prefix_reuse_min_seq_len}",
+                file=sys.stderr,
+            )
+
+        while cache_head_idx < cache_size and prompt_head_idx < prompt_size:
+            match_length = self._find_matching_sequence_length(
+                prompt_tokens, self.tokens, prompt_head_idx, cache_head_idx
+            )
+
+            if match_length < non_prefix_reuse_min_seq_len:
+                # sequence too short - advance cache pointer to find next potential match
+                cache_head_idx += 1
+            else:
+                if self.verbose:
+                    print(f"Reusing {match_length} tokens from cache", file=sys.stderr)
+
+                # found reusable sequence - shift cache content
+                for cache in self.cache:
+                    cache.reuse_section(prompt_head_idx, cache_head_idx, match_length)
+
+                # update the tokens to reflect the reused sequence
+                for i in range(match_length):
+                    self.tokens[prompt_head_idx + i] = self.tokens[cache_head_idx + i]
+
+                # advance pointers
+                cache_head_idx += match_length
+                prompt_head_idx += match_length
+                total_reused += match_length
+
+        for cache in self.cache:
+            cache.do_reuse()
+        self.tokens = self.tokens[: common_prefix_len + total_reused]
+
+        return total_reused
 
     def _get_unprocessed_tokens(
         self, prompt_tokens: mx.array, num_tokens_to_exclude: int
@@ -102,12 +147,30 @@ class CacheWrapper:
             return self.tokens
 
         # Find common KV between the last generation and the current prompt
-        common_prefix = self._find_common_prefix(
-            self.tokens, prompt_tokens, num_tokens_to_exclude
+        common_prefix = self._find_matching_sequence_length(
+            self.tokens,
+            prompt_tokens,
         )
 
+        # do reuse but only if the cache has it
+        if hasattr(self.cache[0], "reuse_section"):
+            n_reused_tokens = self._truncate_cache(
+                prompt_tokens,
+                common_prefix,
+            )
+            log_info(
+                prefix="CacheWrapper",
+                message=f"Reused {n_reused_tokens} tokens from the cache",
+            )
+            common_prefix += n_reused_tokens
+
+        # exclude some tokens from end, e.g. for kicking off generation
+        if common_prefix >= len(prompt_tokens) - num_tokens_to_exclude:
+            common_prefix = len(prompt_tokens) - num_tokens_to_exclude
+
         # Trim the cache if the common prefix is shorter than the current cache
-        num_tokens_to_trim = self.cache[0].offset - common_prefix
+        # state[0] is an alias for keys that accounts for partially filled buffers
+        num_tokens_to_trim = self.cache[0].state[0].shape[2] - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
                 log_warn(
@@ -115,7 +178,9 @@ class CacheWrapper:
                     message=f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: "
                     "Cache is not trimmable. Clearing the cache instead.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                self.cache = make_prompt_cache(
+                    self.model, self.max_kv_size, keep=self.keep
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
@@ -126,7 +191,9 @@ class CacheWrapper:
                     message=f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected "
                     " ({num_tokens_to_trim}). Clearing the cache.",
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                self.cache = make_prompt_cache(
+                    self.model, self.max_kv_size, keep=self.keep
+                )
                 self.tokens = prompt_tokens
                 return self.tokens
             log_info(
@@ -221,9 +288,9 @@ class CacheWrapper:
             message="Clearing current prompt cache and adding draft model to the cache",
         )
         self.tokens = None
-        self.cache: List[Any] = make_prompt_cache(self.model)
+        self.cache: List[Any] = make_prompt_cache(self.model, keep=self.keep)
         if draft_model is not None:
-            self.cache += make_prompt_cache(draft_model)
+            self.cache += make_prompt_cache(draft_model, keep=self.keep)
         self.draft_model = draft_model
 
     def unset_draft_model(self):
@@ -239,6 +306,7 @@ class CacheWrapper:
         prompt_progress_callback,
         *,
         num_tokens_to_exclude: int = 1,
+        keep: int = 4,
     ) -> mx.array:
         """
         Set up the KV cache for the next generation.
@@ -248,6 +316,7 @@ class CacheWrapper:
             prompt_tokens (mx.array): The prompt tokens.
             prompt_progress_callback (Callable): A callback function to report prompt processing progress.
             num_tokens_to_exclude (int): The number of tokens that should not be added to the cache.
+            keep (int): The number of tokens to always keep in the prefix of the prompt cache.
 
         Returns:
             mx.array: The prompt tokens to be used for the next generation.
@@ -256,6 +325,12 @@ class CacheWrapper:
 
             def prompt_progress_callback(x):
                 return None
+
+        # update keep tracking
+        self.keep = keep
+        for cache in self.cache:
+            if hasattr(cache, "set_keep"):
+                cache.set_keep(keep)
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
@@ -296,5 +371,13 @@ class CacheWrapper:
     def record_generated_token(self, token):
         """
         Add the generated token to the token list, so that we can map the token to the KV cache.
+
+        Also loop when the cache does so that we accurately track what's in cache.
         """
+        # this behavior is common to rolling window (n_keep = 0) and truncate middle
+        # (n_keep > 0), and we should never get here with stop at max
+        if len(self.tokens) >= self.max_kv_size:
+            self.tokens = mx.concat(
+                [self.tokens[: self.keep], self.tokens[self.keep + 1 :]]
+            )
         self.tokens = mx.concat([self.tokens, mx.array([token])])

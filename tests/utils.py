@@ -5,6 +5,12 @@ import subprocess
 from mlx_engine.generate import load_model, load_draft_model, tokenize
 
 
+class DummyModel:
+    """Dummy model class for testing"""
+
+    layers = [0]
+
+
 def model_getter(model_name: str):
     """Helper method to get a model, prompt user to download if not found"""
 
