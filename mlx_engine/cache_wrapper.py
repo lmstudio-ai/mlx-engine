@@ -169,7 +169,8 @@ class CacheWrapper:
             common_prefix = len(prompt_tokens) - num_tokens_to_exclude
 
         # Trim the cache if the common prefix is shorter than the current cache
-        num_tokens_to_trim = self.cache[0].offset - common_prefix
+        # state[0] is an alias for keys that accounts for partially filled buffers
+        num_tokens_to_trim = self.cache[0].state[0].shape[2] - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
                 log_warn(
