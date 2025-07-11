@@ -24,6 +24,7 @@ from mlx_engine.model_kit.vision_add_ons.load_utils import (
     maybe_apply_quantization,
     prepare_components,
 )
+import json
 
 
 class Gemma3nVisionComponents(nn.Module):
@@ -43,6 +44,18 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
     def __init__(self, model_path: Path):
         """Initialize Gemma3nVisionAddOn with vision components loaded from the given path."""
         super().__init__()
+
+        # The gemma3n weights were re-uploaded by google on 20250710
+        # The re-upload transposed two of the axis of the weights
+        # Here, check to see if we're using a model uploaded before 20250710
+        self.using_legacy_weights = False
+        with open(model_path / "config.json", "r") as f:
+            config_json = json.load(f)
+            if (
+                "text_config" in config_json
+                and "query_pre_attn_scalar" in config_json["text_config"]
+            ):
+                self.using_legacy_weights = True
 
         config, config_dict = load_and_parse_config(
             model_path=model_path,
@@ -109,6 +122,11 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
         inputs_embeds = mx.where(
             vision_mask[..., None], vision_embeds_flat, inputs_embeds
         )
+
+        if self.using_legacy_weights:
+            # The array is still in pytorch format here (NCHW)
+            # Transpose the HW axes
+            pixel_values = pixel_values.swapaxes(2, 3)
 
         # Process image through vision tower, then embed into language model space
         image_features = Gemma3nCombinedModel.get_image_features(
