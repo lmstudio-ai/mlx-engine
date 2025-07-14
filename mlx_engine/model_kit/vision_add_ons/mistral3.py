@@ -97,6 +97,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         final_inputs_embeds = Mistral3CombinedModel.merge_input_ids_with_image_features(
             self.config.image_token_index, image_features, inputs_embeds, input_ids
         )
-        return input_ids.squeeze(0), final_inputs_embeds.squeeze(
-            0
-        )  # remove batch dimension
+        # Do not return input_ids b/c the original lmstudio-community MLX upload had an incorrect
+        # processor_config.json that caused input_ids have extra placeholder image tokens. The
+        # input_ids are not needed by mlx-lm during generation for mistral3, so it is okay.
+        return mx.array([]), final_inputs_embeds.squeeze(0)
