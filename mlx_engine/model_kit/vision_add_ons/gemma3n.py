@@ -70,6 +70,8 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
                 config.vision_config, config.text_config
             ),
         )
+        if self.using_legacy_weights:
+            del components.vision_tower.timm_model.conv_stem.conv.bias
         processor = load_processor(model_path=model_path, add_detokenizer=True)
         vision_weights = load_and_filter_weights(model_path, components)
         vision_weights = sanitize_weights(
