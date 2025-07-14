@@ -113,9 +113,14 @@ class CacheWrapper:
                 num_tokens_in_cache = c.offset
                 break
         if num_tokens_in_cache is None:
-            raise RuntimeError("Could not determine the number of tokens in the cache")
+            log_warn(
+                prefix="CacheWrapper",
+                message="Could not determine the number of tokens in the cache, clearing the cache.",
+            )
+            self.cache = make_prompt_cache(self.model, self.max_kv_size)
+            self.tokens = prompt_tokens
+            return self.tokens
         num_tokens_to_trim = num_tokens_in_cache - common_prefix
-
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
                 log_warn(
