@@ -60,8 +60,8 @@ def make_prompt_cache(
     ``make_cache`` method, otherwise it will make a default KV cache.
 
     See https://github.com/ml-explore/mlx-lm/blob/fd9b1909636d634ac2b848248b05939c9fbfbe19/mlx_lm/models/cache.py#L10
-    for the MLX-LM implementation. This is a temporary extension to support trimming
-    in the RotatingKVCache, which is not supported in the original MLX-LM implementation.
+    for the MLX-LM implementation. This is a temporary extension to support more flexible
+    trimming than MLX-LM's original RotatingKVCache.
 
     Args:
         model (nn.Module): The language model.
