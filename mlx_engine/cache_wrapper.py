@@ -107,7 +107,20 @@ class CacheWrapper:
         )
 
         # Trim the cache if the common prefix is shorter than the current cache
-        num_tokens_to_trim = self.cache[0].offset - common_prefix
+        num_tokens_in_cache = None
+        for c in self.cache:
+            if hasattr(c, "offset"):
+                num_tokens_in_cache = c.offset
+                break
+        if num_tokens_in_cache is None:
+            log_warn(
+                prefix="CacheWrapper",
+                message="Could not determine the number of tokens in the cache, clearing the cache.",
+            )
+            self.cache = make_prompt_cache(self.model, self.max_kv_size)
+            self.tokens = prompt_tokens
+            return self.tokens
+        num_tokens_to_trim = num_tokens_in_cache - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
                 log_warn(
