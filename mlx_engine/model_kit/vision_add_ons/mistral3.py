@@ -1,0 +1,102 @@
+from pathlib import Path
+
+from mlx import nn
+import mlx.core as mx
+
+from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx_vlm.models.mistral3 import (
+    VisionModel as Mistral3VisionTower,
+    ModelConfig as Mistral3ModelConfig,
+    VisionConfig as Mistral3VisionConfig,
+    TextConfig as Mistral3TextConfig,
+    Model as Mistral3CombinedModel,
+)
+from mlx_vlm.models.mistral3.mistral3 import Mistral3MultiModalProjector
+from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
+    common_process_prompt_with_images,
+)
+from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
+
+
+class Mistral3VisionAddOn(BaseVisionAddOn):
+    """
+    Vision add-on for Mistral3 models.
+    """
+
+    LOG_PREFIX = "Mistral3VisionAddOn"
+
+    def __init__(self, model_path: Path):
+        """Initialize Mistral3VisionAddOn with vision components loaded from the given path."""
+        super().__init__()
+
+        self.vision_tower, self.multi_modal_projector, self.config, self.processor = (
+            load_vision_addon(
+                model_path=model_path,
+                model_config_class=Mistral3ModelConfig,
+                vision_config_class=Mistral3VisionConfig,
+                text_config_class=Mistral3TextConfig,
+                vision_tower_class=Mistral3VisionTower,
+                multi_modal_projector_class=Mistral3MultiModalProjector,
+                log_prefix=self.LOG_PREFIX,
+            )
+        )
+
+    def compute_embeddings(
+        self,
+        text_model: nn.Module,
+        prompt_tokens: mx.array,
+        images_b64: list[str],
+    ) -> tuple[mx.array, mx.array]:
+        """
+        Compute embeddings for text with images.
+
+        This method is heavily based on the mlx-vlm's mistral3 `get_input_embeddings`
+        https://github.com/Blaizzy/mlx-vlm/blob/2c3014fd40962bd5320ad611502e7e26cae08926/mlx_vlm/models/mistral3/mistral3.py#L240-L279
+        """
+
+        input_ids, pixel_values, attention_mask, other_model_inputs = (
+            common_process_prompt_with_images(
+                prompt_tokens=prompt_tokens,
+                images_b64=images_b64,
+                processor=self.processor,
+                config=self.config,
+            )
+        )
+
+        image_sizes_list = other_model_inputs["image_sizes"]
+        image_sizes = mx.array(image_sizes_list)
+
+        if pixel_values is None:
+            return text_model.language_model.model.embed_tokens(input_ids)
+
+        # Get the input embeddings from the language model
+        inputs_embeds = text_model.language_model.model.embed_tokens(input_ids)
+
+        # Get the output hidden states from the vision model
+        if isinstance(pixel_values, list):
+            pixel_values = mx.concatenate(
+                [mx.array(pv)[None, ...] for pv in pixel_values], axis=0
+            )
+        if pixel_values.ndim == 3:
+            pixel_values = pixel_values[None, ...]
+
+        # Pass pixel_values as list of images, as each image is individually run through conv2d and position encoding
+        # Reference code from transformers: https://github.com/huggingface/transformers/blob/main/src/transformers/models/pixtral/modeling_pixtral.py#L479C9-L479C21
+        # and mistral_inference: https://github.com/mistralai/mistral-inference/blob/main/src/mistral_inference/vision_encoder.py#L85
+        *_, hidden_states = self.vision_tower(
+            pixel_values.transpose(0, 2, 3, 1),
+            output_hidden_states=True,
+        )
+        # Select the hidden states from the desired layer
+        selected_image_feature = hidden_states[self.config.vision_feature_layer]
+
+        # Pass image features through the multi-modal projector
+        image_features = self.multi_modal_projector(selected_image_feature, image_sizes)
+
+        # Insert special image tokens in the input_ids
+        final_inputs_embeds = Mistral3CombinedModel.merge_input_ids_with_image_features(
+            self.config.image_token_index, image_features, inputs_embeds, input_ids
+        )
+        return input_ids.squeeze(0), final_inputs_embeds.squeeze(
+            0
+        )  # remove batch dimension
