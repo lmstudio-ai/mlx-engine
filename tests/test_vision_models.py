@@ -1,6 +1,7 @@
 import unittest
 import base64
 from pathlib import Path
+import pytest
 from mlx_engine.generate import (
     load_model,
     tokenize,
@@ -122,12 +123,14 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/pixtral-12b-4bit", prompt, text_only=True
         )
 
+    @pytest.mark.heavy
     def test_mistral3_vision(self):
         prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
         self.toucan_test_runner(
             "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit", prompt
         )
 
+    @pytest.mark.heavy
     def test_mistral3_text_only(self):
         prompt = f"<s>[INST]{self.text_only_prompt}[IMG][/INST]"
         self.toucan_test_runner(
@@ -136,6 +139,7 @@ class TestVisionModels(unittest.TestCase):
             text_only=True,
         )
 
+    @pytest.mark.heavy
     def test_mistral3_text_only_generation_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter(
