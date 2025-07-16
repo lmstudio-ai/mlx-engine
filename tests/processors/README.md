@@ -1,5 +1,3 @@
-# tests/processors README
-
 This directory contains processors that are useful during testing, but do not have a prod use-case. They can easily be inserted into the generate flow during development by modifying `mlx_engine/generate.py`.
 
 For example, we can add a `DumpLogitsProcessor` that writes the logits on each generated token as a CSV to the `logits-dump` directory:
