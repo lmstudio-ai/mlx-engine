@@ -100,5 +100,8 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         if input_ids.shape[1] == final_inputs_embeds.shape[1]:
             return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
         # Do not return input_ids b/c the original lmstudio-community MLX upload had an incorrect
-        # processor_config.json that caused input_ids have extra placeholder image tokens.
-        return mx.array([]), final_inputs_embeds.squeeze(0)
+        # processor_config.json that caused input_ids have extra placeholder image tokens. Fake the
+        # values with the correct length of 0s for compatibility with the mlx-lm generate_step API.
+        return mx.zeros(
+            final_inputs_embeds.shape[1], mx.int32
+        ), final_inputs_embeds.squeeze(0)
