@@ -8,7 +8,6 @@ from mlx_lm.sample_utils import make_sampler
 
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
-from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProcessor
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )
@@ -24,6 +23,8 @@ from mlx_engine.utils.speculative_decoding import (
     determine_draft_model_for_generation,
     configure_num_draft_tokens_in_generate_args,
 )
+from outlines.processors.structured import JSONLogitsProcessor
+from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
 
 MAX_TOP_LOGPROBS = 10
 
@@ -224,14 +225,14 @@ def create_generator(
         generate_args["input_embeddings"] = input_embeddings
 
     # Setup logits processors
-    generate_args["logits_processors"] = []
+    logits_processors = []
     if repetition_penalty and repetition_penalty != 0.0:
         cached_tokens = (
             prompt_tokens[: -len(input_tokens)]
             if len(input_tokens) > 0
             else prompt_tokens
         )
-        generate_args["logits_processors"].append(
+        logits_processors.append(
             RepetitionPenaltyProcessor(
                 token_history=cached_tokens, **repetition_penalty_kwargs
             )
@@ -266,8 +267,12 @@ def create_generator(
     # Add outlines logits processor if json_schema is provided
     is_structured_output_request = json_schema is not None
     if is_structured_output_request:
-        generate_args["logits_processors"].append(
-            OutlinesLogitsProcessor(model_kit, json_schema, input_tokens)
+        logits_processors.append(
+            JSONLogitsProcessor(
+                json_schema,
+                OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
+                tensor_library_name="mlx",
+            )
         )
 
     # Validate top_logprobs
@@ -353,6 +358,7 @@ def create_generator(
         draft_model=draft_model,
         prompt=input_tokens,
         max_tokens=max_tokens,
+        logits_processors=logits_processors,
         **generate_args,
     ):
         # Token processor
