@@ -9,15 +9,13 @@ from mlx_engine.cache_wrapper import CacheWrapper
 def process_prompt_text_only(
     prompt_tokens: mx.array,
     cache_wrapper: CacheWrapper,
-    generate_args: dict = None,
-    draft_model: Optional[nn.Module] = None,
-    speculative_decoding_toggle: Optional[bool] = None,
-    prompt_progress_callback: Optional[Callable[[float], None]] = None,
+    generate_args: dict,
+    draft_model: Optional[nn.Module],
+    speculative_decoding_toggle: Optional[bool],
+    prompt_progress_callback: Optional[Callable[[float], bool]],
 ):
     if cache_wrapper is None:
         raise ValueError("Cache wrapper is not initialized, cannot process prompt")
-    if generate_args is None:
-        generate_args = {}
     # Make sure cache's draft model setting aligns with speculative decoding toggle
     should_use_draft_model = (
         speculative_decoding_toggle

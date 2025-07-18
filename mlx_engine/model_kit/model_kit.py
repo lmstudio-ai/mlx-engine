@@ -1,5 +1,5 @@
 import json
-from typing import Optional, List, Tuple
+from typing import Callable, Optional, List, Tuple
 
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
@@ -140,8 +140,8 @@ class ModelKit:
         self,
         prompt_tokens,
         images_b64: Optional[List[str]],
-        prompt_progress_callback,
-        generate_args,
+        prompt_progress_callback: Optional[Callable[[float], bool]],
+        generate_args: dict,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         ### TEXT-ONLY PROCESS_PROMPT ###

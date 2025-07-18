@@ -69,10 +69,11 @@ Who is this passage about? Only say the name, and nothing else<|im_end|>
         generated_text = ""
         prompt_progress_callback_times_called = 0
 
-        def prompt_progress_callback(progress: float) -> None:
+        def prompt_progress_callback(progress: float) -> bool:
             nonlocal prompt_progress_callback_times_called
             prompt_progress_callback_times_called += 1
             print(f"Prompt Progress: {progress:.2f}")
+            return True
 
         def generate() -> None:
             nonlocal generated_text
@@ -146,10 +147,11 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         generated_text_list_1 = []
         prompt_progress_callback_times_called = 0
 
-        def prompt_progress_callback(progress: float) -> None:
+        def prompt_progress_callback(progress: float) -> bool:
             nonlocal prompt_progress_callback_times_called
             prompt_progress_callback_times_called += 1
             print(f"Prompt Progress: {progress:.2f}")
+            return True
 
         # accumulating to list allows pass by reference
         def generate(text_accumulator: list) -> None:
