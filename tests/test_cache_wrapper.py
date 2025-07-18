@@ -45,10 +45,13 @@ class TestCacheWrapper(unittest.TestCase):
 
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
+
+        chunk_size = 20  # Small chunk size to ensure multiple progress callbacks
+        num_tokens_to_exclude = 1
         model_kit.cache_wrapper = CacheWrapper(
             model_kit.model,
             max_kv_size=4096,
-            chunk_size=20,  # Small chunk size to ensure multiple progress callbacks
+            chunk_size=chunk_size,  
         )
 
         long_prompt = (
@@ -56,10 +59,9 @@ class TestCacheWrapper(unittest.TestCase):
             * 50
         )
         prompt_tokens = mx.array(tokenize(model_kit, long_prompt))
-        tokens_to_process = len(prompt_tokens) - 1  # minus num_tokens_to_exclude
-        expected_chunks = (
-            tokens_to_process + 19
-        ) // 20  # ceiling division for chunk_size=20
+        tokens_to_process = len(prompt_tokens) - num_tokens_to_exclude
+          # ceiling division
+        expected_chunks = (tokens_to_process + chunk_size - 1) // chunk_size
 
         # First attempt: Progress callback that cancels after a few updates
         first_progress_calls = []
@@ -92,47 +94,14 @@ class TestCacheWrapper(unittest.TestCase):
         )
         second_attempt_progress_calls = len(second_progress_calls)
 
-        # Calculate total work that would be done if no caching occurred
-        total_work_without_cache = (
-            expected_chunks * 2
-        )  # Both attempts would do full work
-
-        # Calculate actual work done (first attempt partial + second attempt remaining)
-        actual_work_done = (
-            first_attempt_progress_calls + second_attempt_progress_calls - 1
-        )  # -1 because both start with 0%
-
-        # Verify that progress was preserved:
-        # The total work done should be less than doing the full work twice
-        self.assertLess(
-            actual_work_done,
-            total_work_without_cache,
-            f"Cache should prevent duplicate work. Actual: {actual_work_done}, Without cache: {total_work_without_cache}",
-        )
-
-        # Verify that the second attempt had fewer progress callbacks than expected for full processing
-        # because some tokens were already cached from the first attempt
-        self.assertLess(
+        self.assertEqual(
             second_attempt_progress_calls,
-            expected_chunks + 1,  # +1 for the initial 0% callback
-            f"Second attempt should have fewer progress callbacks due to cached progress. "
-            f"Second: {second_attempt_progress_calls}, Expected for full: {expected_chunks + 1}",
+             # +1 for the final 100% callback, +1 for the duplicate 0% callback
+            expected_chunks - first_attempt_progress_calls + 2,
         )
 
         # Verify that the second attempt completed successfully
         self.assertIsNotNone(result_tokens)
-
-        # Verify that progress callbacks were called in both attempts
-        self.assertGreaterEqual(
-            first_attempt_progress_calls,
-            3,
-            "First attempt should have at least 3 progress calls before cancellation",
-        )
-        self.assertGreaterEqual(
-            second_attempt_progress_calls,
-            2,
-            "Second attempt should have at least 2 progress calls (0% and 100%)",
-        )
 
 
 if __name__ == "__main__":
