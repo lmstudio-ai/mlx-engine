@@ -1,4 +1,4 @@
-from typing import List, Optional, Any
+from typing import Callable, List, Optional, Any
 
 from mlx_engine.logging import log_info, log_warn, log_error
 from mlx_lm.models.cache import (
@@ -10,6 +10,12 @@ from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
+
+
+class LmsStopPromptProcessing(Exception):
+    """
+    Exception to signal that the user aborted generation during prompt processing.
+    """
 
 
 class CacheWrapper:
@@ -26,6 +32,7 @@ class CacheWrapper:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        chunk_size: int = 512,
     ):
         """
         Initialize the CacheWrapper.
@@ -46,6 +53,19 @@ class CacheWrapper:
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
+        self.chunk_size = chunk_size
+
+    def _get_num_tokens_in_cache(self) -> int | None:
+        """
+        Get the number of tokens in the cache.
+
+        Returns:
+            int | None: The number of tokens in the cache, or None if the size cannot be determined.
+        """
+        for c in self.cache:
+            if hasattr(c, "offset"):
+                return c.offset
+        return None
 
     @staticmethod
     def _find_common_prefix(
@@ -107,11 +127,7 @@ class CacheWrapper:
         )
 
         # Trim the cache if the common prefix is shorter than the current cache
-        num_tokens_in_cache = None
-        for c in self.cache:
-            if hasattr(c, "offset"):
-                num_tokens_in_cache = c.offset
-                break
+        num_tokens_in_cache = self._get_num_tokens_in_cache()
         if num_tokens_in_cache is None:
             log_warn(
                 prefix="CacheWrapper",
@@ -162,10 +178,9 @@ class CacheWrapper:
         model,
         cache,
         tokens,
-        progress_callback,
+        progress_callback: Callable[[float], bool],
         start_progress: float,
         end_progress: float,
-        chunk_size: int = 512,
     ):
         """
         Fill a KV cache for a specific model
@@ -183,7 +198,7 @@ class CacheWrapper:
         total_tokens = len(tokens)
 
         while remaining_tokens.size > 0:
-            current_chunk_size = min(chunk_size, remaining_tokens.size)
+            current_chunk_size = min(self.chunk_size, remaining_tokens.size)
             current_chunk = remaining_tokens[:current_chunk_size]
 
             model(current_chunk[None], cache=cache)
@@ -197,8 +212,29 @@ class CacheWrapper:
             progress = start_progress + (end_progress - start_progress) * (
                 num_processed / total_tokens
             )
-            progress_callback(progress)
             mx.clear_cache()
+            should_continue = progress_callback(progress)
+            if should_continue is False:  # If it's None, assume continue generation
+                log_info(
+                    prefix="CacheWrapper",
+                    message="Prompt processing was cancelled by the user.",
+                )
+                num_tokens_in_cache = self._get_num_tokens_in_cache()
+                if num_tokens_in_cache is not None and num_tokens_in_cache > len(
+                    self.tokens
+                ):
+                    log_warn(
+                        prefix="CacheWrapper",
+                        message="The number of tokens in the cache is greater than the number of prompt tokens. This is unexpected. Clearing the cache.",
+                    )
+                    num_tokens_in_cache = None
+                if num_tokens_in_cache is None:
+                    self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                    self.tokens = None
+                else:
+                    # Remember which tokens were processed so far, so that we can continue processing at a later point
+                    self.tokens = self.tokens[:num_tokens_in_cache]
+                raise LmsStopPromptProcessing
 
     def set_draft_model(self, draft_model: nn.Module):
         """
@@ -267,8 +303,8 @@ class CacheWrapper:
         """
         if prompt_progress_callback is None:
 
-            def prompt_progress_callback(x):
-                return None
+            def prompt_progress_callback(_) -> bool:
+                return True
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(

@@ -25,10 +25,11 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
+from mlx_engine.cache_wrapper import LmsStopPromptProcessing
 
 MAX_TOP_LOGPROBS = 10
 
-StopReason = Literal["eos_token", "stop_string"]
+StopReason = Literal["eos_token", "stop_string", "user_cancelled"]
 
 
 class GenerationStopCondition(NamedTuple):
@@ -122,7 +123,7 @@ def create_generator(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],
     *,
-    prompt_progress_callback: Optional[Callable[[float], None]] = None,
+    prompt_progress_callback: Optional[Callable[[float], bool]] = None,
     images_b64: Optional[List[str]] = None,
     stop_strings: Optional[List[str]] = None,
     top_logprobs: Optional[int] = None,
@@ -149,8 +150,9 @@ def create_generator(
     Args:
         model_kit (ModelKit | VisionModelKit): The initialized model to use for generation
         prompt_tokens (List[int]): List of token IDs representing the input prompt
-        prompt_progress_callback (Optional[Callable[[float], None]]): Callback function that receives
-            generation progress as a float between 0 and 1
+        prompt_progress_callback (Optional[Callable[[float], bool]]): Callback function that receives
+            generation progress as a float between 0 and 1. Callback should return True to continue
+            prompt processing, or False to stop generation
         images_b64 (Optional[List[str]]): List of base64-encoded images for vision-language models
         stop_strings (Optional[List[str]]): List of strings that will trigger generation to stop
             when encountered
@@ -213,13 +215,26 @@ def create_generator(
     )
 
     # Process prompt
-    input_tokens, input_embeddings = model_kit.process_prompt(
-        prompt_tokens,
-        images_b64,
-        prompt_progress_callback,
-        generate_args,
-        speculative_decoding_toggle,
-    )
+    try:
+        input_tokens, input_embeddings = model_kit.process_prompt(
+            prompt_tokens,
+            images_b64,
+            prompt_progress_callback,
+            generate_args,
+            speculative_decoding_toggle,
+        )
+    except LmsStopPromptProcessing:
+        yield GenerationResult(
+            text="",
+            tokens=[],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="user_cancelled",
+                stop_string="",
+                stop_tokens=[],
+            ),
+        )
+        return
     if draft_model is None:
         # input embeddings not yet supported for speculative decoding in mlx-lm
         generate_args["input_embeddings"] = input_embeddings
