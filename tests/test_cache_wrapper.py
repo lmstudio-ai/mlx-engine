@@ -1,6 +1,6 @@
 import unittest
 import mlx.core as mx
-from mlx_engine.cache_wrapper import CacheWrapper, LmsStopPromptProcessing
+from mlx_engine.cache_wrapper import CacheWrapper, StopPromptProcessing
 from tests.utils import model_getter
 from mlx_engine.generate import load_model, tokenize
 
@@ -51,7 +51,7 @@ class TestCacheWrapper(unittest.TestCase):
         model_kit.cache_wrapper = CacheWrapper(
             model_kit.model,
             max_kv_size=4096,
-            chunk_size=chunk_size,  
+            chunk_size=chunk_size,
         )
 
         long_prompt = (
@@ -60,7 +60,7 @@ class TestCacheWrapper(unittest.TestCase):
         )
         prompt_tokens = mx.array(tokenize(model_kit, long_prompt))
         tokens_to_process = len(prompt_tokens) - num_tokens_to_exclude
-          # ceiling division
+        # ceiling division
         expected_chunks = (tokens_to_process + chunk_size - 1) // chunk_size
 
         # First attempt: Progress callback that cancels after a few updates
@@ -72,7 +72,7 @@ class TestCacheWrapper(unittest.TestCase):
                 return False
             return True
 
-        with self.assertRaises(LmsStopPromptProcessing):
+        with self.assertRaises(StopPromptProcessing):
             model_kit.cache_wrapper.update_cache(
                 prompt_tokens=prompt_tokens,
                 prompt_progress_callback=cancelling_progress_callback,
@@ -96,7 +96,7 @@ class TestCacheWrapper(unittest.TestCase):
 
         self.assertEqual(
             second_attempt_progress_calls,
-             # +1 for the final 100% callback, +1 for the duplicate 0% callback
+            # +1 for the final 100% callback, +1 for the duplicate 0% callback
             expected_chunks - first_attempt_progress_calls + 2,
         )
 

@@ -12,7 +12,7 @@ import mlx.nn as nn
 import sys
 
 
-class LmsStopPromptProcessing(Exception):
+class StopPromptProcessing(Exception):
     """
     Exception to signal that the user aborted generation during prompt processing.
     """
@@ -234,7 +234,7 @@ class CacheWrapper:
                 else:
                     # Remember which tokens were processed so far, so that we can continue processing at a later point
                     self.tokens = self.tokens[:num_tokens_in_cache]
-                raise LmsStopPromptProcessing
+                raise StopPromptProcessing
 
     def set_draft_model(self, draft_model: nn.Module):
         """

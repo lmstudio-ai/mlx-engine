@@ -25,7 +25,7 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.cache_wrapper import LmsStopPromptProcessing
+from mlx_engine.cache_wrapper import StopPromptProcessing
 
 MAX_TOP_LOGPROBS = 10
 
@@ -223,7 +223,7 @@ def create_generator(
             generate_args,
             speculative_decoding_toggle,
         )
-    except LmsStopPromptProcessing:
+    except StopPromptProcessing:
         yield GenerationResult(
             text="",
             tokens=[],
