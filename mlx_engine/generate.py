@@ -306,7 +306,7 @@ def create_generator(
 
     # Add eot token ids to tokenizer
     tokenizer.eos_token_ids = tokenizer.eos_token_ids.union(
-        get_eot_token_ids(tokenizer)
+        get_eot_token_ids(tokenizer, model_kit.model_type)
     )
 
     # Set up stop string processor if non-empty stop_strings are provided
