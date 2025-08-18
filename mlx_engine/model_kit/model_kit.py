@@ -3,6 +3,7 @@ from typing import Callable, Optional, List, Tuple
 
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
+import mlx_lm.tokenizer_utils
 
 from mlx_engine.cache_wrapper import CacheWrapper
 from pathlib import Path
@@ -15,6 +16,7 @@ from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.qwen2_5_vl import Qwen2_5_VLVisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
@@ -39,6 +41,8 @@ class ModelKit:
         "gemma3n": Gemma3nVisionAddOn,
         "mistral3": Mistral3VisionAddOn,
         "pixtral": PixtralVisionAddOn,
+        "qwen2_vl": Qwen2_5_VLVisionAddOn,
+        "qwen2_5_vl": Qwen2_5_VLVisionAddOn,
     }
 
     # model state tracking
@@ -91,7 +95,28 @@ class ModelKit:
         config_json = json.loads((model_path / "config.json").read_text())
         self.model_type = config_json.get("model_type", None)
 
-        self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
+        # Check if model has vision support
+        vision_add_on_class = self.VISION_ADD_ON_MAP.get(self.model_type)
+        is_vision_model = (
+            vision_add_on_class is not None and "vision_config" in config_json
+        )
+
+        if is_vision_model:
+            # Load vision add-on
+            self.vision_add_on = vision_add_on_class(model_path)
+            try:
+                # Try standard mlx-lm loading first
+                self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
+            except Exception:
+                # If mlx-lm fails, use vision add-on's pre-wrapped language model. The vision add-on
+                # has already loaded the unified model and extracted/wrapped the language component
+                # for compatibility with mlx-lm.
+                self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(self.model_path)
+                self.model = self.vision_add_on.language_model
+        else:
+            # Standard text-only model loading
+            self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
+
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(
             self.model,
@@ -103,12 +128,6 @@ class ModelKit:
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
-        vision_add_on_class = self.VISION_ADD_ON_MAP.get(self.model_type)
-        should_load_vision_add_on = (
-            vision_add_on_class is not None and "vision_config" in config_json
-        )
-        if should_load_vision_add_on:
-            self.vision_add_on = vision_add_on_class(model_path)
         log_info(prefix=LOG_PREFIX, message="Model loaded successfully")
 
     def __init__(
