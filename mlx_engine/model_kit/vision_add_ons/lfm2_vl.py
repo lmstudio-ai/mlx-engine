@@ -10,11 +10,16 @@ from mlx_vlm.models.lfm2_vl import (
     VisionConfig as LFM2VlVisionConfig,
     TextConfig as LFM2VlTextConfig,
 )
-from mlx_vlm.models.lfm2_vl.lfm2_vl import Lfm2VlMultiModalProjector, PixelUnshuffleBlock, masked_scatter
+from mlx_vlm.models.lfm2_vl.lfm2_vl import (
+    Lfm2VlMultiModalProjector,
+    PixelUnshuffleBlock,
+    masked_scatter,
+)
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
+
 
 class LFM2VisionAddOn(BaseVisionAddOn):
     """

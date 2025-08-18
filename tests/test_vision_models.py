@@ -135,7 +135,9 @@ class TestVisionModels(unittest.TestCase):
         prompt = f"""<|startoftext|><|im_start|>user
 {self.text_only_prompt}<|im_end|>
 <|im_start|>assistant"""
-        self.toucan_test_runner("mlx-community/LFM2-VL-450M-4bit", prompt, text_only=True)
+        self.toucan_test_runner(
+            "mlx-community/LFM2-VL-450M-4bit", prompt, text_only=True
+        )
 
     @pytest.mark.heavy
     def test_mistral3_vision(self):

@@ -40,7 +40,10 @@ def load_and_parse_config(
     config.text_config = text_config_class.from_dict(config.text_config)
 
     # hack for lfm2_vl 1.6B SPECIFICALLY (450M is fine???)
-    if hasattr(config.text_config, "model_type") and "lfm2" in config.text_config.model_type:
+    if (
+        hasattr(config.text_config, "model_type")
+        and "lfm2" in config.text_config.model_type
+    ):
         if config.vision_config.num_hidden_layers == 27:
             config.vision_config.num_hidden_layers = 26
             config_dict["vision_config"]["num_hidden_layers"] = 26

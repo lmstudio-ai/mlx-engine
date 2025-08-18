@@ -9,6 +9,7 @@ from mlx_engine.external.models.ernie4_5.tokenization_ernie4_5 import Ernie4_5_T
 from mlx_engine.external.models.lfm2_vl.processing_lfm2_vl import Lfm2VlProcessor
 from mlx_engine.external.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig
 
+
 def register_models():
     AutoTokenizer.register(Ernie4_5_Config, Ernie4_5_Tokenizer, exist_ok=True)
     AutoTokenizer.register(Ernie4_5_MoeConfig, Ernie4_5_Tokenizer, exist_ok=True)
