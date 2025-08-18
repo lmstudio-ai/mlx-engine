@@ -123,6 +123,20 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/pixtral-12b-4bit", prompt, text_only=True
         )
 
+    def test_lfm2_vl_vision(self):
+        """Test LFM2-VL 450M model"""
+        prompt = f"""<|startoftext|><|im_start|>user
+<image>{self.description_prompt}<|im_end|>
+<|im_start|>assistant"""
+        self.toucan_test_runner("mlx-community/LFM2-VL-450M-4bit", prompt)
+
+    def test_lfm2_vl_text_only(self):
+        """Test LFM2-VL 450M model"""
+        prompt = f"""<|startoftext|><|im_start|>user
+{self.text_only_prompt}<|im_end|>
+<|im_start|>assistant"""
+        self.toucan_test_runner("mlx-community/LFM2-VL-450M-4bit", prompt, text_only=True)
+
     @pytest.mark.heavy
     def test_mistral3_vision(self):
         prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
