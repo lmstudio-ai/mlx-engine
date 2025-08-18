@@ -39,6 +39,11 @@ def load_and_parse_config(
     config.vision_config = vision_config_class.from_dict(config.vision_config)
     config.text_config = text_config_class.from_dict(config.text_config)
 
+    # hack for lfm2_vl
+    if hasattr(config.text_config, "model_type") and "lfm2" in config.text_config.model_type:
+        config.vision_config.num_hidden_layers -= 1
+        config_dict["vision_config"]["num_hidden_layers"] -= 1
+
     return config, config_dict
 
 

@@ -15,6 +15,7 @@ from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
@@ -37,6 +38,8 @@ class ModelKit:
     VISION_ADD_ON_MAP = {
         "gemma3": Gemma3VisionAddOn,
         "gemma3n": Gemma3nVisionAddOn,
+        "lfm2_vl": LFM2VisionAddOn,
+        "lfm2-vl": LFM2VisionAddOn,
         "mistral3": Mistral3VisionAddOn,
         "pixtral": PixtralVisionAddOn,
     }
