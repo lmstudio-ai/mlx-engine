@@ -44,6 +44,8 @@ class LFM2VisionAddOn(BaseVisionAddOn):
             )
         )
 
+        # this particular block comes from
+        # https://github.com/Blaizzy/mlx-vlm/blob/f02d63e8f5b521e8c75f129a63d2660efd132693/mlx_vlm/models/lfm2_vl/lfm2_vl.py#L102-L105
         if self.config.downsample_factor > 1:
             self.pixel_unshuffle = PixelUnshuffleBlock(self.config.downsample_factor)
         else:
@@ -115,6 +117,7 @@ class LFM2VisionAddOn(BaseVisionAddOn):
     def _merge_input_ids_with_image_features(
         self, image_features, inputs_embeds, input_ids
     ):
+        """ref https://github.com/Blaizzy/mlx-vlm/blob/f02d63e8f5b521e8c75f129a63d2660efd132693/mlx_vlm/models/lfm2_vl/lfm2_vl.py#L152-L172"""
         special_image_mask = input_ids == self.config.image_token_index
         n_image_tokens = special_image_mask.sum()
         special_image_mask = special_image_mask[..., None]
