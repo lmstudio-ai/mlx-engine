@@ -15,7 +15,6 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
-import sys
 
 class LFM2VisionAddOn(BaseVisionAddOn):
     """

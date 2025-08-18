@@ -38,7 +38,6 @@ class ModelKit:
     VISION_ADD_ON_MAP = {
         "gemma3": Gemma3VisionAddOn,
         "gemma3n": Gemma3nVisionAddOn,
-        "lfm2_vl": LFM2VisionAddOn,
         "lfm2-vl": LFM2VisionAddOn,
         "mistral3": Mistral3VisionAddOn,
         "pixtral": PixtralVisionAddOn,
