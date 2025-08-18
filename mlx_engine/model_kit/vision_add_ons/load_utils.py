@@ -39,7 +39,7 @@ def load_and_parse_config(
     config.vision_config = vision_config_class.from_dict(config.vision_config)
     config.text_config = text_config_class.from_dict(config.text_config)
 
-    # hack for lfm2_vl 1.6B SPECIFICALLY (450M is fine???)
+    # hack for some lfm2_vl 1.6B models that have an incorrect 27 num_hidden_layers instead of 26
     if (
         hasattr(config.text_config, "model_type")
         and "lfm2" in config.text_config.model_type
