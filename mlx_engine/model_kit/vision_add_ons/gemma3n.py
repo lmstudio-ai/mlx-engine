@@ -1,8 +1,6 @@
 from pathlib import Path
-
 from mlx import nn
 import mlx.core as mx
-
 from mlx_vlm.models.gemma3n import (
     VisionModel as Gemma3nVisionTower,
     ModelConfig as Gemma3nModelConfig,
@@ -12,7 +10,8 @@ from mlx_vlm.models.gemma3n import (
 )
 from mlx_vlm.models.gemma3n.gemma3n import Gemma3nMultimodalEmbedder
 from mlx_vlm.utils import sanitize_weights, load_processor
-from mlx_engine.logging import log_info
+import logging
+
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
@@ -27,6 +26,9 @@ from mlx_engine.model_kit.vision_add_ons.load_utils import (
 import json
 
 
+logger = logging.getLogger(__name__)
+
+
 class Gemma3nVisionComponents(nn.Module):
     def __init__(self, vision_tower: nn.Module, embed_vision: nn.Module):
         super().__init__()
@@ -38,8 +40,6 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
     """
     Vision add-on for Gemma3n model. Uses mlx-vlm vision components of Gemma3n.
     """
-
-    GEMMA3N_LOG_PREFIX = "Gemma3nVisionAddOn"
 
     def __init__(self, model_path: Path):
         """Initialize Gemma3nVisionAddOn with vision components loaded from the given path."""
@@ -80,9 +80,8 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
         maybe_apply_quantization(components, config_dict, vision_weights)
         prepare_components(components, vision_weights)
 
-        log_info(
-            prefix=self.GEMMA3N_LOG_PREFIX,
-            message=f"Vision add-on loaded successfully from {model_path}",
+        logger.info(
+            f"Vision add-on loaded successfully from {model_path}",
         )
 
         self.vision_tower = components.vision_tower

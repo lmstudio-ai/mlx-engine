@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from mlx import nn
@@ -18,13 +19,13 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
 )
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
+logger = logging.getLogger(__name__)
+
 
 class Gemma3VisionAddOn(BaseVisionAddOn):
     """
     Vision add-on for Gemma3 model. Uses mlx-vlm vision components of Gemma3.
     """
-
-    GEMMA3_LOG_PREFIX = "Gemma3VisionAddOn"
 
     def __init__(self, model_path: Path):
         """Initialize Gemma3VisionAddOn with vision components loaded from the given path."""
@@ -39,7 +40,7 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
                 text_config_class=Gemma3TextConfig,
                 vision_tower_class=Gemma3VisionTower,
                 multi_modal_projector_class=Gemma3MultiModalProjector,
-                log_prefix=self.GEMMA3_LOG_PREFIX,
+                logger=logger,
             )
         )
 

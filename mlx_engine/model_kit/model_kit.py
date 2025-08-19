@@ -1,15 +1,12 @@
 import json
 from typing import Callable, Optional, List, Tuple
-
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
-
 from mlx_engine.cache_wrapper import CacheWrapper
 from pathlib import Path
 import mlx.nn as nn
 import mlx.core as mx
-
-from mlx_engine.logging import log_info, log_warn
+import logging
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
@@ -19,7 +16,7 @@ from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
-LOG_PREFIX = "ModelKit"
+logger = logging.getLogger(__name__)
 
 
 class ModelKit:
@@ -60,13 +57,10 @@ class ModelKit:
     vision_add_on: Optional[BaseVisionAddOn] = None
 
     def _vocab_only_init(self, model_path: Path):
-        log_info(
-            prefix=LOG_PREFIX,
-            message=f"Loading model (vocab-only) from {model_path}...",
-        )
+        logger.info(f"Loading model (vocab-only) from {model_path}...")
         self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(model_path)
         self.detokenizer = self.tokenizer.detokenizer
-        log_info(prefix=LOG_PREFIX, message="Model (vocab-only) loaded successfully")
+        logger.info("Model (vocab-only) loaded successfully")
 
     def _full_model_init(
         self,
@@ -83,13 +77,10 @@ class ModelKit:
         )
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
-            log_warn(
-                prefix=LOG_PREFIX,
-                message="max_kv_size is ignored when using KV cache quantization",
-            )
+            logger.warning("max_kv_size is ignored when using KV cache quantization")
             max_kv_size = None
         self.model_path = model_path
-        log_info(prefix=LOG_PREFIX, message=f"Loading model from {model_path}...")
+        logger.info(f"Loading model from {model_path}...")
         config_json = json.loads((model_path / "config.json").read_text())
         self.model_type = config_json.get("model_type", None)
 
@@ -111,7 +102,7 @@ class ModelKit:
         )
         if should_load_vision_add_on:
             self.vision_add_on = vision_add_on_class(model_path)
-        log_info(prefix=LOG_PREFIX, message="Model loaded successfully")
+        logger.info("Model loaded successfully")
 
     def __init__(
         self,
@@ -152,9 +143,8 @@ class ModelKit:
         if is_text_only_processing:
             self._cross_prompt_cache_active = True
             if len(prompt_tokens) == 0:
-                log_warn(
-                    prefix="ModelKit",
-                    message="Received empty prompt. Generation quality will likely be poor",
+                logger.warning(
+                    "Received empty prompt. Generation quality will likely be poor"
                 )
                 # Models expect some sort of input, so add whitespace
                 prompt_tokens = self.tokenize(" ")
@@ -203,17 +193,12 @@ class ModelKit:
     def is_draft_model_compatible(self, path: str | Path) -> bool:
         path = Path(path)
         if self.tokenizer is None:
-            log_warn(
-                prefix=LOG_PREFIX,
-                message="Draft model compatibility check requires at least a vocab-only "
-                "loaded main model",
+            logger.warning(
+                "Draft model compatibility check requires at least a vocab-only loaded main model"
             )
             return False
         if self.vision_add_on is not None:
-            log_warn(
-                prefix=LOG_PREFIX,
-                message="Draft models are currently unsupported for vision models",
-            )
+            logger.warning("Draft models are currently unsupported for vision models")
             return False
         draft_tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(path)
         if draft_tokenizer.vocab_size != self.tokenizer.vocab_size:
@@ -221,7 +206,7 @@ class ModelKit:
         return True
 
     def load_draft_model(self, path: str | Path) -> None:
-        log_info(prefix=LOG_PREFIX, message=f"Loading draft model from {path}...")
+        logger.info(f"Loading draft model from {path}...")
         path = Path(path)
         if self.model is None:
             raise ValueError("Main model must be loaded before loading a draft model")
@@ -229,11 +214,11 @@ class ModelKit:
             raise ValueError("Draft model is not compatible with main model")
         self.draft_model, _ = mlx_lm.utils.load(path)
         self.cache_wrapper.set_draft_model(self.draft_model)
-        log_info(prefix=LOG_PREFIX, message="Draft model loaded")
+        logger.info("Draft model loaded")
 
     def unload_draft_model(self) -> None:
         if self.draft_model is None:
-            log_info(prefix=LOG_PREFIX, message="No loaded draft model to unload")
+            logger.info("No loaded draft model to unload")
         else:
             self.draft_model = None
             self.cache_wrapper.unset_draft_model()

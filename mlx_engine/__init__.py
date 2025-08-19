@@ -16,6 +16,7 @@ import os
 
 from .utils.disable_hf_download import patch_huggingface_hub
 from .utils.register_models import register_models
+from .utils.logger import setup_logging
 
 
 from .generate import (
@@ -29,6 +30,7 @@ from .generate import (
 
 patch_huggingface_hub()
 register_models()
+setup_logging()
 
 
 def _set_outlines_cache_dir(cache_dir: Path | str):

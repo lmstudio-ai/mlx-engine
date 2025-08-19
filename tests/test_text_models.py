@@ -1,8 +1,8 @@
 import json
 import unittest
 from pathlib import Path
+import logging
 
-from mlx_engine.logging import log_info
 from .utils import model_getter, model_load_and_tokenize_prompt
 from mlx_engine.generate import (
     load_model,
@@ -12,6 +12,8 @@ from mlx_engine.generate import (
     tokenize,
     create_generator,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TestTextModels(unittest.TestCase):
@@ -140,9 +142,8 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
 <|im_start|>assistant
 """
         prompt_tokens = tokenize(model_kit, prompt)
-        log_info(
-            prefix="test_prompt_caching_trim",
-            message=f"Generation 1 number of prompt tokens: {len(prompt_tokens)}",
+        logger.info(
+            f"Generation 1 number of prompt tokens: {len(prompt_tokens)}",
         )
         generated_text_list_1 = []
         prompt_progress_callback_times_called = 0
@@ -194,9 +195,8 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
 <|im_start|>assistant
 """
         prompt_tokens = tokenize(model_kit, prompt)
-        log_info(
-            prefix="test_prompt_caching_trim",
-            message=f"Generation 2 number of prompt tokens: {len(prompt_tokens)}",
+        logger.info(
+            f"Generation 2 number of prompt tokens: {len(prompt_tokens)}",
         )
         generated_text_list_2 = []
         prompt_progress_callback_times_called = 0

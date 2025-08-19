@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from mlx import nn
@@ -17,13 +18,13 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
 )
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
+logger = logging.getLogger(__name__)
+
 
 class Mistral3VisionAddOn(BaseVisionAddOn):
     """
     Vision add-on for Mistral3 models.
     """
-
-    LOG_PREFIX = "Mistral3VisionAddOn"
 
     def __init__(self, model_path: Path):
         """Initialize Mistral3VisionAddOn with vision components loaded from the given path."""
@@ -37,7 +38,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
                 text_config_class=Mistral3TextConfig,
                 vision_tower_class=Mistral3VisionTower,
                 multi_modal_projector_class=Mistral3MultiModalProjector,
-                log_prefix=self.LOG_PREFIX,
+                logger=logger,
             )
         )
 

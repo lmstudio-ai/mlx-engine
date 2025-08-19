@@ -1,6 +1,5 @@
 from typing import Callable, List, Optional, Any
-
-from mlx_engine.logging import log_info, log_warn, log_error
+import logging
 from mlx_lm.models.cache import (
     make_prompt_cache,
     trim_prompt_cache,
@@ -10,6 +9,9 @@ from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 
 class StopPromptProcessing(Exception):
@@ -129,9 +131,8 @@ class CacheWrapper:
         # Trim the cache if the common prefix is shorter than the current cache
         num_tokens_in_cache = self._get_num_tokens_in_cache()
         if num_tokens_in_cache is None:
-            log_warn(
-                prefix="CacheWrapper",
-                message="Could not determine the number of tokens in the cache, clearing the cache.",
+            logger.warning(
+                "Could not determine the number of tokens in the cache, clearing the cache."
             )
             self.cache = make_prompt_cache(self.model, self.max_kv_size)
             self.tokens = prompt_tokens
@@ -139,10 +140,8 @@ class CacheWrapper:
         num_tokens_to_trim = num_tokens_in_cache - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
-                log_warn(
-                    prefix="CacheWrapper",
-                    message=f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: "
-                    "Cache is not trimmable. Clearing the cache instead.",
+                logger.warning(
+                    f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: Cache is not trimmable. Clearing the cache instead."
                 )
                 self.cache = make_prompt_cache(self.model, self.max_kv_size)
                 self.tokens = prompt_tokens
@@ -150,18 +149,13 @@ class CacheWrapper:
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
             if tokens_trimmed != num_tokens_to_trim:
                 # If we trimmed fewer tokens than expected, the cache is invalid
-                log_error(
-                    prefix="CacheWrapper",
-                    message=f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected "
-                    " ({num_tokens_to_trim}). Clearing the cache.",
+                logger.error(
+                    f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected ({num_tokens_to_trim}). Clearing the cache."
                 )
                 self.cache = make_prompt_cache(self.model, self.max_kv_size)
                 self.tokens = prompt_tokens
                 return self.tokens
-            log_info(
-                prefix="CacheWrapper",
-                message=f"Trimmed {num_tokens_to_trim} tokens from the prompt cache",
-            )
+            logger.info(f"Trimmed {num_tokens_to_trim} tokens from the prompt cache")
 
         # Keep track of the prompt tokens
         self.tokens = prompt_tokens
@@ -215,17 +209,13 @@ class CacheWrapper:
             mx.clear_cache()
             should_continue = progress_callback(progress)
             if should_continue is False:  # If it's None, assume continue generation
-                log_info(
-                    prefix="CacheWrapper",
-                    message="Prompt processing was cancelled by the user.",
-                )
+                logger.info("Prompt processing was cancelled by the user.")
                 num_tokens_in_cache = self._get_num_tokens_in_cache()
                 if num_tokens_in_cache is not None and num_tokens_in_cache > len(
                     self.tokens
                 ):
-                    log_warn(
-                        prefix="CacheWrapper",
-                        message="The number of tokens in the cache is greater than the number of prompt tokens. This is unexpected. Clearing the cache.",
+                    logger.warning(
+                        "The number of tokens in the cache is greater than the number of prompt tokens. This is unexpected. Clearing the cache."
                     )
                     num_tokens_in_cache = None
                 if num_tokens_in_cache is None:
@@ -243,7 +233,6 @@ class CacheWrapper:
         If the provided draft_model is already set, returns without changes.
         Otherwise, clears existing cache and rebuilds it by combining caches
         from the main model and draft model. Requires a main model to be set first.
-
         Args:
             draft_model: The draft model to cache. Pass None to remove draft model.
 
@@ -253,10 +242,7 @@ class CacheWrapper:
         if self.model is None:
             raise ValueError("Cannot add a draft model to cache without a main model")
         if self.max_kv_size is not None:
-            log_info(
-                prefix="CacheWrapper",
-                message="Disabling max_kv_size when setting a draft model for cache",
-            )
+            logger.info("Disabling max_kv_size when setting a draft model for cache")
             self.max_kv_size = None
 
         if self.draft_model is draft_model:
@@ -265,10 +251,7 @@ class CacheWrapper:
 
         # clear the current cache, append draft model cache to the end of the main model cache as per
         # https://github.com/ml-explore/mlx-examples/blob/514502da22f0dc4c1ac439bdf78c07d5ec41acf7/llms/mlx_lm/utils.py#L381-L382
-        log_info(
-            prefix="CacheWrapper",
-            message="Clearing current prompt cache and adding draft model to the cache",
-        )
+        logger.info("Clearing current prompt cache and adding draft model to the cache")
         self.tokens = None
         self.cache: List[Any] = make_prompt_cache(self.model)
         if draft_model is not None:
