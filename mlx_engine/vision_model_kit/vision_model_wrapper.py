@@ -172,7 +172,7 @@ class VisionModelWrapper:
             detokenizer.finalize()
             prompt = detokenizer.text
 
-            logger.info(f"Prompt dump: {prompt}\n")
+            logger.debug(f"Prompt dump: {prompt}\n")
 
             try:
                 if hasattr(processor, "process"):
