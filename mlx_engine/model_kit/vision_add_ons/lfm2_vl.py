@@ -14,7 +14,6 @@ from mlx_vlm.models.lfm2_vl import (
 from mlx_vlm.models.lfm2_vl.lfm2_vl import (
     Lfm2VlMultiModalProjector,
     PixelUnshuffleBlock,
-    masked_scatter,
 )
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
@@ -107,9 +106,10 @@ class LFM2VisionAddOn(BaseVisionAddOn):
 
         image_features = mx.concatenate(image_features, axis=0)
 
-        final_inputs_embeds = LFM2VlModel.merge_input_ids_with_image_features(image_features, inputs_embeds, input_ids, self.config.image_token_index)
+        final_inputs_embeds = LFM2VlModel.merge_input_ids_with_image_features(
+            image_features, inputs_embeds, input_ids, self.config.image_token_index
+        )
 
         if input_ids.shape[1] == final_inputs_embeds.shape[1]:
             return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
         return input_ids, final_inputs_embeds
-
