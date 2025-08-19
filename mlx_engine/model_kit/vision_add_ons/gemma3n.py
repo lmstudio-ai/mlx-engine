@@ -41,8 +41,6 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
     Vision add-on for Gemma3n model. Uses mlx-vlm vision components of Gemma3n.
     """
 
-    GEMMA3N_LOG_PREFIX = "Gemma3nVisionAddOn"
-
     def __init__(self, model_path: Path):
         """Initialize Gemma3nVisionAddOn with vision components loaded from the given path."""
         super().__init__()

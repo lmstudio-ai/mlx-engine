@@ -7,8 +7,6 @@ from mlx import nn
 from mlx_vlm.utils import sanitize_weights, load_processor, skip_multimodal_module
 import logging
 
-logger = logging.getLogger(__name__)
-
 
 def load_and_parse_config(
     model_path: Path,
@@ -181,7 +179,7 @@ def load_vision_addon(
     text_config_class: Any,
     vision_tower_class: Type[nn.Module],
     multi_modal_projector_class: Type[nn.Module],
-    log_prefix: str,
+    logger: logging.Logger,
 ) -> Tuple[nn.Module, nn.Module, Any, Any]:
     """
     Load vision add-on components, configuration, and processor.
@@ -193,7 +191,7 @@ def load_vision_addon(
         text_config_class: Configuration class for text component
         vision_tower_class: The vision tower model class
         multi_modal_projector_class: The multi-modal projector class
-        log_prefix: Prefix for logging messages
+        logger: logging.Logger
 
     Returns:
         Tuple containing:

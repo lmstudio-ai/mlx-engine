@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from mlx import nn
@@ -20,13 +21,13 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
 )
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
+logger = logging.getLogger(__name__)
+
 
 class PixtralVisionAddOn(BaseVisionAddOn):
     """
     Vision add-on for Pixtral model. Uses mlx-vlm vision components of Pixtral.
     """
-
-    PIXTRAL_LOG_PREFIX = "PixtralVisionAddOn"
 
     def __init__(self, model_path: Path):
         """Initialize PixtralVisionAddOn with vision components loaded from the given path."""
@@ -41,7 +42,7 @@ class PixtralVisionAddOn(BaseVisionAddOn):
                 text_config_class=PixtralTextConfig,
                 vision_tower_class=PixtralVisionTower,
                 multi_modal_projector_class=PixtralMultiModalProjector,
-                log_prefix=self.PIXTRAL_LOG_PREFIX,
+                logger=logger,
             )
         )
 
