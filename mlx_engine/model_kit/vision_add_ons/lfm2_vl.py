@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from mlx import nn
@@ -20,13 +21,13 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
 )
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
+logger = logging.getLogger(__name__)
+
 
 class LFM2VisionAddOn(BaseVisionAddOn):
     """
     Vision add-on for LFM2 models.
     """
-
-    LOG_PREFIX = "LFM2VisionAddOn"
 
     def __init__(self, model_path: Path):
         """Initialize LFM2VisionAddOn with vision components loaded from the given path."""
@@ -40,7 +41,7 @@ class LFM2VisionAddOn(BaseVisionAddOn):
                 text_config_class=LFM2VlTextConfig,
                 vision_tower_class=LFM2VlVisionTower,
                 multi_modal_projector_class=Lfm2VlMultiModalProjector,
-                log_prefix=self.LOG_PREFIX,
+                logger=logger,
             )
         )
 
