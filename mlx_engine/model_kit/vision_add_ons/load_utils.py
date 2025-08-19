@@ -39,6 +39,19 @@ def load_and_parse_config(
     config.vision_config = vision_config_class.from_dict(config.vision_config)
     config.text_config = text_config_class.from_dict(config.text_config)
 
+    # hack for lfm2_vl, which uses a `vision_feature_layer` to reduce the number of actual layers
+    # https://github.com/Blaizzy/mlx-vlm/blob/f02d63e8f5b521e8c75f129a63d2660efd132693/mlx_vlm/models/lfm2_vl/lfm2_vl.py#L98-L101
+    if (
+        hasattr(config.text_config, "model_type")
+        and "lfm2" in config.text_config.model_type
+    ):
+        vision_feature_layer = config_dict.get("vision_feature_layer", -1)
+        if vision_feature_layer != -1:
+            config.vision_config.num_hidden_layers += vision_feature_layer + 1
+            config_dict["vision_config"]["num_hidden_layers"] = (
+                config.vision_config.num_hidden_layers
+            )
+
     return config, config_dict
 
 
