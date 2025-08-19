@@ -26,7 +26,7 @@ def setup_logging():
     handler.setLevel(logging.INFO)
 
     # Simple formatter with logger name and level
-    formatter = logging.Formatter("%(name)s:%(levelname)s: %(message)s")
+    formatter = logging.Formatter("[%(module)s][%(levelname)s]: %(message)s")
     handler.setFormatter(formatter)
 
     logger.addHandler(handler)
