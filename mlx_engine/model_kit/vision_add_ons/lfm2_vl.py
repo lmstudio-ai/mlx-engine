@@ -9,6 +9,7 @@ from mlx_vlm.models.lfm2_vl import (
     ModelConfig as LFM2VlModelConfig,
     VisionConfig as LFM2VlVisionConfig,
     TextConfig as LFM2VlTextConfig,
+    Model as LFM2VlModel,
 )
 from mlx_vlm.models.lfm2_vl.lfm2_vl import (
     Lfm2VlMultiModalProjector,
@@ -106,32 +107,9 @@ class LFM2VisionAddOn(BaseVisionAddOn):
 
         image_features = mx.concatenate(image_features, axis=0)
 
-        final_inputs_embeds = self._merge_input_ids_with_image_features(
-            image_features, inputs_embeds, input_ids
-        )
+        final_inputs_embeds = LFM2VlModel.merge_input_ids_with_image_features(image_features, inputs_embeds, input_ids, self.config.image_token_index)
 
         if input_ids.shape[1] == final_inputs_embeds.shape[1]:
             return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
         return input_ids, final_inputs_embeds
 
-    def _merge_input_ids_with_image_features(
-        self, image_features, inputs_embeds, input_ids
-    ):
-        """ref https://github.com/Blaizzy/mlx-vlm/blob/f02d63e8f5b521e8c75f129a63d2660efd132693/mlx_vlm/models/lfm2_vl/lfm2_vl.py#L152-L172"""
-        special_image_mask = input_ids == self.config.image_token_index
-        n_image_tokens = special_image_mask.sum()
-        special_image_mask = special_image_mask[..., None]
-        special_image_mask = mx.broadcast_to(special_image_mask, inputs_embeds.shape)
-
-        n_image_features = image_features.shape[0]
-        n_image_mask_elements = special_image_mask.sum()
-        if n_image_mask_elements != image_features.size:
-            raise ValueError(
-                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
-            )
-
-        inputs_embeds = masked_scatter(
-            inputs_embeds, special_image_mask, image_features
-        )
-
-        return inputs_embeds
