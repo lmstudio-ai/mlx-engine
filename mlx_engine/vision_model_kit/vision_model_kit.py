@@ -1,18 +1,19 @@
 from typing import Union, Optional, List, Tuple
-
 from mlx_engine.model_kit.model_kit import ModelKit
-from mlx_engine.logging import log_info
+import logging
+
 from ._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
 )
 from .vision_model_wrapper import VisionModelWrapper
-
 import mlx_vlm
 import mlx_lm
 from pathlib import Path
 import mlx.core as mx
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+
+logger = logging.getLogger(__name__)
 
 
 class VisionModelKit(ModelKit):
@@ -72,7 +73,7 @@ class VisionModelKit(ModelKit):
                 eos_token_ids = [eos_tokens]
             else:
                 eos_token_ids = list(set(eos_tokens))
-            log_info(f"Setting eos token ids: {eos_token_ids}")
+            logger.info(f"Setting eos token ids: {eos_token_ids}")
 
         # Use the mlx_lm tokenizer since it's more robust
         self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(

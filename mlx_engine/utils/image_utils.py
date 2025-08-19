@@ -1,10 +1,10 @@
 import base64
 from io import BytesIO
 from typing import List
-
 import PIL
+import logging
 
-from mlx_engine.logging import log_info
+logger = logging.getLogger(__name__)
 
 
 def convert_to_pil(images_b64: List[str]) -> List[PIL.Image.Image]:
@@ -43,9 +43,8 @@ def custom_resize(pil_images, max_size=(1000, 1000)):
         original_size = (img.width, img.height)
         aspect_ratio = img.width / img.height
 
-        log_info(
-            prefix="custom_resize",
-            message=f"Image {i + 1}: Original size {original_size}",
+        logger.info(
+            f"Image {i + 1}: Original size {original_size}",
         )
 
         if img.width > max_size[0] or img.height > max_size[1]:
@@ -56,14 +55,12 @@ def custom_resize(pil_images, max_size=(1000, 1000)):
                 new_height = max_size[1]
                 new_width = int(new_height * aspect_ratio)
             img = img.resize((new_width, new_height), PIL.Image.LANCZOS)
-            log_info(
-                prefix="custom_resize",
-                message=f"Image {i + 1}: Resized to {img.width}x{img.height}\n",
+            logger.info(
+                f"Image {i + 1}: Resized to {img.width}x{img.height}\n",
             )
         else:
-            log_info(
-                prefix="custom_resize",
-                message=f"Image {i + 1}: No resize needed\n",
+            logger.info(
+                f"Image {i + 1}: No resize needed\n",
             )
 
         max_width = max(max_width, img.width)
@@ -72,9 +69,8 @@ def custom_resize(pil_images, max_size=(1000, 1000)):
         resized_images.append(img)
 
     if len(pil_images) > 1:
-        log_info(
-            prefix="custom_resize",
-            message=f"[mlx-engine] Maximum dimensions: {max_width}x{max_height}. "
+        logger.info(
+            f"[mlx-engine] Maximum dimensions: {max_width}x{max_height}. "
             f"Adding padding so that all images are the same size.\n",
         )
 

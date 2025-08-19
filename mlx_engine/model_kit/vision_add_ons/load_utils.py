@@ -2,12 +2,12 @@ import glob
 import json
 from pathlib import Path
 from typing import Any, Tuple, Type
-
 import mlx.core as mx
 from mlx import nn
-
 from mlx_vlm.utils import sanitize_weights, load_processor, skip_multimodal_module
-from mlx_engine.logging import log_info
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def load_and_parse_config(
@@ -229,9 +229,8 @@ def load_vision_addon(
     # Prepare components (load weights and set to eval mode)
     prepare_components(components, vision_weights)
 
-    log_info(
-        prefix=log_prefix,
-        message=f"Vision add-on loaded successfully from {model_path}",
+    logger.info(
+        f"Vision add-on loaded successfully from {model_path}",
     )
 
     return components.vision_tower, components.multi_modal_projector, config, processor

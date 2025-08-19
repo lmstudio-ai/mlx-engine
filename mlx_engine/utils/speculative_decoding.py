@@ -1,9 +1,10 @@
 from typing import Optional
-
 import mlx.nn as nn
+import logging
 
-from mlx_engine.logging import log_info
 from mlx_engine.model_kit.model_kit import ModelKit
+
+logger = logging.getLogger(__name__)
 
 
 def determine_draft_model_for_generation(
@@ -21,7 +22,7 @@ def determine_draft_model_for_generation(
             "Speculative decoding toggle is explicitly enabled but no draft model is loaded"
         )
     elif not speculative_decoding_toggle and model_kit.draft_model is not None:
-        log_info(
+        logger.info(
             "Draft model is loaded but speculative decoding is disabled for this generation"
         )
         return None

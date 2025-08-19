@@ -1,11 +1,12 @@
 from typing import List, Union, NamedTuple
-
 import mlx.core as mx
 from mlx_vlm import prepare_inputs
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+import logging
 
-from mlx_engine.logging import log_info
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessedImagePrompt(NamedTuple):
@@ -33,7 +34,7 @@ def common_process_prompt_with_images(
     detokenizer.finalize()
     prompt = detokenizer.text
 
-    log_info(message=f"Prompt dump: {prompt}\n")
+    logger.info(f"Prompt dump: {prompt}\n")
 
     images = convert_to_pil(images_b64)
     images = custom_resize(images)

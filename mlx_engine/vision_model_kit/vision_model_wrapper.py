@@ -1,12 +1,13 @@
 import mlx.core as mx
-from mlx_engine.logging import log_info
+import logging
+
 from mlx_vlm.models.cache import KVCache, SimpleKVCache
-
 from typing import List, Optional
-
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class VisionModelWrapper:
@@ -171,7 +172,7 @@ class VisionModelWrapper:
             detokenizer.finalize()
             prompt = detokenizer.text
 
-            log_info(prefix="VisionModelWrapper", message=f"Prompt dump: {prompt}\n")
+            logger.info(f"Prompt dump: {prompt}\n")
 
             try:
                 if hasattr(processor, "process"):
