@@ -11,6 +11,8 @@ from mlx_engine.external.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfi
 
 
 def register_models():
+    # exist_ok=True should be an indication that we should remove external code
+    # ref https://github.com/lmstudio-ai/mlx-engine/issues/211
     AutoTokenizer.register(Ernie4_5_Config, Ernie4_5_Tokenizer, exist_ok=True)
     AutoTokenizer.register(Ernie4_5_MoeConfig, Ernie4_5_Tokenizer, exist_ok=True)
-    AutoProcessor.register(Lfm2VlConfig, Lfm2VlProcessor, exist_ok=True)
+    AutoProcessor.register(Lfm2VlConfig, Lfm2VlProcessor, exist_ok=False)
