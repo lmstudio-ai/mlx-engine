@@ -11,6 +11,9 @@ import sys
 
 def setup_logging():
     """Setup basic logging configuration for mlx_engine."""
+    # Silence exceptions that happen within the logger
+    logging.raiseExceptions = False
+
     # Configure root logger for mlx_engine
     logger = logging.getLogger("mlx_engine")
     logger.setLevel(logging.INFO)
