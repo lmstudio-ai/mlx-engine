@@ -60,12 +60,6 @@ class VisionComponents(nn.Module):
         self.multi_modal_projector = multi_modal_projector
 
 
-class QwenVisionComponents(nn.Module):
-    def __init__(self, vision_tower: nn.Module):
-        super().__init__()
-        self.vision_tower = vision_tower
-
-
 def create_vision_components(
     config: Any,
     vision_tower_class: Type[nn.Module],
@@ -251,78 +245,3 @@ def load_vision_addon(
     )
 
     return components.vision_tower, components.multi_modal_projector, config, processor
-
-
-def load_qwen_vision_addon(
-    model_path: Path,
-    model_config_class: Any,
-    vision_config_class: Any,
-    text_config_class: Any,
-    vision_tower_class: Type[nn.Module],
-    logger: logging.Logger,
-) -> Tuple[nn.Module, Any, Any]:
-    """
-    Load Qwen2/2.5-VL vision add-on components, configuration, and processor.
-
-    This is a specialized version of load_vision_addon for Qwen2/2.5-VL models,
-    which only use a vision tower without a multi-modal projector.
-
-    Args:
-        model_path: Path to the model directory
-        model_config_class: Configuration class for the model
-        vision_config_class: Configuration class for vision component
-        text_config_class: Configuration class for text component
-        vision_tower_class: The vision tower model class
-        logger: logging.Logger
-
-    Returns:
-        Tuple containing:
-            - The vision tower module
-            - The model configuration
-            - The processor for handling images and text
-    """
-    # Load and parse configuration with correct classes
-    config, config_dict = load_and_parse_config(
-        model_path=model_path,
-        model_config_class=model_config_class,
-        vision_config_class=vision_config_class,
-        text_config_class=text_config_class,
-    )
-
-    # Create vision components container (Qwen2/2.5-VL only use vision tower)
-    components = QwenVisionComponents(
-        vision_tower=vision_tower_class(config.vision_config)
-    )
-
-    # Load processor
-    processor = load_processor(model_path=model_path, add_detokenizer=True)
-
-    # Load and filter weights
-    vision_weights = load_and_filter_weights(
-        model_path=model_path,
-        components=components,
-    )
-
-    # Sanitize vision weights
-    vision_weights = sanitize_weights(
-        components.vision_tower.__class__, vision_weights, config.vision_config
-    )
-
-    # Apply quantization if specified
-    maybe_apply_quantization(
-        components=components,
-        config_dict=config_dict,
-        vision_weights=vision_weights,
-    )
-
-    # Prepare components
-    prepare_components(
-        components=components,
-        vision_weights=vision_weights,
-    )
-
-    logger.info(
-        f"Qwen2/2.5-VL vision add-on loaded successfully from {model_path}",
-    )
-
-    return components.vision_tower, config, processor
