@@ -15,7 +15,7 @@ def convert_to_pil(images_b64: List[str]) -> List[PIL.Image.Image]:
     ]
 
 
-def custom_resize(pil_images, max_size=(1000, 1000)):
+def custom_resize(pil_images, max_size=(1000, 1000), should_pad=True):
     """
     Resize and optionally pad a list of PIL images.
 
@@ -27,6 +27,8 @@ def custom_resize(pil_images, max_size=(1000, 1000)):
         pil_images (list): A list of PIL Image objects to be processed.
         max_size (tuple): Maximum allowed dimensions (width, height) for the images.
                         Defaults to (1000, 1000).
+        should_pad (bool): Whether to pad the images to the same size.
+                        Defaults to True.
 
     Returns:
         list: A list of processed PIL Image objects. If there was only one input image,
@@ -68,7 +70,7 @@ def custom_resize(pil_images, max_size=(1000, 1000)):
 
         resized_images.append(img)
 
-    if len(pil_images) > 1:
+    if len(pil_images) > 1 and should_pad:
         logger.info(
             f"[mlx-engine] Maximum dimensions: {max_width}x{max_height}. "
             f"Adding padding so that all images are the same size.\n",
