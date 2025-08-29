@@ -58,7 +58,7 @@ class VisionModelWrapper:
         else:
             setattr(self.vision_model, name, value)
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, input_embeddings=None, **kwargs):
         """
         See this reference implementation
         https://github.com/Blaizzy/mlx-vlm/blob/6c98971/mlx_vlm/utils.py#L783-L810

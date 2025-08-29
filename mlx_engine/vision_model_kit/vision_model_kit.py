@@ -119,12 +119,13 @@ class VisionModelKit(ModelKit):
         )
         self.has_processed_prompt = True
 
-        # disable `prefill_step_size` prompt pre-processing in mlx_lm::generate_step
-        generate_args["prefill_step_size"] = float("inf")
-
         # The VLM input_ids shape is important, but mlx_lm expects a flattened array
-        #   Send the prompt back reshaped, and save the real shape in `self.model.input_ids`
-        return self.model.input_ids.reshape(-1), None
+        #   Send back a fake shape and input_ids, and save the real shape in `self.model.input_ids`
+        if images_b64 is None or len(images_b64) == 0:
+            # For text-only, enable mlx-lm prompt processing
+            return self.model.input_ids.reshape(-1), None
+        # Disable mlx-lm prompt processing by returning a fake input
+        return mx.array([0]), mx.array([0])
 
     def is_cross_prompt_cache_active(self) -> bool:
         """VisionModelKit does not support cross prompt caching"""
