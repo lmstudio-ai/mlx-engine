@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import Any, Tuple, Type
 from pathlib import Path
 
@@ -16,6 +17,20 @@ from mlx_engine.model_kit.vision_add_ons.load_utils import (
 )
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
 
+from mlx_vlm.models.qwen2_5_vl import (
+    VisionModel as Qwen25VLVisionTower,
+    ModelConfig as Qwen25VLModelConfig,
+    VisionConfig as Qwen25VLVisionConfig,
+    TextConfig as Qwen25VLTextConfig,
+    Model as Qwen25VLCombinedModel,
+)
+from mlx_vlm.models.qwen2_vl import (
+    VisionModel as Qwen2VLVisionTower,
+    ModelConfig as Qwen2VLModelConfig,
+    VisionConfig as Qwen2VLVisionConfig,
+    TextConfig as Qwen2VLTextConfig,
+    Model as Qwen2VLCombinedModel,
+)
 from mlx_vlm.utils import prepare_inputs
 
 logger = logging.getLogger(__name__)
@@ -114,38 +129,32 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
         # Determine model type from config to select appropriate classes
         config_path = model_path / "config.json"
         with open(config_path, "r") as f:
-            import json
-
             config_dict = json.load(f)
             model_type = config_dict.get("model_type")
 
         # Import appropriate classes based on model type
         if model_type == "qwen2_5_vl":
-            from mlx_vlm.models.qwen2_5_vl import (
-                VisionModel as VisionTower,
-                ModelConfig as ModelConfigClass,
-                VisionConfig as VisionConfigClass,
-                TextConfig as TextConfigClass,
-                Model as CombinedModel,
-            )
+            vision_tower_cls = Qwen25VLVisionTower
+            model_config_cls = Qwen25VLModelConfig
+            vision_config_cls = Qwen25VLVisionConfig
+            text_config_cls = Qwen25VLTextConfig
+            combined_model_cls = Qwen25VLCombinedModel
         else:  # Default to qwen2_vl
-            from mlx_vlm.models.qwen2_vl import (
-                VisionModel as VisionTower,
-                ModelConfig as ModelConfigClass,
-                VisionConfig as VisionConfigClass,
-                TextConfig as TextConfigClass,
-                Model as CombinedModel,
-            )
+            vision_tower_cls = Qwen2VLVisionTower
+            model_config_cls = Qwen2VLModelConfig
+            vision_config_cls = Qwen2VLVisionConfig
+            text_config_cls = Qwen2VLTextConfig
+            combined_model_cls = Qwen2VLCombinedModel
 
         # Store the combined model class for use in compute_embeddings
-        self.CombinedModel = CombinedModel
+        self.combined_model_cls = combined_model_cls
 
         self.vision_tower, self.config, self.processor = load_qwen_vision_addon(
             model_path=model_path,
-            model_config_class=ModelConfigClass,
-            vision_config_class=VisionConfigClass,
-            text_config_class=TextConfigClass,
-            vision_tower_class=VisionTower,
+            model_config_class=model_config_cls,
+            vision_config_class=vision_config_cls,
+            text_config_class=text_config_cls,
+            vision_tower_class=vision_tower_cls,
             logger=logger,
         )
 
@@ -181,7 +190,7 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
         pixel_values = inputs["pixel_values"]
         grid_thw = inputs.get("image_grid_thw")
 
-        # Get text embeddings - directly access the embed layer
+        # Get text embeddings
         input_embeddings = text_model.language_model.model.embed_tokens(input_ids)
 
         # If no images, return input_ids and input_embeddings
@@ -198,12 +207,14 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
         )
 
         # Merge embeddings
-        final_inputs_embeds = self.CombinedModel.merge_input_ids_with_image_features(
-            self.config.image_token_id,
-            self.config.video_token_id,
-            hidden_states,
-            input_embeddings,
-            input_ids,
+        final_inputs_embeds = (
+            self.combined_model_cls.merge_input_ids_with_image_features(
+                self.config.image_token_id,
+                self.config.video_token_id,
+                hidden_states,
+                input_embeddings,
+                input_ids,
+            )
         )
 
         # Remove batch dimension
