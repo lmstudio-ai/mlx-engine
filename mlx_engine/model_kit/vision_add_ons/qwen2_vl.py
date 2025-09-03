@@ -5,8 +5,6 @@ from pathlib import Path
 from mlx import nn
 import mlx.core as mx
 
-from mlx_vlm.utils import prepare_inputs
-
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.load_utils import (
     load_and_parse_config,
@@ -17,6 +15,8 @@ from mlx_engine.model_kit.vision_add_ons.load_utils import (
     prepare_components,
 )
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
+
+from mlx_vlm.utils import prepare_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -155,47 +155,49 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
         prompt_tokens: mx.array,
         images_b64: list[str],
     ) -> tuple[mx.array, mx.array]:
-        """Compute input_ids and embeddings for text with images."""
+        """
+        Compute input_ids and embeddings for text with images.
+        """
 
-        # Convert prompt tokens to text
-        detokenizer = self.processor.detokenizer
-        detokenizer.reset()
-        [detokenizer.add_token(token) for token in prompt_tokens]
-        detokenizer.finalize()
-        prompt = detokenizer.text
-
-        # Convert images from base64
+        # Convert and resize images
         images = convert_to_pil(images_b64)
-
-        # Resize large images (without padding for multi-image support)
         images = custom_resize(images, should_pad=False)
 
-        # Prepare inputs using mlx_vlm's prepare_inputs
+        # Build prompt text
+        tokens = (
+            prompt_tokens if isinstance(prompt_tokens, list) else prompt_tokens.tolist()
+        )
+        prompt = self.processor.decode(tokens)
+
+        # Prepare inputs
         inputs = prepare_inputs(
             processor=self.processor,
             images=images,
             prompts=prompt,
             image_token_index=self.config.image_token_id,
-            resize_shape=None,  # Let processor handle sizing
+            resize_shape=None,
         )
-
         input_ids = inputs["input_ids"]
         pixel_values = inputs["pixel_values"]
-        grid_thw = inputs["image_grid_thw"]
+        grid_thw = inputs.get("image_grid_thw")
 
-        # Get prompt text embeddings
+        # Get text embeddings - directly access the embed layer
         input_embeddings = text_model.language_model.model.embed_tokens(input_ids)
 
         # If no images, return input_ids and input_embeddings
         if pixel_values is None:
             return input_ids.squeeze(0), input_embeddings.squeeze(0)
 
-        # Process through vision tower to get hidden states
+        # Ensure pixel_values are in the right format for vision tower
+        if pixel_values.dtype != input_embeddings.dtype:
+            pixel_values = pixel_values.astype(input_embeddings.dtype)
+
+        # Process image through vision tower
         hidden_states = self.vision_tower(
             pixel_values, grid_thw, output_hidden_states=False
         )
 
-        # Merge image features with text embeddings
+        # Merge embeddings
         final_inputs_embeds = self.CombinedModel.merge_input_ids_with_image_features(
             self.config.image_token_id,
             self.config.video_token_id,
