@@ -14,7 +14,7 @@ MLX engine for LM Studio
 <br/>
 
 ## Built with
-- [mlx-lm](https://github.com/ml-explore/mlx-examples) - Apple MLX inference engine (MIT)
+- [mlx-lm](https://github.com/ml-explore/mlx-lm) - Apple MLX inference engine (MIT)
 - [Outlines](https://github.com/dottxt-ai/outlines) - Structured output for LLMs (Apache 2.0)
 - [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) - Vision model inferencing for MLX (MIT)
 
