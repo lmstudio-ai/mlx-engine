@@ -64,7 +64,13 @@ class CacheWrapper:
         Returns:
             int | None: The number of tokens in the cache, or None if the size cannot be determined.
         """
+        from mlx_lm.models.cache import MambaCache
+
         for c in self.cache:
+            # MambaCache (used by Mamba/SSM models like Qwen 3 Next) doesn't track tokens
+            # with an offset attribute like attention-based caches do
+            if isinstance(c, MambaCache):
+                return None
             if hasattr(c, "offset"):
                 return c.offset
         return None
