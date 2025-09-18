@@ -11,6 +11,16 @@ VALID_KV_GROUP_SIZE = (32, 64, 128)
 logger = logging.getLogger(__name__)
 
 
+class _KvCacheQuantizationUnsupportedError(Exception):
+    """Raised when a model doesn't support KV cache quantization."""
+
+    def __init__(
+        self,
+        message="This model does not support KV Cache Quantization. Please disable and reload",
+    ):
+        super().__init__(message)
+
+
 def get_kv_cache_quantization_params(
     kv_bits: Optional[int],
     kv_group_size: Optional[int],
@@ -54,9 +64,6 @@ def get_kv_cache_quantization_params(
         )
 
     # Ensure that the model cache can be quantized
-    unsupported_error_msg = (
-        "This model does not support KV Cache Quantization. Please disable and reload"
-    )
     try:
         model_cls, model_args_cls = _get_classes(config_json)
         model_args = model_args_cls.from_dict(config_json)
@@ -65,10 +72,10 @@ def get_kv_cache_quantization_params(
             cache = model.make_cache()
             for c in cache:
                 if isinstance(c, MambaCache):
-                    raise ValueError(unsupported_error_msg)
+                    raise _KvCacheQuantizationUnsupportedError
+    except _KvCacheQuantizationUnsupportedError as e:
+        raise ValueError(str(e))
     except Exception as e:
-        if unsupported_error_msg in str(e):
-            raise
         logger.warning(
             f"Ignoring unexpected error when checking kv cache quantization support: {e}."
         )
