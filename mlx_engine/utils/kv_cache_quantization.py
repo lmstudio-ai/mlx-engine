@@ -1,6 +1,7 @@
 from typing import Optional, Tuple
 from mlx_lm.utils import _get_classes
 from mlx_lm.models.cache import MambaCache
+from mlx_engine import UnsupportedConfigError
 import logging
 
 # https://github.com/ml-explore/mlx/blob/f288db8d34c0bcfa0867b6458ab0277c5e86ed45/mlx/fast.cpp#L782
@@ -9,16 +10,6 @@ VALID_KV_BITS = (2, 3, 4, 6, 8)
 VALID_KV_GROUP_SIZE = (32, 64, 128)
 
 logger = logging.getLogger(__name__)
-
-
-class _KvCacheQuantizationUnsupportedError(Exception):
-    """Raised when a model doesn't support KV cache quantization."""
-
-    def __init__(
-        self,
-        message="This model does not support KV Cache Quantization. Please disable and reload",
-    ):
-        super().__init__(message)
 
 
 def get_kv_cache_quantization_params(
@@ -72,9 +63,11 @@ def get_kv_cache_quantization_params(
             cache = model.make_cache()
             for c in cache:
                 if isinstance(c, MambaCache):
-                    raise _KvCacheQuantizationUnsupportedError
-    except _KvCacheQuantizationUnsupportedError as e:
-        raise ValueError(str(e))
+                    raise UnsupportedConfigError(
+                        "This model does not support KV Cache Quantization. Please disable and reload"
+                    )
+    except UnsupportedConfigError:
+        raise
     except Exception as e:
         logger.warning(
             f"Ignoring unexpected error when checking kv cache quantization support: {e}."

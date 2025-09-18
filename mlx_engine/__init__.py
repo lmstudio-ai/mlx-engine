@@ -11,6 +11,11 @@ __all__ = [
     "tokenize",
 ]
 
+
+class UnsupportedConfigError(Exception):
+    """Raised when mlx_engine does not support the user-provided configuration"""
+
+
 from pathlib import Path
 import os
 
@@ -27,6 +32,7 @@ from .generate import (
     create_generator,
     tokenize,
 )
+
 
 patch_huggingface_hub()
 register_models()
