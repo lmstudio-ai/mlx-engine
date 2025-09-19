@@ -8,7 +8,7 @@ from mlx_engine.generate import (
     create_generator,
     is_draft_model_compatible,
 )
-from .utils import model_getter
+from tests.shared import model_getter
 from textwrap import dedent
 
 

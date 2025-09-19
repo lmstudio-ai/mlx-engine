@@ -1,7 +1,7 @@
 import unittest
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper, StopPromptProcessing
-from tests.utils import model_getter
+from tests.shared import model_getter
 from mlx_engine.generate import load_model, tokenize
 
 
