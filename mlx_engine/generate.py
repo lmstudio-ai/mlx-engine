@@ -50,6 +50,19 @@ class GenerationResult(NamedTuple):
     stop_condition: Optional[GenerationStopCondition]
 
 
+def construct_user_cancelled_result():
+    return GenerationResult(
+        text="",
+        tokens=[],
+        top_logprobs=[],
+        stop_condition=GenerationStopCondition(
+            stop_reason="user_cancelled",
+            stop_string="",
+            stop_tokens=[],
+        ),
+    )
+
+
 def load_model(
     model_path: str | Path,
     *,
@@ -234,16 +247,7 @@ def create_generator(
             speculative_decoding_toggle,
         )
     except StopPromptProcessing:
-        yield GenerationResult(
-            text="",
-            tokens=[],
-            top_logprobs=[],
-            stop_condition=GenerationStopCondition(
-                stop_reason="user_cancelled",
-                stop_string="",
-                stop_tokens=[],
-            ),
-        )
+        yield construct_user_cancelled_result()
         return
     if draft_model is None:
         # input embeddings not yet supported for speculative decoding in mlx-lm
@@ -395,16 +399,7 @@ def create_generator(
         except StopIteration:
             break
         except StopPromptProcessing:
-            yield GenerationResult(
-                text="",
-                tokens=[],
-                top_logprobs=[],
-                stop_condition=GenerationStopCondition(
-                    stop_reason="user_cancelled",
-                    stop_string="",
-                    stop_tokens=[],
-                ),
-            )
+            yield construct_user_cancelled_result()
             return
 
         # Token processor
