@@ -11,6 +11,8 @@ import mlx.nn as nn
 import sys
 
 
+PROMPT_PROCESSING_CHUNK_SIZE = 512
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +36,7 @@ class CacheWrapper:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
-        chunk_size: int = 512,
+        chunk_size: int = PROMPT_PROCESSING_CHUNK_SIZE,
     ):
         """
         Initialize the CacheWrapper.

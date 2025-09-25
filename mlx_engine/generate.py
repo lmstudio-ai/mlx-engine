@@ -1,5 +1,6 @@
 from typing import Callable, Iterator, List, Literal, NamedTuple, Optional
 import json
+import logging
 from pathlib import Path
 import sys
 
@@ -25,11 +26,14 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.cache_wrapper import StopPromptProcessing
+from mlx_engine.cache_wrapper import StopPromptProcessing, PROMPT_PROCESSING_CHUNK_SIZE
+from mlx_engine.utils.progress_decorators import ratchet, throw_to_stop, token_count
 
 MAX_TOP_LOGPROBS = 10
 
 StopReason = Literal["eos_token", "stop_string", "user_cancelled"]
+
+logger = logging.getLogger(__name__)
 
 
 class GenerationStopCondition(NamedTuple):
@@ -44,6 +48,19 @@ class GenerationResult(NamedTuple):
     tokens: List[Token]
     top_logprobs: List[List[Token]]
     stop_condition: Optional[GenerationStopCondition]
+
+
+def construct_user_cancelled_result():
+    return GenerationResult(
+        text="",
+        tokens=[],
+        top_logprobs=[],
+        stop_condition=GenerationStopCondition(
+            stop_reason="user_cancelled",
+            stop_string="",
+            stop_tokens=[],
+        ),
+    )
 
 
 def load_model(
@@ -151,7 +168,7 @@ def create_generator(
         model_kit (ModelKit | VisionModelKit): The initialized model to use for generation
         prompt_tokens (List[int]): List of token IDs representing the input prompt
         prompt_progress_callback (Optional[Callable[[float], bool]]): Callback function that receives
-            generation progress as a float between 0 and 1. Callback should return True to continue
+            generation progress as a float between 0 and 100. Callback should return True to continue
             prompt processing, or False to stop generation
         images_b64 (Optional[List[str]]): List of base64-encoded images for vision-language models
         stop_strings (Optional[List[str]]): List of strings that will trigger generation to stop
@@ -189,6 +206,13 @@ def create_generator(
     set_seed(seed)
 
     generate_args = {}
+    # For each call to create_generator, wrap all prompt progress calls with a ratchet that
+    # ensures reported progress monotonically increases. This is needed because prompt processing
+    # occurs in different places depending on the model type and prompt content. The prompt will only
+    # be processed once, but some contexts are not aware that the prompt is already processed, which
+    # can cause the progress to look like it is being reset when it is actually already complete.
+    # See https://github.com/lmstudio-ai/mlx-engine/issues/226.
+    prompt_progress_callback = ratchet(prompt_progress_callback)
 
     # Set up kv cache
     if type(model_kit) is not VisionModelKit:
@@ -224,16 +248,7 @@ def create_generator(
             speculative_decoding_toggle,
         )
     except StopPromptProcessing:
-        yield GenerationResult(
-            text="",
-            tokens=[],
-            top_logprobs=[],
-            stop_condition=GenerationStopCondition(
-                stop_reason="user_cancelled",
-                stop_string="",
-                stop_tokens=[],
-            ),
-        )
+        yield construct_user_cancelled_result()
         return
     if draft_model is None:
         # input embeddings not yet supported for speculative decoding in mlx-lm
@@ -367,15 +382,27 @@ def create_generator(
             top_logprobs=top_logprobs_buffer,
         )
 
-    for generation_result in stream_generate(
+    stream = stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
         draft_model=draft_model,
         prompt=input_tokens,
         max_tokens=max_tokens,
         logits_processors=logits_processors,
+        prompt_progress_callback=token_count(throw_to_stop(prompt_progress_callback)),
+        prefill_step_size=PROMPT_PROCESSING_CHUNK_SIZE,
         **generate_args,
-    ):
+    )
+
+    while True:
+        try:
+            generation_result = next(stream)
+        except StopIteration:
+            break
+        except StopPromptProcessing:
+            yield construct_user_cancelled_result()
+            return
+
         # Token processor
         token = generation_result.token
         text += generation_result.text

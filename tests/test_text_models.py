@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 import logging
 
-from .utils import model_getter, model_load_and_tokenize_prompt
+from tests.shared import model_getter, model_load_and_tokenize_prompt
 from mlx_engine.generate import (
     load_model,
     load_draft_model,

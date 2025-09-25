@@ -8,7 +8,7 @@ from mlx_engine.generate import (
     create_generator,
     is_draft_model_compatible,
 )
-from .utils import model_getter
+from tests.shared import model_getter
 from textwrap import dedent
 
 
@@ -640,6 +640,53 @@ Summarize this in one sentence<end_of_turn>
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
         self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
         self.assertIn("benjamin franklin", generated_text.lower())
+
+    def test_gemma3n_vision_long_prompt_progress_reported(self):
+        """Ensure progress is reported during prompt processing with a vision prompt"""
+        model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
+        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+
+        file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
+        file_content = file_path.read_text()
+        # don't use dedent below b/c file content doesn't match indentation on each newline
+        prompt = f"""\
+<bos><start_of_turn>user
+<image_soft_token>
+```
+{file_content}
+```
+Summarize this in one sentence<end_of_turn>
+<start_of_turn>model
+"""
+        prompt_tokens = tokenize(model_kit, prompt)
+        progress_values = []
+
+        def progress_callback(progress: float) -> bool:
+            nonlocal progress_values
+            progress_values.append(progress)
+            print(f"Prompt processing progress: {progress}")
+            return True
+
+        generated_text = ""
+        for result in create_generator(
+            model_kit=model_kit,
+            prompt_tokens=prompt_tokens,
+            images_b64=[self.toucan_image_b64],
+            seed=0,
+            temp=0.0,
+            max_tokens=1,  # We only care about pre-fill in this test
+            repetition_penalty=1.01,
+            prompt_progress_callback=progress_callback,
+        ):
+            generated_text += result.text
+            print(result.text, end="", flush=True)
+            if result.stop_condition:
+                break
+        print("\n", flush=True)
+        print(progress_values)
+        self.assertGreater(len(progress_values), 0)
+        for i in range(len(progress_values) - 1):
+            self.assertGreater(progress_values[i + 1], progress_values[i])
 
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):
