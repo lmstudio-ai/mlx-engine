@@ -211,6 +211,7 @@ def create_generator(
     # occurs in different places depending on the model type and prompt content. The prompt will only
     # be processed once, but some contexts are not aware that the prompt is already processed, which
     # can cause the progress to look like it is being reset when it is actually already complete.
+    # See https://github.com/lmstudio-ai/mlx-engine/issues/226.
     prompt_progress_callback = ratchet(prompt_progress_callback)
 
     # Set up kv cache
