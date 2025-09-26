@@ -174,8 +174,7 @@ if __name__ == "__main__":
             print(f"\rProcessing prompt: |{bar}| ({percent:.1f}%)", end="", flush=True)
             if percent >= 100:
                 print()  # new line when done
-        else:
-            pass
+        return True  # Progress callback must return True to continue
 
     # Load the model
     model_path = resolve_model_path(args.model)
