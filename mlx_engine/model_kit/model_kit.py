@@ -73,23 +73,19 @@ class ModelKit:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
     ):
-        # Get model config
-        self.model_path = model_path
-        logger.info(f"Loading model from {model_path}...")
-        config_json = json.loads((model_path / "config.json").read_text())
-        self.model_type = config_json.get("model_type", None)
-
-        # Handle kv cache quantization
         kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
             kv_bits,
             kv_group_size,
             quantized_kv_start,
-            config_json,
         )
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
             logger.warning("max_kv_size is ignored when using KV cache quantization")
             max_kv_size = None
+        self.model_path = model_path
+        logger.info(f"Loading model from {model_path}...")
+        config_json = json.loads((model_path / "config.json").read_text())
+        self.model_type = config_json.get("model_type", None)
 
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
