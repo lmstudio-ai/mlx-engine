@@ -209,6 +209,37 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         )
         self.assertEqual(generated_text_1, generated_text_2)
 
+    def test_kv_cache_quantization_lfm2(self):
+        """Test KV Cache Quantization with a Hybrid model"""
+        model_path = model_getter("lmstudio-community/LFM2-350M-MLX-8bit")
+        model_kit = load_model(
+            model_path=model_path, max_kv_size=4096, kv_bits=8, kv_group_size=64
+        )
+        prompt_template = """<|startoftext|><|im_start|>system
+You are a helpful assistant trained by Liquid AI.<|im_end|>
+<|im_start|>user{user_text}
+<|im_start|>assistant
+"""
+        prompt = prompt_template.format(
+            user_text="Write a function to check is_palindrome in python"
+        )
+        prompt_tokens = tokenize(model_kit, prompt)
+        generated_text = ""
+        for result in create_generator(
+            model_kit=model_kit,
+            prompt_tokens=prompt_tokens,
+            seed=0,
+            temp=0.0,
+            max_tokens=100,
+        ):
+            print(result.text, end="", flush=True)
+            generated_text += result.text
+            if result.stop_condition:
+                break
+        print("\n", flush=True)
+        # Just check that output is reasonable. Should include the function name we requested
+        self.assertTrue("def is_palindrome(" in generated_text)
+
 
 class TestStructuredGen(unittest.TestCase):
     def setUp(self):
