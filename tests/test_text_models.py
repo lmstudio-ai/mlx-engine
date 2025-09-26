@@ -20,7 +20,6 @@ class TestTextModels(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up test resources that will be shared across all test methods"""
-        cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
         cls.test_data_dir = Path(__file__).parent / "data"
 
     def test_repetition_penalty_applies(self):
@@ -298,11 +297,6 @@ class TestStructuredGen(unittest.TestCase):
 
 
 class TestSpeculativeDecoding(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        """Set up test resources that will be shared across all test methods"""
-        cls.model_path_prefix = Path("~/.cache/lm-studio/models").expanduser().resolve()
-
     def test_is_draft_model_compatible_true_vocab_only_load(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         draft_model_path = model_getter(
