@@ -92,12 +92,12 @@ class Qwen3_VL_MoEVisionAddOn(BaseVisionAddOn):
         )
 
         # Merge embeddings
-        final_inputs_embeds = self.model_cls.merge_input_ids_with_image_features(
-            self.config.image_token_id,
-            self.config.video_token_id,
+        final_inputs_embeds, _ = self.model_cls.merge_input_ids_with_image_features(
             hidden_states,
             input_embeddings,
             input_ids,
+            self.config.image_token_id,
+            self.config.video_token_id,
         )
 
         # Remove batch dimension
