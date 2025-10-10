@@ -54,16 +54,20 @@ def load_and_parse_config(
 
 
 class VisionComponents(nn.Module):
-    def __init__(self, vision_tower: nn.Module, multi_modal_projector: nn.Module):
+    def __init__(
+        self, vision_tower: nn.Module, multi_modal_projector: nn.Module | None = None
+    ):
         super().__init__()
         self.vision_tower = vision_tower
-        self.multi_modal_projector = multi_modal_projector
+        self.multi_modal_projector = (
+            multi_modal_projector if multi_modal_projector else None
+        )
 
 
 def create_vision_components(
     config: Any,
     vision_tower_class: Type[nn.Module],
-    multi_modal_projector_class: Type[nn.Module],
+    multi_modal_projector_class: Type[nn.Module] | None,
 ) -> VisionComponents:
     """
     Create vision model components and wrap them in a container module.
@@ -77,7 +81,8 @@ def create_vision_components(
         The container module with both components
     """
     components = VisionComponents(
-        vision_tower_class(config.vision_config), multi_modal_projector_class(config)
+        vision_tower_class(config.vision_config),
+        multi_modal_projector_class(config) if multi_modal_projector_class else None,
     )
     return components
 
@@ -191,7 +196,7 @@ def load_vision_addon(
     vision_config_class: Any,
     text_config_class: Any,
     vision_tower_class: Type[nn.Module],
-    multi_modal_projector_class: Type[nn.Module],
+    multi_modal_projector_class: Type[nn.Module] | None,
     logger: logging.Logger,
 ) -> Tuple[nn.Module, nn.Module, Any, Any]:
     """
@@ -220,7 +225,9 @@ def load_vision_addon(
 
     # Create model components
     components = create_vision_components(
-        config, vision_tower_class, multi_modal_projector_class
+        config,
+        vision_tower_class,
+        multi_modal_projector_class if multi_modal_projector_class else None,
     )
 
     # Load processor
@@ -243,5 +250,8 @@ def load_vision_addon(
     logger.info(
         f"Vision add-on loaded successfully from {model_path}",
     )
+
+    if components.multi_modal_projector is None:
+        return components.vision_tower, config, processor
 
     return components.vision_tower, components.multi_modal_projector, config, processor
