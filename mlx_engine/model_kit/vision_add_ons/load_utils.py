@@ -59,9 +59,7 @@ class VisionComponents(nn.Module):
     ):
         super().__init__()
         self.vision_tower = vision_tower
-        self.multi_modal_projector = (
-            multi_modal_projector if multi_modal_projector else None
-        )
+        self.multi_modal_projector = multi_modal_projector
 
 
 def create_vision_components(
@@ -198,7 +196,7 @@ def load_vision_addon(
     vision_tower_class: Type[nn.Module],
     multi_modal_projector_class: Type[nn.Module] | None,
     logger: logging.Logger,
-) -> Tuple[nn.Module, nn.Module, Any, Any]:
+) -> Tuple[nn.Module, nn.Module | None, Any, Any]:
     """
     Load vision add-on components, configuration, and processor.
 
@@ -227,7 +225,7 @@ def load_vision_addon(
     components = create_vision_components(
         config,
         vision_tower_class,
-        multi_modal_projector_class if multi_modal_projector_class else None,
+        multi_modal_projector_class,
     )
 
     # Load processor
@@ -250,8 +248,5 @@ def load_vision_addon(
     logger.info(
         f"Vision add-on loaded successfully from {model_path}",
     )
-
-    if components.multi_modal_projector is None:
-        return components.vision_tower, config, processor
 
     return components.vision_tower, components.multi_modal_projector, config, processor

@@ -229,19 +229,21 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/Qwen2.5-VL-7B-Instruct-4bit", prompt, text_only=True
         )
 
-    def test_qwen3_vl_vision(self):
+    @pytest.mark.heavy
+    def test_qwen3_vl_moe_vision(self):
         """Test Qwen3-VL-30B-A3B-Instruct-4bit model"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner(
-            "/Users/Vincent/.cache/huggingface/hub/models--mlx-community--Qwen3-VL-30B-A3B-Instruct-4bit/snapshots/12a779ce4651ff3b936f8403d435cdaaeb3bc07d",
+            "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit",
             prompt,
         )
 
-    def test_qwen3_vl_text_only(self):
+    @pytest.mark.heavy
+    def test_qwen3_vl_moe_text_only(self):
         """Test Qwen3-VL-30B-A3B-Instruct-4bit model with only text"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner(
-            "/Users/Vincent/.cache/huggingface/hub/models--mlx-community--Qwen3-VL-30B-A3B-Instruct-4bit/snapshots/12a779ce4651ff3b936f8403d435cdaaeb3bc07d",
+            "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit",
             prompt,
             text_only=True,
         )

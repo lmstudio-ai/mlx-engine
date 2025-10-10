@@ -33,7 +33,7 @@ class Qwen3_VL_MoEVisionAddOn(BaseVisionAddOn):
         self.model_cls = Qwen3_VL_MoEModel
 
         # Load vision components
-        self.vision_tower, self.config, self.processor = load_vision_addon(
+        self.vision_tower, _, self.config, self.processor = load_vision_addon(
             model_path=model_path,
             model_config_class=Qwen3_VL_MoEModelConfig,
             vision_config_class=Qwen3_VL_MoEVisionConfig,

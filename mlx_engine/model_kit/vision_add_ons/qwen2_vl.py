@@ -61,7 +61,7 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
         self.model_cls = model_cls
 
         # Load vision components
-        self.vision_tower, self.config, self.processor = load_vision_addon(
+        self.vision_tower, _, self.config, self.processor = load_vision_addon(
             model_path=model_path,
             model_config_class=model_config_cls,
             vision_config_class=vision_config_cls,
