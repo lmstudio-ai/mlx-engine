@@ -9,11 +9,11 @@ from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
 
 from mlx_vlm.models.qwen3_vl_moe import (
-    VisionModel as Qwen3VL_MoEVisionTower,
-    ModelConfig as Qwen3VL_MoEModelConfig,
-    VisionConfig as Qwen3VL_MoEVisionConfig,
-    TextConfig as Qwen3VL_MoETextConfig,
-    Model as Qwen3VL_MoEModel,
+    VisionModel as Qwen3_VL_MoEVisionTower,
+    ModelConfig as Qwen3_VL_MoEModelConfig,
+    VisionConfig as Qwen3_VL_MoEVisionConfig,
+    TextConfig as Qwen3_VL_MoETextConfig,
+    Model as Qwen3_VL_MoEModel,
 )
 from mlx_vlm.utils import prepare_inputs
 
@@ -30,15 +30,15 @@ class Qwen3_VL_MoEVisionAddOn(BaseVisionAddOn):
         super().__init__()
 
         # Store the model class for use in compute_embeddings
-        self.model_cls = Qwen3VL_MoEModel
+        self.model_cls = Qwen3_VL_MoEModel
 
         # Load vision components
         self.vision_tower, self.config, self.processor = load_vision_addon(
             model_path=model_path,
-            model_config_class=Qwen3VL_MoEModelConfig,
-            vision_config_class=Qwen3VL_MoEVisionConfig,
-            text_config_class=Qwen3VL_MoETextConfig,
-            vision_tower_class=Qwen3VL_MoEVisionTower,
+            model_config_class=Qwen3_VL_MoEModelConfig,
+            vision_config_class=Qwen3_VL_MoEVisionConfig,
+            text_config_class=Qwen3_VL_MoETextConfig,
+            vision_tower_class=Qwen3_VL_MoEVisionTower,
             multi_modal_projector_class=None,
             logger=logger,
         )
