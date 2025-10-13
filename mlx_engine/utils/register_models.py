@@ -18,5 +18,6 @@ def register_models():
     AutoTokenizer.register(Ernie4_5_MoeConfig, Ernie4_5_Tokenizer, exist_ok=True)
 
     # mlx-vlm is not compatible with the transformers version of lfm2
+    # See https://github.com/lmstudio-ai/mlx-engine/issues/211#issuecomment-3397933488
     del processing_auto.PROCESSOR_MAPPING_NAMES["lfm2_vl"]
     AutoProcessor.register(Lfm2VlConfig, Lfm2VlProcessor, exist_ok=False)
