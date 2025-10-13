@@ -1,5 +1,4 @@
 import logging
-import json
 from pathlib import Path
 
 from mlx import nn
@@ -9,64 +8,37 @@ from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
 
-from mlx_vlm.models.qwen2_5_vl import (
-    VisionModel as Qwen25VLVisionTower,
-    ModelConfig as Qwen25VLModelConfig,
-    VisionConfig as Qwen25VLVisionConfig,
-    TextConfig as Qwen25VLTextConfig,
-    Model as Qwen25VLModel,
-)
-from mlx_vlm.models.qwen2_vl import (
-    VisionModel as Qwen2VLVisionTower,
-    ModelConfig as Qwen2VLModelConfig,
-    VisionConfig as Qwen2VLVisionConfig,
-    TextConfig as Qwen2VLTextConfig,
-    Model as Qwen2VLModel,
+from mlx_vlm.models.qwen3_vl_moe import (
+    VisionModel as Qwen3_VL_MoEVisionTower,
+    ModelConfig as Qwen3_VL_MoEModelConfig,
+    VisionConfig as Qwen3_VL_MoEVisionConfig,
+    TextConfig as Qwen3_VL_MoETextConfig,
+    Model as Qwen3_VL_MoEModel,
 )
 from mlx_vlm.utils import prepare_inputs
 
 logger = logging.getLogger(__name__)
 
 
-class Qwen2_VLVisionAddOn(BaseVisionAddOn):
+class Qwen3_VL_MoEVisionAddOn(BaseVisionAddOn):
     """
-    Vision add-on for Qwen2-VL and Qwen2.5-VL models.
+    Vision add-on for Qwen3-VL models.
     """
 
     def __init__(self, model_path: Path):
-        """Initialize Qwen2_VLVisionAddOn with vision components loaded from the given path."""
+        """Initialize Qwen3_VL_MoEVisionAddOn with vision components loaded from the given path."""
         super().__init__()
 
-        # Determine model type from config to select appropriate classes
-        config_path = model_path / "config.json"
-        with open(config_path, "r") as f:
-            config_dict = json.load(f)
-            model_type = config_dict.get("model_type")
-
-        # Import appropriate classes based on model type
-        if model_type == "qwen2_5_vl":
-            vision_tower_cls = Qwen25VLVisionTower
-            model_config_cls = Qwen25VLModelConfig
-            vision_config_cls = Qwen25VLVisionConfig
-            text_config_cls = Qwen25VLTextConfig
-            model_cls = Qwen25VLModel
-        else:  # Default to qwen2_vl
-            vision_tower_cls = Qwen2VLVisionTower
-            model_config_cls = Qwen2VLModelConfig
-            vision_config_cls = Qwen2VLVisionConfig
-            text_config_cls = Qwen2VLTextConfig
-            model_cls = Qwen2VLModel
-
         # Store the model class for use in compute_embeddings
-        self.model_cls = model_cls
+        self.model_cls = Qwen3_VL_MoEModel
 
         # Load vision components
         self.vision_tower, _, self.config, self.processor = load_vision_addon(
             model_path=model_path,
-            model_config_class=model_config_cls,
-            vision_config_class=vision_config_cls,
-            text_config_class=text_config_cls,
-            vision_tower_class=vision_tower_cls,
+            model_config_class=Qwen3_VL_MoEModelConfig,
+            vision_config_class=Qwen3_VL_MoEVisionConfig,
+            text_config_class=Qwen3_VL_MoETextConfig,
+            vision_tower_class=Qwen3_VL_MoEVisionTower,
             multi_modal_projector_class=None,
             logger=logger,
         )
@@ -115,17 +87,17 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
             pixel_values = pixel_values.astype(input_embeddings.dtype)
 
         # Process image through vision tower
-        hidden_states = self.vision_tower(
+        hidden_states, _ = self.vision_tower(
             pixel_values, grid_thw, output_hidden_states=False
         )
 
         # Merge embeddings
-        final_inputs_embeds = self.model_cls.merge_input_ids_with_image_features(
-            self.config.image_token_id,
-            self.config.video_token_id,
+        final_inputs_embeds, _ = self.model_cls.merge_input_ids_with_image_features(
             hidden_states,
             input_embeddings,
             input_ids,
+            self.config.image_token_id,
+            self.config.video_token_id,
         )
 
         # Remove batch dimension

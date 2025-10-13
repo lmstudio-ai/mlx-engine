@@ -14,6 +14,7 @@ from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.qwen2_vl import Qwen2_VLVisionAddOn
+from mlx_engine.model_kit.vision_add_ons.qwen3_vl_moe import Qwen3_VL_MoEVisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
@@ -41,6 +42,7 @@ class ModelKit:
         "pixtral": PixtralVisionAddOn,
         "qwen2_vl": Qwen2_VLVisionAddOn,
         "qwen2_5_vl": Qwen2_VLVisionAddOn,
+        "qwen3_vl_moe": Qwen3_VL_MoEVisionAddOn,
     }
 
     # model state tracking

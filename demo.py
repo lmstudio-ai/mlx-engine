@@ -207,7 +207,7 @@ if __name__ == "__main__":
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "content": prompt},
+                    {"type": "text", "text": prompt},
                     *[
                         {"type": "image", "base64": image_b64}
                         for image_b64 in images_base64
