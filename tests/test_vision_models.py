@@ -238,7 +238,7 @@ class TestVisionModels(unittest.TestCase):
         )
 
     def test_qwen3_vl_text_only(self):
-        """Test Qwen3-VL 4B Instruct model model with only text"""
+        """Test Qwen3-VL 4B Instruct model with only text"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner(
             "mlx-community/Qwen3-VL-4B-Instruct-4bit",
