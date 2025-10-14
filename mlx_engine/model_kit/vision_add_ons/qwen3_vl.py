@@ -6,9 +6,7 @@ import mlx.core as mx
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
-from mlx_engine.model_kit.vision_add_ons.qwen_vl_utils import (
-    compute_qwen_vl_embeddings,
-)
+from mlx_engine.model_kit.vision_add_ons.qwen_vl_utils import compute_qwen_vl_embeddings
 
 from mlx_vlm.models.qwen3_vl import (
     VisionModel as Qwen3VLVisionTower,
