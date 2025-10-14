@@ -12,7 +12,7 @@ def compute_qwen_vl_embeddings(
     text_model: nn.Module,
     prompt_tokens: mx.array,
     images_b64: list[str],
-    qwenvl_version: int,
+    qwen_vl_version: int,
 ) -> tuple[mx.array, mx.array]:
     """
     Compute input_ids and embeddings for Qwen2-VL, Qwen2.5-VL, and Qwen3-VL models.
@@ -22,7 +22,7 @@ def compute_qwen_vl_embeddings(
         text_model: Text model for embedding tokens
         prompt_tokens: Input prompt tokens
         images_b64: List of base64-encoded images
-        qwenvl_version: Version number (2 for Qwen2/2.5-VL, 3 for Qwen3-VL)
+        qwen_vl_version: Version number (2 for Qwen2/2.5-VL, 3 for Qwen3-VL)
 
     Returns:
         Tuple of (input_ids, final_embeddings) with batch dimension removed
@@ -62,7 +62,19 @@ def compute_qwen_vl_embeddings(
         pixel_values = pixel_values.astype(input_embeddings.dtype)
 
     # Process image through vision tower and merge embeddings
-    if qwenvl_version == 3:
+    if qwen_vl_version == 2:
+        hidden_states = addon.vision_tower(
+            pixel_values, grid_thw, output_hidden_states=False
+        )
+
+        final_inputs_embeds = addon.model_cls.merge_input_ids_with_image_features(
+            addon.config.image_token_id,
+            addon.config.video_token_id,
+            hidden_states,
+            input_embeddings,
+            input_ids,
+        )
+    elif qwen_vl_version == 3:
         hidden_states, _ = addon.vision_tower(
             pixel_values, grid_thw, output_hidden_states=False
         )
@@ -75,17 +87,7 @@ def compute_qwen_vl_embeddings(
             addon.config.video_token_id,
         )
     else:
-        hidden_states = addon.vision_tower(
-            pixel_values, grid_thw, output_hidden_states=False
-        )
-
-        final_inputs_embeds = addon.model_cls.merge_input_ids_with_image_features(
-            addon.config.image_token_id,
-            addon.config.video_token_id,
-            hidden_states,
-            input_embeddings,
-            input_ids,
-        )
+        raise ValueError(f"Invalid Qwen-VL version: {qwen_vl_version}")
 
     # Remove batch dimension
     return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)

@@ -57,5 +57,5 @@ class Qwen3_VLVisionAddOn(BaseVisionAddOn):
             text_model=text_model,
             prompt_tokens=prompt_tokens,
             images_b64=images_b64,
-            qwenvl_version=3,
+            qwen_vl_version=3,
         )
