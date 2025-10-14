@@ -7,14 +7,25 @@ from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
 from mlx_vlm.utils import prepare_inputs
 
 
-def compute_qwen3_vl_embeddings(
+def compute_qwen_vl_embeddings(
     addon: BaseVisionAddOn,
     text_model: nn.Module,
     prompt_tokens: mx.array,
     images_b64: list[str],
+    qwenvl_version: int,
 ) -> tuple[mx.array, mx.array]:
     """
-    Compute input_ids and embeddings for Qwen3-VL models.
+    Compute input_ids and embeddings for Qwen2-VL, Qwen2.5-VL, and Qwen3-VL models.
+
+    Args:
+        addon: Vision add-on instance containing vision tower, config, and processor
+        text_model: Text model for embedding tokens
+        prompt_tokens: Input prompt tokens
+        images_b64: List of base64-encoded images
+        qwenvl_version: Version number (2 for Qwen2/2.5-VL, 3 for Qwen3-VL)
+
+    Returns:
+        Tuple of (input_ids, final_embeddings) with batch dimension removed
     """
 
     # Convert and resize images
@@ -50,19 +61,31 @@ def compute_qwen3_vl_embeddings(
     if pixel_values.dtype != input_embeddings.dtype:
         pixel_values = pixel_values.astype(input_embeddings.dtype)
 
-    # Process image through vision tower
-    hidden_states, _ = addon.vision_tower(
-        pixel_values, grid_thw, output_hidden_states=False
-    )
+    # Process image through vision tower and merge embeddings
+    if qwenvl_version == 3:
+        hidden_states, _ = addon.vision_tower(
+            pixel_values, grid_thw, output_hidden_states=False
+        )
 
-    # Merge embeddings
-    final_inputs_embeds, _ = addon.model_cls.merge_input_ids_with_image_features(
-        hidden_states,
-        input_embeddings,
-        input_ids,
-        addon.config.image_token_id,
-        addon.config.video_token_id,
-    )
+        final_inputs_embeds, _ = addon.model_cls.merge_input_ids_with_image_features(
+            hidden_states,
+            input_embeddings,
+            input_ids,
+            addon.config.image_token_id,
+            addon.config.video_token_id,
+        )
+    else:
+        hidden_states = addon.vision_tower(
+            pixel_values, grid_thw, output_hidden_states=False
+        )
+
+        final_inputs_embeds = addon.model_cls.merge_input_ids_with_image_features(
+            addon.config.image_token_id,
+            addon.config.video_token_id,
+            hidden_states,
+            input_embeddings,
+            input_ids,
+        )
 
     # Remove batch dimension
     return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)

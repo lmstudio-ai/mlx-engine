@@ -7,7 +7,7 @@ import mlx.core as mx
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
-from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
+from mlx_engine.model_kit.vision_add_ons.qwen_vl_utils import compute_qwen_vl_embeddings
 
 from mlx_vlm.models.qwen2_5_vl import (
     VisionModel as Qwen25VLVisionTower,
@@ -23,7 +23,6 @@ from mlx_vlm.models.qwen2_vl import (
     TextConfig as Qwen2VLTextConfig,
     Model as Qwen2VLModel,
 )
-from mlx_vlm.utils import prepare_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -81,52 +80,10 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
         Compute input_ids and embeddings for text with images.
         """
 
-        # Convert and resize images
-        images = convert_to_pil(images_b64)
-        images = custom_resize(images, should_pad=False)
-
-        # Build prompt text
-        tokens = (
-            prompt_tokens if isinstance(prompt_tokens, list) else prompt_tokens.tolist()
+        return compute_qwen_vl_embeddings(
+            addon=self,
+            text_model=text_model,
+            prompt_tokens=prompt_tokens,
+            images_b64=images_b64,
+            qwenvl_version=2,
         )
-        prompt = self.processor.decode(tokens)
-
-        # Prepare inputs
-        inputs = prepare_inputs(
-            processor=self.processor,
-            images=images,
-            prompts=prompt,
-            image_token_index=self.config.image_token_id,
-            resize_shape=None,
-        )
-        input_ids = inputs["input_ids"]
-        pixel_values = inputs["pixel_values"]
-        grid_thw = inputs.get("image_grid_thw")
-
-        # Get text embeddings
-        input_embeddings = text_model.language_model.model.embed_tokens(input_ids)
-
-        # If no images, return input_ids and input_embeddings
-        if pixel_values is None:
-            return input_ids.squeeze(0), input_embeddings.squeeze(0)
-
-        # Ensure pixel values are in the right format for vision tower
-        if pixel_values.dtype != input_embeddings.dtype:
-            pixel_values = pixel_values.astype(input_embeddings.dtype)
-
-        # Process image through vision tower
-        hidden_states = self.vision_tower(
-            pixel_values, grid_thw, output_hidden_states=False
-        )
-
-        # Merge embeddings
-        final_inputs_embeds = self.model_cls.merge_input_ids_with_image_features(
-            self.config.image_token_id,
-            self.config.video_token_id,
-            hidden_states,
-            input_embeddings,
-            input_ids,
-        )
-
-        # Remove batch dimension
-        return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)

@@ -6,8 +6,8 @@ import mlx.core as mx
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
-from mlx_engine.model_kit.vision_add_ons.qwen3_vl_utils import (
-    compute_qwen3_vl_embeddings,
+from mlx_engine.model_kit.vision_add_ons.qwen_vl_utils import (
+    compute_qwen_vl_embeddings,
 )
 
 from mlx_vlm.models.qwen3_vl import (
@@ -54,4 +54,10 @@ class Qwen3_VLVisionAddOn(BaseVisionAddOn):
         Compute input_ids and embeddings for text with images.
         """
 
-        return compute_qwen3_vl_embeddings(self, text_model, prompt_tokens, images_b64)
+        return compute_qwen_vl_embeddings(
+            addon=self,
+            text_model=text_model,
+            prompt_tokens=prompt_tokens,
+            images_b64=images_b64,
+            qwenvl_version=3,
+        )
