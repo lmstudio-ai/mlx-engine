@@ -27,9 +27,9 @@ jsonschema-specifications==2025.9.1
 jsonschema==4.25.1
 lark==1.3.0
 markupsafe==2.1.5
-mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@cceb45d6b6de4730775d10fbd5b1d5de658f0c0f
+mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@1d114498f27133884275690bfd3b4d72540ea230
 mlx-metal==0.29.2
-mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@1b65dfd36b23b34de6c03ee233ad7ac831c7d7f3
+mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@2c0203280560e210d0d500d6a3186affd6546bf3
 mlx==0.29.2
 mpmath==1.3.0
 multidict==6.4.3

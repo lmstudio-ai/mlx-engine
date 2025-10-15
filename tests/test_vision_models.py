@@ -229,21 +229,38 @@ class TestVisionModels(unittest.TestCase):
             "mlx-community/Qwen2.5-VL-7B-Instruct-4bit", prompt, text_only=True
         )
 
-    @pytest.mark.heavy
-    def test_qwen3_vl_moe_vision(self):
-        """Test Qwen3-VL-30B-A3B-Instruct-4bit model"""
+    def test_qwen3_vl_vision(self):
+        """Test Qwen3-VL 4B Instruct model"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner(
-            "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit",
+            "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
+            prompt,
+        )
+
+    def test_qwen3_vl_text_only(self):
+        """Test Qwen3-VL 4B Instruct model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
+
+    @pytest.mark.heavy
+    def test_qwen3_vl_moe_vision(self):
+        """Test Qwen3-VL 30B-A3B Instruct model"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-4bit",
             prompt,
         )
 
     @pytest.mark.heavy
     def test_qwen3_vl_moe_text_only(self):
-        """Test Qwen3-VL-30B-A3B-Instruct-4bit model with only text"""
+        """Test Qwen3-VL 30B-A3B Instruct model with only text"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner(
-            "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit",
+            "lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-4bit",
             prompt,
             text_only=True,
         )
