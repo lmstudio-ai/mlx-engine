@@ -47,6 +47,7 @@ class Qwen3_VL_MoEVisionAddOn(BaseVisionAddOn):
         text_model: nn.Module,
         prompt_tokens: mx.array,
         images_b64: list[str],
+        max_size: tuple[int, int] | None,
     ) -> tuple[mx.array, mx.array]:
         """
         Compute input_ids and embeddings for text with images.
@@ -58,4 +59,5 @@ class Qwen3_VL_MoEVisionAddOn(BaseVisionAddOn):
             prompt_tokens=prompt_tokens,
             images_b64=images_b64,
             qwen_vl_version=3,
+            max_size=max_size,
         )

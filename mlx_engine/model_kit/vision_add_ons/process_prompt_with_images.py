@@ -21,10 +21,18 @@ def common_process_prompt_with_images(
     images_b64: List[str],
     processor: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     config,  # expected to be a ModelConfig object as defined by mlx-vlm. Can vary by model
+    max_size: tuple[int, int] | None,
 ) -> ProcessedImagePrompt:
     """
     Common prompt processing used by mlx-vlm vision add-ons.
     Returns a named tuple with all processed inputs.
+
+    Args:
+        prompt_tokens: Input prompt tokens
+        images_b64: List of base64-encoded images
+        processor: Tokenizer/processor for the model
+        config: Model configuration object
+        max_size: Maximum image size as (width, height) tuple. If None, no resizing.
     """
     if len(images_b64) == 0:
         raise ValueError("Images must be non-empty")
@@ -37,7 +45,7 @@ def common_process_prompt_with_images(
     logger.info(f"Prompt dump: {prompt}\n")
 
     images = convert_to_pil(images_b64)
-    images = custom_resize(images)
+    images = custom_resize(images, max_size=max_size)
 
     if hasattr(config, "image_token_index"):
         image_token_index = config.image_token_index

@@ -58,6 +58,7 @@ class TestVisionModels(unittest.TestCase):
             model_kit=model_kit,
             prompt_tokens=prompt_tokens,
             images_b64=([self.toucan_image_b64] if not text_only else None),
+            max_image_size=1000,
             seed=0,
             max_tokens=30,
             temp=0.0,
@@ -276,6 +277,7 @@ class TestVisionModels(unittest.TestCase):
                 model_kit=model_kit,
                 prompt_tokens=prompt_tokens,
                 images_b64=images_b64,
+                max_image_size=1000,
                 seed=0,
                 temp=0.0,
                 max_tokens=50,
@@ -708,6 +710,7 @@ Summarize this in one sentence<end_of_turn>
             model_kit=model_kit,
             prompt_tokens=prompt_tokens,
             images_b64=[self.toucan_image_b64],
+            max_image_size=1000,
             seed=0,
             temp=0.0,
             max_tokens=1,  # We only care about pre-fill in this test

@@ -13,6 +13,7 @@ def compute_qwen_vl_embeddings(
     prompt_tokens: mx.array,
     images_b64: list[str],
     qwen_vl_version: int,
+    max_size: tuple[int, int] | None,
 ) -> tuple[mx.array, mx.array]:
     """
     Compute input_ids and embeddings for Qwen2-VL, Qwen2.5-VL, and Qwen3-VL models.
@@ -23,6 +24,7 @@ def compute_qwen_vl_embeddings(
         prompt_tokens: Input prompt tokens
         images_b64: List of base64-encoded images
         qwen_vl_version: Version number (2 for Qwen2/2.5-VL, 3 for Qwen3-VL)
+        max_size: Maximum image size as (width, height) tuple. If None, no resizing.
 
     Returns:
         Tuple of (input_ids, final_embeddings) with batch dimension removed
@@ -30,7 +32,7 @@ def compute_qwen_vl_embeddings(
 
     # Convert and resize images
     images = convert_to_pil(images_b64)
-    images = custom_resize(images, should_pad=False)
+    images = custom_resize(images, max_size=max_size, should_pad=False)
 
     # Build prompt text
     tokens = (

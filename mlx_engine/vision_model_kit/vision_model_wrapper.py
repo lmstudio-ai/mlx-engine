@@ -157,6 +157,7 @@ class VisionModelWrapper:
         prompt_tokens: mx.array,
         processor,
         detokenizer,
+        max_image_size: tuple[int, int] | None,
     ):
         """
         This method generates the input_ids, pixel_values, and mask for the vision model
@@ -195,6 +196,7 @@ class VisionModelWrapper:
                 images_b64=images_b64,
                 processor=processor,
                 config=self.vision_model.config,
+                max_size=max_image_size,
             )
 
             # Set class attributes from the processed result
