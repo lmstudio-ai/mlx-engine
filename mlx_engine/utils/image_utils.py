@@ -38,6 +38,15 @@ def custom_resize(pil_images, max_size=None, should_pad=True):
     Side effects:
         Writes progress and status messages to sys.stderr.
     """
+    # Validate max_size parameter
+    if max_size is not None:
+        if not isinstance(max_size, tuple) or len(max_size) != 2:
+            raise ValueError(
+                "max_size must be a tuple of (width, height), e.g., (1024, 1024)"
+            )
+        if not all(isinstance(dim, int) and dim > 0 for dim in max_size):
+            raise ValueError("max_size dimensions must be positive integers")
+
     resized_images = []
     max_width, max_height = 0, 0
 

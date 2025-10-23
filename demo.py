@@ -237,7 +237,7 @@ if __name__ == "__main__":
         model_kit,
         prompt_tokens,
         images_b64=images_base64,
-        max_image_size=1024,
+        max_image_size=(1024, 1024),
         stop_strings=args.stop_strings,
         max_tokens=1024,
         top_logprobs=args.top_logprobs,

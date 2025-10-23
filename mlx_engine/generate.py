@@ -142,7 +142,7 @@ def create_generator(
     *,
     prompt_progress_callback: Optional[Callable[[float], bool]] = None,
     images_b64: Optional[List[str]] = None,
-    max_image_size: Optional[int] = None,
+    max_image_size: Optional[tuple[int, int]] = None,
     stop_strings: Optional[List[str]] = None,
     top_logprobs: Optional[int] = None,
     repetition_penalty: Optional[float] = None,
@@ -172,8 +172,9 @@ def create_generator(
             generation progress as a float between 0 and 100. Callback should return True to continue
             prompt processing, or False to stop generation
         images_b64 (Optional[List[str]]): List of base64-encoded images for vision-language models
-        max_image_size (Optional[int]): Maximum dimension for images (assumes square). Images will be
-            resized to (max_image_size, max_image_size) if they exceed this size. If None, no resizing.
+        max_image_size (Optional[tuple[int, int]]): Maximum dimensions (width, height) for images.
+            Images will be resized to fit within these dimensions while maintaining aspect ratio if
+            they exceed this size. If None, no resizing.
         stop_strings (Optional[List[str]]): List of strings that will trigger generation to stop
             when encountered
         top_logprobs (Optional[int]): Number of top token probabilities to return per token
@@ -241,11 +242,6 @@ def create_generator(
         model_kit, draft_model, num_draft_tokens, generate_args
     )
 
-    # Convert max_image_size to tuple format (assumes square images)
-    max_image_size_tuple = (
-        (max_image_size, max_image_size) if max_image_size is not None else None
-    )
-
     # Process prompt
     try:
         input_tokens, input_embeddings = model_kit.process_prompt(
@@ -253,7 +249,7 @@ def create_generator(
             images_b64,
             prompt_progress_callback,
             generate_args,
-            max_image_size_tuple,
+            max_image_size,
             speculative_decoding_toggle,
         )
     except StopPromptProcessing:

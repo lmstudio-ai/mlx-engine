@@ -12,7 +12,7 @@ from tests.shared import model_getter
 from textwrap import dedent
 
 
-MAX_IMAGE_SIZE = 1024
+MAX_IMAGE_SIZE = (1024, 1024)
 
 
 class TestVisionModels(unittest.TestCase):
