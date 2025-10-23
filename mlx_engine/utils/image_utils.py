@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def convert_to_pil(images_b64: List[str]) -> List[PIL.Image.Image]:
+def convert_to_pil(images_b64: List[str]) -> list[PIL.Image.Image]:
     """Convert a list of base64 strings to PIL Images"""
     return [
         PIL.Image.open(BytesIO(base64.b64decode(img))).convert("RGB")
@@ -15,7 +15,12 @@ def convert_to_pil(images_b64: List[str]) -> List[PIL.Image.Image]:
     ]
 
 
-def custom_resize(pil_images, max_size=None, should_pad=True):
+def custom_resize(
+    pil_images: list[PIL.Image.Image],
+    *,
+    max_size: tuple[int, int] | None,
+    should_pad: bool = True,
+):
     """
     Resize and optionally pad a list of PIL images.
 
