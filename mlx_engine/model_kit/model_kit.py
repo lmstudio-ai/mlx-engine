@@ -143,6 +143,7 @@ class ModelKit:
         images_b64: Optional[List[str]],
         prompt_progress_callback: Optional[Callable[[float], bool]],
         generate_args: dict,
+        max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         ### TEXT-ONLY PROCESS_PROMPT ###
@@ -170,7 +171,7 @@ class ModelKit:
             )
         self._cross_prompt_cache_active = False
         input_ids, embeddings = self.vision_add_on.compute_embeddings(
-            self.model, prompt_tokens, images_b64
+            self.model, prompt_tokens, images_b64, max_size=max_image_size
         )
         return input_ids, embeddings
 

@@ -101,6 +101,7 @@ class VisionModelKit(ModelKit):
         images_b64: Optional[List[str]],
         prompt_progress_callback,
         generate_args,
+        max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
@@ -115,7 +116,7 @@ class VisionModelKit(ModelKit):
             self._reset_for_prediction()
 
         self.model.process_prompt_with_images(
-            images_b64, prompt_tokens, self.processor, self.detokenizer
+            images_b64, prompt_tokens, self.processor, self.detokenizer, max_image_size
         )
         self.has_processed_prompt = True
 

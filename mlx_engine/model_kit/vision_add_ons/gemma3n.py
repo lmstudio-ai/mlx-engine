@@ -94,6 +94,7 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
         text_model: nn.Module,
         prompt_tokens: mx.array,
         images_b64: list[str],
+        max_size: tuple[int, int] | None,
     ) -> tuple[mx.array, mx.array]:
         """Compute input_ids and embeddings for text with images."""
         input_ids, pixel_values, attention_mask, other_model_inputs = (
@@ -102,6 +103,7 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
                 images_b64=images_b64,
                 processor=self.processor,
                 config=self.config,
+                max_size=max_size,
             )
         )
         assert input_ids is not None

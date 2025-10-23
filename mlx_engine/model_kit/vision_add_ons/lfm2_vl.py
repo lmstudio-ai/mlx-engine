@@ -57,6 +57,7 @@ class LFM2VisionAddOn(BaseVisionAddOn):
         text_model: nn.Module,
         prompt_tokens: mx.array,
         images_b64: list[str],
+        max_size: tuple[int, int] | None,
     ) -> tuple[mx.array, mx.array]:
         """
         Compute embeddings for text with images.
@@ -71,6 +72,7 @@ class LFM2VisionAddOn(BaseVisionAddOn):
                 images_b64=images_b64,
                 processor=self.processor,
                 config=self.config,
+                max_size=max_size,
             )
         )
 

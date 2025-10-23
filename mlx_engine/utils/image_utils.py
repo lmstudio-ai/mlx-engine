@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def convert_to_pil(images_b64: List[str]) -> List[PIL.Image.Image]:
+def convert_to_pil(images_b64: List[str]) -> list[PIL.Image.Image]:
     """Convert a list of base64 strings to PIL Images"""
     return [
         PIL.Image.open(BytesIO(base64.b64decode(img))).convert("RGB")
@@ -15,7 +15,12 @@ def convert_to_pil(images_b64: List[str]) -> List[PIL.Image.Image]:
     ]
 
 
-def custom_resize(pil_images, max_size=(1000, 1000), should_pad=True):
+def custom_resize(
+    pil_images: list[PIL.Image.Image],
+    *,
+    max_size: tuple[int, int] | None,
+    should_pad: bool = True,
+):
     """
     Resize and optionally pad a list of PIL images.
 
@@ -26,7 +31,7 @@ def custom_resize(pil_images, max_size=(1000, 1000), should_pad=True):
     Args:
         pil_images (list): A list of PIL Image objects to be processed.
         max_size (tuple): Maximum allowed dimensions (width, height) for the images.
-                        Defaults to (1000, 1000).
+                        If None, no resizing is performed.
         should_pad (bool): Whether to pad the images to the same size.
                         Defaults to True.
 
@@ -38,6 +43,15 @@ def custom_resize(pil_images, max_size=(1000, 1000), should_pad=True):
     Side effects:
         Writes progress and status messages to sys.stderr.
     """
+    # Validate max_size parameter
+    if max_size is not None:
+        if not isinstance(max_size, tuple) or len(max_size) != 2:
+            raise ValueError(
+                "max_size must be a tuple of (width, height), e.g., (1024, 1024)"
+            )
+        if not all(isinstance(dim, int) and dim > 0 for dim in max_size):
+            raise ValueError("max_size dimensions must be positive integers")
+
     resized_images = []
     max_width, max_height = 0, 0
 
@@ -49,7 +63,9 @@ def custom_resize(pil_images, max_size=(1000, 1000), should_pad=True):
             f"Image {i + 1}: Original size {original_size}",
         )
 
-        if img.width > max_size[0] or img.height > max_size[1]:
+        if max_size is not None and (
+            img.width > max_size[0] or img.height > max_size[1]
+        ):
             if img.width > img.height:
                 new_width = max_size[0]
                 new_height = int(new_width / aspect_ratio)

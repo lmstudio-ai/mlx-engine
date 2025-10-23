@@ -51,6 +51,7 @@ class PixtralVisionAddOn(BaseVisionAddOn):
         text_model: nn.Module,
         prompt_tokens: mx.array,
         images_b64: list[str],
+        max_size: tuple[int, int] | None,
     ) -> tuple[mx.array, mx.array]:
         """Compute input_ids and embeddings for text with images."""
         input_ids, pixel_values, attention_mask, other_model_inputs = (
@@ -59,6 +60,7 @@ class PixtralVisionAddOn(BaseVisionAddOn):
                 images_b64=images_b64,
                 processor=self.processor,
                 config=self.config,
+                max_size=max_size,
             )
         )
         input_embeddings = text_model.language_model.model.embed_tokens(input_ids)
