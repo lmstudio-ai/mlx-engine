@@ -163,7 +163,7 @@ class ModelKit:
                 speculative_decoding_toggle,
                 prompt_progress_callback,
             ), None
-        ### WITH IMAGES PROMPT PROCESSING ###s
+        ### WITH IMAGES PROMPT PROCESSING ###
         if self.vision_add_on is None:
             raise ValueError(
                 "Vision add-on is not loaded, but images were provided for processing"
