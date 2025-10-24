@@ -59,6 +59,10 @@ class CacheWrapper:
         )
         self.chunk_size = chunk_size
 
+        # Vision prompt caching state
+        self.prev_images_hash: Optional[str] = None
+        self.prev_raw_prompt_tokens: Optional[List[int]] = None
+
     def _get_num_tokens_in_cache(self) -> int | None:
         """
         Get the number of tokens in the cache.
@@ -138,6 +142,7 @@ class CacheWrapper:
             )
             self.cache = make_prompt_cache(self.model, self.max_kv_size)
             self.tokens = prompt_tokens
+            self.clear_vision_cache()
             return self.tokens
         num_tokens_to_trim = num_tokens_in_cache - common_prefix
         if num_tokens_to_trim > 0:
@@ -147,6 +152,7 @@ class CacheWrapper:
                 )
                 self.cache = make_prompt_cache(self.model, self.max_kv_size)
                 self.tokens = prompt_tokens
+                self.clear_vision_cache()
                 return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
             if tokens_trimmed != num_tokens_to_trim:
@@ -156,6 +162,7 @@ class CacheWrapper:
                 )
                 self.cache = make_prompt_cache(self.model, self.max_kv_size)
                 self.tokens = prompt_tokens
+                self.clear_vision_cache()
                 return self.tokens
             logger.info(f"Trimmed {num_tokens_to_trim} tokens from the prompt cache")
 
@@ -223,6 +230,7 @@ class CacheWrapper:
                 if num_tokens_in_cache is None:
                     self.cache = make_prompt_cache(self.model, self.max_kv_size)
                     self.tokens = None
+                    self.clear_vision_cache()
                 else:
                     # Remember which tokens were processed so far, so that we can continue processing at a later point
                     self.tokens = self.tokens[:num_tokens_in_cache]
@@ -255,6 +263,7 @@ class CacheWrapper:
         # https://github.com/ml-explore/mlx-examples/blob/514502da22f0dc4c1ac439bdf78c07d5ec41acf7/llms/mlx_lm/utils.py#L381-L382
         logger.info("Clearing current prompt cache and adding draft model to the cache")
         self.tokens = None
+        self.clear_vision_cache()
         self.cache: List[Any] = make_prompt_cache(self.model)
         if draft_model is not None:
             self.cache += make_prompt_cache(draft_model)
@@ -332,3 +341,60 @@ class CacheWrapper:
         Add the generated token to the token list, so that we can map the token to the KV cache.
         """
         self.tokens = mx.concat([self.tokens, mx.array([token])])
+
+    def _compute_images_hash(self, images_b64: List[str]) -> str:
+        """Compute hash of images for cache validation."""
+        import hashlib
+
+        combined = "".join(images_b64)
+        return hashlib.sha256(combined.encode()).hexdigest()
+
+    def can_reuse_vision_cache(
+        self, images_b64: List[str], raw_prompt_tokens: List[int]
+    ) -> bool:
+        """
+        Check if we can skip expensive vision processing and reuse cached KV states.
+
+        Args:
+            images_b64: Current request's base64-encoded images
+            raw_prompt_tokens: Current request's raw prompt tokens (before vision processing)
+
+        Returns:
+            bool: True if we can skip vision processing, False otherwise
+        """
+        if self.prev_images_hash is None or self.prev_raw_prompt_tokens is None:
+            return False
+
+        # Check if images are identical
+        current_images_hash = self._compute_images_hash(images_b64)
+        if current_images_hash != self.prev_images_hash:
+            return False
+
+        # Check if current prompt extends previous prompt
+        if len(raw_prompt_tokens) <= len(self.prev_raw_prompt_tokens):
+            return False
+
+        # Check if prefix matches exactly
+        if (
+            raw_prompt_tokens[: len(self.prev_raw_prompt_tokens)]
+            != self.prev_raw_prompt_tokens
+        ):
+            return False
+
+        return True
+
+    def record_vision_state(self, images_b64: List[str], raw_prompt_tokens: List[int]):
+        """
+        Record vision processing state for future cache validation.
+
+        Args:
+            images_b64: Base64-encoded images that were processed
+            raw_prompt_tokens: Raw prompt tokens (before vision processing) that were used
+        """
+        self.prev_images_hash = self._compute_images_hash(images_b64)
+        self.prev_raw_prompt_tokens = raw_prompt_tokens
+
+    def clear_vision_cache(self):
+        """Clear vision-specific cache state."""
+        self.prev_images_hash = None
+        self.prev_raw_prompt_tokens = None
