@@ -222,12 +222,15 @@ class ModelKit:
             # Enable caching so generated tokens are recorded
             self._cross_prompt_cache_active = True
 
-            # Use cache wrapper to find common prefix and return unprocessed tokens
-            unprocessed_tokens = self.cache_wrapper.update_cache(
+            # Process like text-only: use cache wrapper to preprocess new tokens
+            unprocessed_tokens = process_prompt_text_only(
                 input_ids,
-                prompt_progress_callback,
+                self.cache_wrapper,
+                generate_args,
+                draft_model=None,  # Vision models don't support draft models
+                speculative_decoding_toggle=None,
+                prompt_progress_callback=prompt_progress_callback,
             )
-            generate_args["prompt_cache"] = self.cache_wrapper.cache
 
             # Update vision state for next request
             self.cache_wrapper.record_vision_state(images_b64, prompt_tokens_list)

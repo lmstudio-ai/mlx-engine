@@ -92,6 +92,9 @@ def setup_arg_parser():
         action="store_true",
         help="Enable printed prompt processing progress callback",
     )
+    parser.add_argument(
+        "--max-img-size", type=int, help="Downscale images to this side length (px)"
+    )
     return parser
 
 
@@ -203,22 +206,22 @@ if __name__ == "__main__":
         tf_tokenizer = AutoProcessor.from_pretrained(model_path)
         images_base64 = [image_to_base64(img_path) for img_path in args.images]
         conversation = [
-            DEFAULT_SYSTEM_PROMPT,
+            # DEFAULT_SYSTEM_PROMPT,
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompt},
                     *[
                         {"type": "image", "base64": image_b64}
                         for image_b64 in images_base64
                     ],
+                    {"type": "text", "text": prompt},
                 ],
             },
         ]
     else:
         tf_tokenizer = AutoTokenizer.from_pretrained(model_path)
         conversation = [
-            DEFAULT_SYSTEM_PROMPT,
+            # DEFAULT_SYSTEM_PROMPT,
             {"role": "user", "content": prompt},
         ]
     prompt = tf_tokenizer.apply_chat_template(
@@ -232,12 +235,15 @@ if __name__ == "__main__":
     # Initialize generation stats collector
     stats_collector = GenerationStatsCollector()
 
+    # Clamp image size
+    max_img_size = (args.max_img_size, args.max_img_size) if args.max_img_size else None
+
     # Generate the response
     generator = create_generator(
         model_kit,
         prompt_tokens,
         images_b64=images_base64,
-        max_image_size=(1024, 1024),
+        max_image_size=max_img_size,
         stop_strings=args.stop_strings,
         max_tokens=1024,
         top_logprobs=args.top_logprobs,
