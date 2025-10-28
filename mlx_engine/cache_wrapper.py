@@ -61,7 +61,7 @@ class CacheWrapper:
 
         # Vision prompt caching state
         self.prev_images_hash: Optional[str] = None
-        self.prev_raw_prompt_tokens: Optional[List[int]] = None
+        self.prev_expanded_input_ids: Optional[List[int]] = None
 
     def _get_num_tokens_in_cache(self) -> int | None:
         """
@@ -350,7 +350,7 @@ class CacheWrapper:
         return hashlib.sha256(combined.encode()).hexdigest()
 
     def can_reuse_vision_cache(
-        self, images_b64: List[str], raw_prompt_tokens: List[int]
+        self, images_b64: List[str], expanded_input_ids: List[int]
     ) -> bool:
         """
         Check if we can skip expensive vision processing and reuse cached KV states.
@@ -360,34 +360,18 @@ class CacheWrapper:
 
         Args:
             images_b64: Current request's base64-encoded images
-            raw_prompt_tokens: Current request's raw prompt tokens (before vision processing)
+            expanded_input_ids: Current request's expanded input_ids (with image tokens expanded to pad tokens)
 
         Returns:
             bool: True if we can skip vision processing, False otherwise
         """
-        if self.prev_images_hash is None or self.prev_raw_prompt_tokens is None:
+        if self.prev_images_hash is None or self.prev_expanded_input_ids is None:
             return False
 
         # Check if images are identical
         current_images_hash = self._compute_images_hash(images_b64)
         if current_images_hash != self.prev_images_hash:
             return False
-
-        # Use existing _find_common_prefix to check if one prompt is a prefix of the other
-        current_tokens = mx.array(raw_prompt_tokens)
-        prev_tokens = mx.array(self.prev_raw_prompt_tokens)
-
-        # Find common prefix length (num_tokens_to_exclude=0 since we don't need that constraint)
-        common_length = self._find_common_prefix(
-            current_tokens=prev_tokens,
-            prompt_tokens=current_tokens,
-            num_tokens_to_exclude=0,
-        )
-
-        # Check if one prompt is a complete prefix of the other
-        min_length = min(len(raw_prompt_tokens), len(self.prev_raw_prompt_tokens))
-        if common_length != min_length:
-            return False  # Not a prefix relationship
 
         # Check if cache supports required operations
         # For non-trimmable caches (like SWA), we can only reuse vision cache when extending
@@ -400,7 +384,7 @@ class CacheWrapper:
 
             # Only allow reuse for non-trimmable caches when extending the prompt
             # If not extending (same or rewinding), cache will need trimming
-            if len(raw_prompt_tokens) <= len(self.prev_raw_prompt_tokens):
+            if len(expanded_input_ids) <= len(self.prev_expanded_input_ids):
                 # Not extending - cache will need trimming (has generated tokens)
                 if num_tokens_in_cache > 0:
                     logger.info(
@@ -410,18 +394,18 @@ class CacheWrapper:
 
         return True
 
-    def record_vision_state(self, images_b64: List[str], raw_prompt_tokens: List[int]):
+    def record_vision_state(self, images_b64: List[str], expanded_input_ids: List[int]):
         """
         Record vision processing state for future cache validation.
 
         Args:
             images_b64: Base64-encoded images that were processed
-            raw_prompt_tokens: Raw prompt tokens (before vision processing) that were used
+            expanded_input_ids: Expanded input_ids (with image tokens expanded to pad tokens) that were used
         """
         self.prev_images_hash = self._compute_images_hash(images_b64)
-        self.prev_raw_prompt_tokens = raw_prompt_tokens
+        self.prev_expanded_input_ids = expanded_input_ids
 
     def clear_vision_cache(self):
         """Clear vision-specific cache state."""
         self.prev_images_hash = None
-        self.prev_raw_prompt_tokens = None
+        self.prev_expanded_input_ids = None

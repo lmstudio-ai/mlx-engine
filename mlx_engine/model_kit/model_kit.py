@@ -197,24 +197,25 @@ class ModelKit:
                 "Vision add-on is not loaded, but images were provided for processing"
             )
 
-        # Convert prompt_tokens to list for cache validation
-        prompt_tokens_list = (
-            prompt_tokens if isinstance(prompt_tokens, list) else prompt_tokens.tolist()
+        # Get expanded input_ids (cheap operation - just tokenization + prepare_inputs, no vision tower)
+        # We need this BEFORE the cache check to compare expanded tokens with what's in the cache
+        input_ids = self._get_input_ids_via_prepare_inputs(
+            prompt_tokens, images_b64, max_image_size
+        )
+
+        # Convert input_ids to list for cache validation
+        input_ids_list = (
+            input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
         )
 
         # Check if we can skip expensive vision processing
         can_skip_vision_processing = self.cache_wrapper.can_reuse_vision_cache(
-            images_b64, prompt_tokens_list
+            images_b64, input_ids_list
         )
 
         if can_skip_vision_processing:
             # CHEAP PATH: Skip vision tower, reuse cached KV states
             logger.info("Reusing cached vision features from previous request")
-
-            # Get input_ids with image tokens (cheap - just tokenization + prepare_inputs)
-            input_ids = self._get_input_ids_via_prepare_inputs(
-                prompt_tokens, images_b64, max_image_size
-            )
 
             # Process like text-only: use cache wrapper to preprocess new tokens
             unprocessed_tokens = process_prompt_text_only(
@@ -227,17 +228,23 @@ class ModelKit:
             )
 
             # Update vision state for next request
-            self.cache_wrapper.record_vision_state(images_b64, prompt_tokens_list)
+            self.cache_wrapper.record_vision_state(images_b64, input_ids_list)
 
             # Return tokens only, no embeddings (model will use text embeddings for new tokens)
             return unprocessed_tokens, None
 
+        # EXPENSIVE PATH: Full vision processing with vision tower
         input_ids, embeddings = self.vision_add_on.compute_embeddings(
             self.model, prompt_tokens, images_b64, max_size=max_image_size
         )
 
+        # Update input_ids_list in case compute_embeddings returns different input_ids
+        input_ids_list = (
+            input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
+        )
+
         # Record vision state for future requests
-        self.cache_wrapper.record_vision_state(images_b64, prompt_tokens_list)
+        self.cache_wrapper.record_vision_state(images_b64, input_ids_list)
 
         # Initialize cache tracking with the processed input_ids
         # This is critical - tells cache_wrapper what tokens are being processed
