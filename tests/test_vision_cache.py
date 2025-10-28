@@ -16,11 +16,6 @@ class TestVisionCache(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up test resources that will be shared across all test methods"""
-        cls.description_prompt = "What is this"
-        cls.text_only_prompt = "What is a toucan?"
-        cls.test_data_dir = Path(__file__).parent / "data"
-        cls.demo_data_dir = Path(__file__).parent.parent / "demo-data"
-
         # Read and encode test images
         cls.toucan_path = Path(__file__).parent.parent / "demo-data" / "toucan.jpeg"
         with open(cls.toucan_path, "rb") as image_file:
@@ -33,7 +28,6 @@ class TestVisionCache(unittest.TestCase):
                 chameleon_image_file.read()
             ).decode("utf-8")
 
-    ### MODEL-SPECIFIC TESTS ###
     def test_gemma3n(self):
         """Test LFM2-VL 450M model"""
         prompt = "<bos><start_of_turn>user\n<image_soft_token><image_soft_token>In one word each, describe the images<end_of_turn>\n<start_of_turn>model\n"
@@ -46,7 +40,14 @@ class TestVisionCache(unittest.TestCase):
             model_path=model_path, max_kv_size=2048, trust_remote_code=True
         )
 
-        def generate_text(prompt):
+        callback_history = []
+
+        def prompt_callback(x):
+            nonlocal callback_history
+            callback_history.append(x)
+            return True
+
+        def generate_text(prompt, images_b64=None):
             # Tokenize the prompt
             prompt_tokens = tokenize(model_kit, prompt)
 
@@ -55,6 +56,7 @@ class TestVisionCache(unittest.TestCase):
             for result in create_generator(
                 model_kit=model_kit,
                 prompt_tokens=prompt_tokens,
+                prompt_progress_callback=prompt_callback,
                 images_b64=[self.toucan_image_b64, self.chameleon_image_b64],
                 max_image_size=MAX_IMAGE_SIZE,
                 seed=0,
@@ -70,10 +72,23 @@ class TestVisionCache(unittest.TestCase):
             return generated_text
 
         generated_text = generate_text(prompt)
+        self.assertEqual(len(callback_history), 4)  # prompt processing by mlx-lm
+        callback_history = []
+
+        # ask a followup question
         print("--")
         prompt = (
             prompt
             + generated_text
-            + "<end_of_turn>\n<start_of_turn>user\nwhich direction is each animal facing?<end_of_turn>\n<start_of_turn>model\n"
+            + "<end_of_turn>\n<start_of_turn>user\nwhich direction is each animal facing?<end_of_turn>\n"
+            + "also, remember this information: "
+            + ", ".join([str(x) for x in range(200)])
+            + "\n"
+            + "<start_of_turn>model\n"
         )
         generated_text = generate_text(prompt)
+
+        # prompt processing by cache_wrapper. less work is done since the images are cached
+        self.assertEqual(len(callback_history), 3)
+        self.assertRegex(generated_text, "toucan.*left")
+        self.assertRegex(generated_text, "chameleon.*right")

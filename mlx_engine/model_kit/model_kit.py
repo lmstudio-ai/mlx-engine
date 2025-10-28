@@ -16,6 +16,9 @@ from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.qwen2_vl import Qwen2_VLVisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
+from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
+    common_process_prompt_with_images,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,10 +149,6 @@ class ModelKit:
         Get input_ids with image tokens inserted (cheap operation).
         Calls common_process_prompt_with_images but skips expensive vision processing.
         """
-        from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
-            common_process_prompt_with_images,
-        )
-
         # Determine should_pad based on model type
         # Qwen models need should_pad=False, others use True (default)
         should_pad = self.model_type not in ["qwen2_vl", "qwen2_5_vl"]
