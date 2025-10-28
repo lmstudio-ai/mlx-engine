@@ -355,6 +355,9 @@ class CacheWrapper:
         """
         Check if we can skip expensive vision processing and reuse cached KV states.
 
+        Supports both extending (longer prompt) and rewinding (shorter prompt)
+        as long as one prompt is a prefix of the other.
+
         Args:
             images_b64: Current request's base64-encoded images
             raw_prompt_tokens: Current request's raw prompt tokens (before vision processing)
@@ -370,18 +373,21 @@ class CacheWrapper:
         if current_images_hash != self.prev_images_hash:
             return False
 
-        # Check if current prompt extends previous prompt
-        if len(raw_prompt_tokens) <= len(self.prev_raw_prompt_tokens):
-            return False
+        # Use existing _find_common_prefix to check if one prompt is a prefix of the other
+        current_tokens = mx.array(raw_prompt_tokens)
+        prev_tokens = mx.array(self.prev_raw_prompt_tokens)
 
-        # Check if prefix matches exactly
-        if (
-            raw_prompt_tokens[: len(self.prev_raw_prompt_tokens)]
-            != self.prev_raw_prompt_tokens
-        ):
-            return False
+        # Find common prefix length (num_tokens_to_exclude=0 since we don't need that constraint)
+        common_length = self._find_common_prefix(
+            current_tokens=prev_tokens,
+            prompt_tokens=current_tokens,
+            num_tokens_to_exclude=0,
+        )
 
-        return True
+        # Can reuse if one prompt is a complete prefix of the other
+        # (common_length equals the length of the shorter prompt)
+        min_length = min(len(raw_prompt_tokens), len(self.prev_raw_prompt_tokens))
+        return common_length == min_length
 
     def record_vision_state(self, images_b64: List[str], raw_prompt_tokens: List[int]):
         """
