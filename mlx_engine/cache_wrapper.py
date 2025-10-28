@@ -22,13 +22,6 @@ class StopPromptProcessing(Exception):
     """
 
 
-class CacheNotTrimmableError(Exception):
-    """
-    Exception to signal that cache trimming is required but the cache is not trimmable.
-    Used in vision mode to signal that full reprocessing with vision add-on is needed.
-    """
-
-
 class CacheWrapper:
     """
     Wrapper class for the MLX LM cache to maintain an in-memory cache
@@ -119,30 +112,6 @@ class CacheWrapper:
         common_length = max(common_length - length_adjustment, 0)
         return common_length
 
-    def _handle_nontrimmable_cache(
-        self, num_tokens_to_trim: int, prompt_tokens: mx.array
-    ):
-        # Check if we've cached images
-        if self.prev_images_hash is not None:
-            logger.warning(
-                "Cache is not trimmable and vision processing is active. "
-                "Signaling need for full reprocessing."
-            )
-            self.cache = make_prompt_cache(self.model, self.max_kv_size)
-            self.tokens = None
-            # Don't clear vision cache - let caller handle full reprocessing
-            raise CacheNotTrimmableError()
-        else:
-            # Non-vision mode
-            logger.warning(
-                f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, "
-                f"but could not: Cache is not trimmable. Clearing the cache instead."
-            )
-            self.cache = make_prompt_cache(self.model, self.max_kv_size)
-            self.tokens = prompt_tokens
-            self.clear_vision_cache()
-            return self.tokens
-
     def _get_unprocessed_tokens(
         self, prompt_tokens: mx.array, num_tokens_to_exclude: int
     ):
@@ -178,9 +147,13 @@ class CacheWrapper:
         num_tokens_to_trim = num_tokens_in_cache - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
-                return self._handle_nontrimmable_cache(
-                    num_tokens_to_trim, prompt_tokens
+                logger.warning(
+                    f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: Cache is not trimmable. Clearing the cache instead."
                 )
+                self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                self.tokens = prompt_tokens
+                self.clear_vision_cache()
+                return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
             if tokens_trimmed != num_tokens_to_trim:
                 # If we trimmed fewer tokens than expected, the cache is invalid
@@ -383,7 +356,7 @@ class CacheWrapper:
         Check if we can skip expensive vision processing and reuse cached KV states.
 
         Supports both extending (longer prompt) and rewinding (shorter prompt)
-        as long as one prompt is a prefix of the other.
+        as long as one prompt is a prefix of the other AND cache operations are supported.
 
         Args:
             images_b64: Current request's base64-encoded images
@@ -411,10 +384,31 @@ class CacheWrapper:
             num_tokens_to_exclude=0,
         )
 
-        # Can reuse if one prompt is a complete prefix of the other
-        # (common_length equals the length of the shorter prompt)
+        # Check if one prompt is a complete prefix of the other
         min_length = min(len(raw_prompt_tokens), len(self.prev_raw_prompt_tokens))
-        return common_length == min_length
+        if common_length != min_length:
+            return False  # Not a prefix relationship
+
+        # Check if cache supports required operations
+        # For non-trimmable caches (like SWA), we can only reuse vision cache when extending
+        # (adding new tokens). If we're re-prompting with same/shorter prompt, the cache
+        # will have generated tokens that need trimming, which non-trimmable caches can't do.
+        if not can_trim_prompt_cache(self.cache):
+            num_tokens_in_cache = self._get_num_tokens_in_cache()
+            if num_tokens_in_cache is None:
+                return False  # Can't determine cache state
+
+            # Only allow reuse for non-trimmable caches when extending the prompt
+            # If not extending (same or rewinding), cache will need trimming
+            if len(raw_prompt_tokens) <= len(self.prev_raw_prompt_tokens):
+                # Not extending - cache will need trimming (has generated tokens)
+                if num_tokens_in_cache > 0:
+                    logger.info(
+                        "Cannot reuse vision cache: cache is not trimmable and would require trimming"
+                    )
+                    return False
+
+        return True
 
     def record_vision_state(self, images_b64: List[str], raw_prompt_tokens: List[int]):
         """

@@ -2,7 +2,7 @@ import json
 from typing import Callable, Optional, List, Tuple
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
-from mlx_engine.cache_wrapper import CacheWrapper, CacheNotTrimmableError
+from mlx_engine.cache_wrapper import CacheWrapper
 from pathlib import Path
 import mlx.nn as nn
 import mlx.core as mx
@@ -208,36 +208,29 @@ class ModelKit:
         )
 
         if can_skip_vision_processing:
-            try:
-                # CHEAP PATH: Skip vision tower, reuse cached KV states
+            # CHEAP PATH: Skip vision tower, reuse cached KV states
+            logger.info("Reusing cached vision features from previous request")
 
-                # Get input_ids with image tokens
-                input_ids = self._get_input_ids_via_prepare_inputs(
-                    prompt_tokens, images_b64, max_image_size
-                )
+            # Get input_ids with image tokens (cheap - just tokenization + prepare_inputs)
+            input_ids = self._get_input_ids_via_prepare_inputs(
+                prompt_tokens, images_b64, max_image_size
+            )
 
-                # Process like text-only: use cache wrapper to preprocess new tokens
-                unprocessed_tokens = process_prompt_text_only(
-                    input_ids,
-                    self.cache_wrapper,
-                    generate_args,
-                    draft_model=None,  # Vision models don't support draft models
-                    speculative_decoding_toggle=None,
-                    prompt_progress_callback=prompt_progress_callback,
-                )
+            # Process like text-only: use cache wrapper to preprocess new tokens
+            unprocessed_tokens = process_prompt_text_only(
+                input_ids,
+                self.cache_wrapper,
+                generate_args,
+                draft_model=None,  # Vision models don't support draft models
+                speculative_decoding_toggle=None,
+                prompt_progress_callback=prompt_progress_callback,
+            )
 
-                # Update vision state for next request
-                self.cache_wrapper.record_vision_state(images_b64, prompt_tokens_list)
+            # Update vision state for next request
+            self.cache_wrapper.record_vision_state(images_b64, prompt_tokens_list)
 
-                # Return tokens only, no embeddings (model will use text embeddings for new tokens)
-                return unprocessed_tokens, None
-
-            except CacheNotTrimmableError:
-                pass
-                # Fall through to expensive path below
-
-        # EXPENSIVE PATH: Full vision processing (first request or images changed)
-        logger.info("Performing full vision processing with images")
+            # Return tokens only, no embeddings (model will use text embeddings for new tokens)
+            return unprocessed_tokens, None
 
         input_ids, embeddings = self.vision_add_on.compute_embeddings(
             self.model, prompt_tokens, images_b64, max_size=max_image_size
