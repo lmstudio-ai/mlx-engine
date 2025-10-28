@@ -22,6 +22,13 @@ class StopPromptProcessing(Exception):
     """
 
 
+class CacheNotTrimmableError(Exception):
+    """
+    Exception to signal that cache trimming is required but the cache is not trimmable.
+    Used in vision mode to signal that full reprocessing with vision add-on is needed.
+    """
+
+
 class CacheWrapper:
     """
     Wrapper class for the MLX LM cache to maintain an in-memory cache
@@ -112,6 +119,30 @@ class CacheWrapper:
         common_length = max(common_length - length_adjustment, 0)
         return common_length
 
+    def _handle_nontrimmable_cache(
+        self, num_tokens_to_trim: int, prompt_tokens: mx.array
+    ):
+        # Check if we've cached images
+        if self.prev_images_hash is not None:
+            logger.warning(
+                "Cache is not trimmable and vision processing is active. "
+                "Signaling need for full reprocessing."
+            )
+            self.cache = make_prompt_cache(self.model, self.max_kv_size)
+            self.tokens = None
+            # Don't clear vision cache - let caller handle full reprocessing
+            raise CacheNotTrimmableError()
+        else:
+            # Non-vision mode
+            logger.warning(
+                f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, "
+                f"but could not: Cache is not trimmable. Clearing the cache instead."
+            )
+            self.cache = make_prompt_cache(self.model, self.max_kv_size)
+            self.tokens = prompt_tokens
+            self.clear_vision_cache()
+            return self.tokens
+
     def _get_unprocessed_tokens(
         self, prompt_tokens: mx.array, num_tokens_to_exclude: int
     ):
@@ -147,13 +178,9 @@ class CacheWrapper:
         num_tokens_to_trim = num_tokens_in_cache - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
-                logger.warning(
-                    f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: Cache is not trimmable. Clearing the cache instead."
+                return self._handle_nontrimmable_cache(
+                    num_tokens_to_trim, prompt_tokens
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
-                self.tokens = prompt_tokens
-                self.clear_vision_cache()
-                return self.tokens
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
             if tokens_trimmed != num_tokens_to_trim:
                 # If we trimmed fewer tokens than expected, the cache is invalid
