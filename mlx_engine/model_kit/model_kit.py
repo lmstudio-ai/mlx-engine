@@ -54,7 +54,6 @@ class ModelKit:
     tokenizer: TokenizerWrapper = None
     detokenizer: StreamingDetokenizer = None
     cache_wrapper: Optional[CacheWrapper] = None
-    _cross_prompt_cache_active: bool = False
     max_kv_size: Optional[int] = None
     kv_bits: Optional[int] = None
     kv_group_size: Optional[int] = None
@@ -178,7 +177,6 @@ class ModelKit:
         ### TEXT-ONLY PROCESS_PROMPT ###
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
         if is_text_only_processing:
-            self._cross_prompt_cache_active = True
             if len(prompt_tokens) == 0:
                 logger.warning(
                     "Received empty prompt. Generation quality will likely be poor"
@@ -218,9 +216,6 @@ class ModelKit:
                 prompt_tokens, images_b64, max_image_size
             )
 
-            # Enable caching so generated tokens are recorded
-            self._cross_prompt_cache_active = True
-
             # Process like text-only: use cache wrapper to preprocess new tokens
             unprocessed_tokens = process_prompt_text_only(
                 input_ids,
@@ -244,9 +239,6 @@ class ModelKit:
                 self.model, prompt_tokens, images_b64, max_size=max_image_size
             )
 
-            # Enable caching - we want generated tokens recorded for future requests
-            self._cross_prompt_cache_active = True
-
             # Record vision state for future requests
             self.cache_wrapper.record_vision_state(images_b64, prompt_tokens_list)
 
@@ -263,8 +255,11 @@ class ModelKit:
         """
         Check if cross-prompt caching is currently enabled.
         Can be overridden by subclasses for custom behavior.
+
+        ModelKit always supports cross-prompt caching.
+        VisionModelKit overrides this to return False.
         """
-        return self._cross_prompt_cache_active
+        return True
 
     def record_token_to_cache(self, token: int) -> None:
         self.cache_wrapper.record_generated_token(token)
