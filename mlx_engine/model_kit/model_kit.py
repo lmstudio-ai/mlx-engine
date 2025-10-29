@@ -105,10 +105,7 @@ class ModelKit:
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
         vision_add_on_class = self.VISION_ADD_ON_MAP.get(self.model_type)
-        should_load_vision_add_on = (
-            vision_add_on_class is not None and "vision_config" in config_json
-        )
-        if should_load_vision_add_on:
+        if vision_add_on_class and "vision_config" in config_json:
             self.vision_add_on = vision_add_on_class(model_path)
         logger.info("Model loaded successfully")
 
