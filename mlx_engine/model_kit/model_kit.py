@@ -15,6 +15,9 @@ from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
+from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
+    common_process_prompt_with_images,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,6 @@ class ModelKit:
     tokenizer: TokenizerWrapper = None
     detokenizer: StreamingDetokenizer = None
     cache_wrapper: Optional[CacheWrapper] = None
-    _cross_prompt_cache_active: bool = False
     max_kv_size: Optional[int] = None
     kv_bits: Optional[int] = None
     kv_group_size: Optional[int] = None
@@ -102,10 +104,7 @@ class ModelKit:
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
         vision_add_on_class = self.VISION_ADD_ON_MAP.get(self.model_type)
-        should_load_vision_add_on = (
-            vision_add_on_class is not None and "vision_config" in config_json
-        )
-        if should_load_vision_add_on:
+        if vision_add_on_class and "vision_config" in config_json:
             self.vision_add_on = vision_add_on_class(model_path)
         logger.info("Model loaded successfully")
 
@@ -135,19 +134,45 @@ class ModelKit:
             return [ids]
         return ids
 
+    def _get_input_ids_via_prepare_inputs(
+        self,
+        prompt_tokens: mx.array,
+        images_b64: list[str],
+        max_image_size: tuple[int, int] | None,
+    ) -> mx.array:
+        """
+        Get input_ids with image tokens inserted (cheap operation).
+        Calls common_process_prompt_with_images but skips expensive vision processing.
+        """
+        # Determine should_pad based on model type
+        # Qwen models need should_pad=False, others use True (default)
+        should_pad = self.model_type not in ["qwen2_vl", "qwen2_5_vl"]
+
+        processed = common_process_prompt_with_images(
+            prompt_tokens=prompt_tokens,
+            images_b64=images_b64,
+            processor=self.vision_add_on.processor,
+            config=self.vision_add_on.config,
+            max_size=max_image_size,
+            should_pad=should_pad,
+        )
+
+        # Return input_ids, squeeze batch dimension if present
+        input_ids = processed.input_ids
+        return input_ids.squeeze(0) if input_ids.ndim > 1 else input_ids
+
     def process_prompt(
         self,
         prompt_tokens,
-        images_b64: Optional[List[str]],
+        images_b64: list[str],
         prompt_progress_callback: Optional[Callable[[float], bool]],
         generate_args: dict,
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         ### TEXT-ONLY PROCESS_PROMPT ###
-        is_text_only_processing = images_b64 is None or len(images_b64) == 0
+        is_text_only_processing = len(images_b64) == 0
         if is_text_only_processing:
-            self._cross_prompt_cache_active = True
             if len(prompt_tokens) == 0:
                 logger.warning(
                     "Received empty prompt. Generation quality will likely be poor"
@@ -162,23 +187,62 @@ class ModelKit:
                 speculative_decoding_toggle,
                 prompt_progress_callback,
             ), None
-        ### WITH IMAGES PROMPT PROCESSING ###s
+        ### WITH IMAGES PROMPT PROCESSING ###
         if self.vision_add_on is None:
             raise ValueError(
                 "Vision add-on is not loaded, but images were provided for processing"
             )
-        self._cross_prompt_cache_active = False
+
+        # Get expanded input_ids, which add image pad tokens to the prompt
+        input_ids = self._get_input_ids_via_prepare_inputs(
+            prompt_tokens, images_b64, max_image_size
+        )
+
+        # Check if we can skip expensive vision processing
+        can_skip_vision_processing = self.cache_wrapper.can_reuse_vision_cache(
+            images_b64, input_ids
+        )
+
+        if can_skip_vision_processing:
+            # Skip vision tower, reuse cached KV states
+            unprocessed_tokens = process_prompt_text_only(
+                input_ids,
+                self.cache_wrapper,
+                generate_args,
+                draft_model=None,  # Vision models don't support draft models
+                speculative_decoding_toggle=None,
+                prompt_progress_callback=prompt_progress_callback,
+            )
+
+            # Update vision state for next request
+            self.cache_wrapper.record_vision_state(images_b64, input_ids)
+
+            return unprocessed_tokens, None
+
+        # Full vision processing
         input_ids, embeddings = self.vision_add_on.compute_embeddings(
             self.model, prompt_tokens, images_b64, max_size=max_image_size
         )
+
+        # Record vision state for future requests
+        self.cache_wrapper.record_vision_state(images_b64, input_ids)
+
+        # Set the tokens to the full expanded input_ids
+        self.cache_wrapper.set_vision_tokens(input_ids)
+
+        generate_args["prompt_cache"] = self.cache_wrapper.cache
+
         return input_ids, embeddings
 
     def is_cross_prompt_cache_active(self) -> bool:
         """
         Check if cross-prompt caching is currently enabled.
         Can be overridden by subclasses for custom behavior.
+
+        ModelKit always supports cross-prompt caching.
+        VisionModelKit overrides this to return False.
         """
-        return self._cross_prompt_cache_active
+        return True
 
     def record_token_to_cache(self, token: int) -> None:
         self.cache_wrapper.record_generated_token(token)

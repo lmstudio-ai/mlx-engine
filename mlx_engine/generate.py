@@ -208,6 +208,7 @@ def create_generator(
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
     set_seed(seed)
+    images_b64 = [] if images_b64 is None else images_b64
 
     generate_args = {}
     # For each call to create_generator, wrap all prompt progress calls with a ratchet that
