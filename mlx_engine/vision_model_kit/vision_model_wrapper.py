@@ -110,11 +110,6 @@ class VisionModelWrapper:
                     "decoder_input_ids": self.decoder_input_ids,
                     "encoder_outputs": outputs.encoder_outputs,
                 }
-            # elif self.vision_model.config.model_type == "qwen3_vl":
-            #     self.language_model_kwargs = {
-            #         "visual_pos_masks": outputs.visual_pos_masks,
-            #         "deepstack_visual_embeds": outputs.deepstack_visual_embeds,
-            #     }
 
             # Add the cache we created here to the language model kwargs
             self.language_model_kwargs["cache"] = cache

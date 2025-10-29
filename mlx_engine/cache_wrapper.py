@@ -373,9 +373,6 @@ class CacheWrapper:
             if len(expanded_input_ids) <= len(self.prev_expanded_input_ids):
                 # Not extending - cache will need trimming (has generated tokens)
                 if num_tokens_in_cache > 0:
-                    logger.info(
-                        "Cannot reuse vision cache: cache is not trimmable and would require trimming"
-                    )
                     return False
 
         return True
