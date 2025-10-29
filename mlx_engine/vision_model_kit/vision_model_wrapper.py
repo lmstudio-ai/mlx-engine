@@ -2,7 +2,6 @@ import mlx.core as mx
 import logging
 
 from mlx_vlm.models.cache import KVCache, SimpleKVCache
-from typing import List, Optional
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
@@ -158,7 +157,7 @@ class VisionModelWrapper:
 
     def process_prompt_with_images(
         self,
-        images_b64: Optional[List[str]],
+        images_b64: list[str],
         prompt_tokens: mx.array,
         processor,
         detokenizer,
@@ -168,9 +167,6 @@ class VisionModelWrapper:
         This method generates the input_ids, pixel_values, and mask for the vision model
         Call this before starting evaluation
         """
-        if images_b64 is None:
-            images_b64 = []
-
         # Handle the case with no images
         if len(images_b64) == 0:
             detokenizer.reset()

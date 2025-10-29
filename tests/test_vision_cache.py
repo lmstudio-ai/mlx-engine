@@ -31,7 +31,7 @@ class TestVisionCache(unittest.TestCase):
     @pytest.mark.heavy
     def test_nonswa_model(self):
         """
-        Test that image caching works for models without a SWA cache
+        Test that image caching works for models without SWA (sliding window attn) layers
         """
         prompt = "<s>[INST][IMG][IMG]In one word each, describe the animal in the images[/INST]\n"
         model_name = "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit"
@@ -114,7 +114,7 @@ class TestVisionCache(unittest.TestCase):
 
     def test_swa_model(self):
         """
-        Test that image caching works for models with a SWA cache
+        Test that image caching works for models with SWA layers
         """
         prompt = "<bos><start_of_turn>user\n<image_soft_token><image_soft_token>In one word each, describe the images<end_of_turn>\n<start_of_turn>model\n"
         model_name = "lmstudio-community/gemma-3n-E2B-it-MLX-4bit"
@@ -164,7 +164,6 @@ class TestVisionCache(unittest.TestCase):
         self.assertEqual(len(callback_history), 4)  # prompt processing by mlx-lm
 
         # ask a followup question
-        print("--")
         prompt2 = (
             prompt
             + generated_text

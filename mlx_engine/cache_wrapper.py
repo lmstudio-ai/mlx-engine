@@ -9,6 +9,7 @@ from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
+import hashlib
 
 
 PROMPT_PROCESSING_CHUNK_SIZE = 512
@@ -140,30 +141,21 @@ class CacheWrapper:
             logger.warning(
                 "Could not determine the number of tokens in the cache, clearing the cache."
             )
-            self.cache = make_prompt_cache(self.model, self.max_kv_size)
-            self.tokens = prompt_tokens
-            self.clear_vision_cache()
-            return self.tokens
+            return self._reset_cache(prompt_tokens)
         num_tokens_to_trim = num_tokens_in_cache - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
                 logger.warning(
                     f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: Cache is not trimmable. Clearing the cache instead."
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
-                self.tokens = prompt_tokens
-                self.clear_vision_cache()
-                return self.tokens
+                return self._reset_cache(prompt_tokens)
             tokens_trimmed = trim_prompt_cache(self.cache, num_tokens_to_trim)
             if tokens_trimmed != num_tokens_to_trim:
                 # If we trimmed fewer tokens than expected, the cache is invalid
                 logger.error(
                     f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected ({num_tokens_to_trim}). Clearing the cache."
                 )
-                self.cache = make_prompt_cache(self.model, self.max_kv_size)
-                self.tokens = prompt_tokens
-                self.clear_vision_cache()
-                return self.tokens
+                return self._reset_cache(prompt_tokens)
             logger.info(f"Trimmed {num_tokens_to_trim} tokens from the prompt cache")
 
         # Keep track of the prompt tokens
@@ -228,9 +220,7 @@ class CacheWrapper:
                     )
                     num_tokens_in_cache = None
                 if num_tokens_in_cache is None:
-                    self.cache = make_prompt_cache(self.model, self.max_kv_size)
-                    self.tokens = None
-                    self.clear_vision_cache()
+                    self._reset_cache()
                 else:
                     # Remember which tokens were processed so far, so that we can continue processing at a later point
                     self.tokens = self.tokens[:num_tokens_in_cache]
@@ -262,9 +252,7 @@ class CacheWrapper:
         # clear the current cache, append draft model cache to the end of the main model cache as per
         # https://github.com/ml-explore/mlx-examples/blob/514502da22f0dc4c1ac439bdf78c07d5ec41acf7/llms/mlx_lm/utils.py#L381-L382
         logger.info("Clearing current prompt cache and adding draft model to the cache")
-        self.tokens = None
-        self.clear_vision_cache()
-        self.cache: List[Any] = make_prompt_cache(self.model)
+        self._reset_cache(use_max_kv_size=False)
         if draft_model is not None:
             self.cache += make_prompt_cache(draft_model)
         self.draft_model = draft_model
@@ -344,8 +332,6 @@ class CacheWrapper:
 
     def _compute_images_hash(self, images_b64: List[str]) -> str:
         """Compute hash of images for cache validation."""
-        import hashlib
-
         combined = "".join(images_b64)
         return hashlib.sha256(combined.encode()).hexdigest()
 
@@ -404,6 +390,39 @@ class CacheWrapper:
         """
         self.prev_images_hash = self._compute_images_hash(images_b64)
         self.prev_expanded_input_ids = expanded_input_ids
+
+    def set_vision_tokens(self, input_ids: mx.array):
+        """
+        Set the token state after vision processing.
+
+        This is used after vision tower processing where embeddings have been computed
+        and the full expanded input_ids should be tracked in the cache.
+
+        Args:
+            input_ids: The full expanded input_ids (with image tokens expanded to pad tokens)
+        """
+        self.tokens = input_ids
+
+    def _reset_cache(
+        self, tokens: Optional[mx.array] = None, use_max_kv_size: bool = True
+    ) -> Optional[mx.array]:
+        """
+        Reset the cache to a fresh state.
+
+        Args:
+            tokens: The tokens to set (or None to clear)
+            use_max_kv_size: Whether to pass max_kv_size to make_prompt_cache
+
+        Returns:
+            The tokens that were set
+        """
+        if use_max_kv_size:
+            self.cache = make_prompt_cache(self.model, self.max_kv_size)
+        else:
+            self.cache = make_prompt_cache(self.model)
+        self.tokens = tokens
+        self.clear_vision_cache()
+        return self.tokens
 
     def clear_vision_cache(self):
         """Clear vision-specific cache state."""

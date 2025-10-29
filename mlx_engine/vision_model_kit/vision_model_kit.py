@@ -1,4 +1,4 @@
-from typing import Union, Optional, List, Tuple
+from typing import Union, Optional, Tuple
 from mlx_engine.model_kit.model_kit import ModelKit
 import logging
 
@@ -98,7 +98,7 @@ class VisionModelKit(ModelKit):
     def process_prompt(
         self,
         prompt_tokens,
-        images_b64: Optional[List[str]],
+        images_b64: list[str],
         prompt_progress_callback,
         generate_args,
         max_image_size: tuple[int, int] | None,
@@ -122,7 +122,7 @@ class VisionModelKit(ModelKit):
 
         # The VLM input_ids shape is important, but mlx_lm expects a flattened array
         #   Send back a fake shape and input_ids, and save the real shape in `self.model.input_ids`
-        if images_b64 is None or len(images_b64) == 0:
+        if len(images_b64) == 0:
             # For text-only, enable mlx-lm prompt processing
             return self.model.input_ids.reshape(-1), None
         # Disable mlx-lm prompt processing by returning a fake input

@@ -141,7 +141,7 @@ class ModelKit:
     def _get_input_ids_via_prepare_inputs(
         self,
         prompt_tokens: mx.array,
-        images_b64: List[str],
+        images_b64: list[str],
         max_image_size: tuple[int, int] | None,
     ) -> mx.array:
         """
@@ -168,14 +168,14 @@ class ModelKit:
     def process_prompt(
         self,
         prompt_tokens,
-        images_b64: Optional[List[str]],
+        images_b64: list[str],
         prompt_progress_callback: Optional[Callable[[float], bool]],
         generate_args: dict,
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         ### TEXT-ONLY PROCESS_PROMPT ###
-        is_text_only_processing = images_b64 is None or len(images_b64) == 0
+        is_text_only_processing = len(images_b64) == 0
         if is_text_only_processing:
             if len(prompt_tokens) == 0:
                 logger.warning(
@@ -197,8 +197,7 @@ class ModelKit:
                 "Vision add-on is not loaded, but images were provided for processing"
             )
 
-        # Get expanded input_ids (cheap operation - just tokenization + prepare_inputs, no vision tower)
-        # We need this BEFORE the cache check to compare expanded tokens with what's in the cache
+        # Get expanded input_ids, which add image pad tokens to the prompt
         input_ids = self._get_input_ids_via_prepare_inputs(
             prompt_tokens, images_b64, max_image_size
         )
@@ -209,10 +208,7 @@ class ModelKit:
         )
 
         if can_skip_vision_processing:
-            # CHEAP PATH: Skip vision tower, reuse cached KV states
-            logger.info("Reusing cached vision features from previous request")
-
-            # Process like text-only: use cache wrapper to preprocess new tokens
+            # Skip vision tower, reuse cached KV states
             unprocessed_tokens = process_prompt_text_only(
                 input_ids,
                 self.cache_wrapper,
@@ -225,10 +221,9 @@ class ModelKit:
             # Update vision state for next request
             self.cache_wrapper.record_vision_state(images_b64, input_ids)
 
-            # Return tokens only, no embeddings (model will use text embeddings for new tokens)
             return unprocessed_tokens, None
 
-        # EXPENSIVE PATH: Full vision processing with vision tower
+        # Full vision processing
         input_ids, embeddings = self.vision_add_on.compute_embeddings(
             self.model, prompt_tokens, images_b64, max_size=max_image_size
         )
@@ -236,11 +231,9 @@ class ModelKit:
         # Record vision state for future requests
         self.cache_wrapper.record_vision_state(images_b64, input_ids)
 
-        # Initialize cache tracking with the processed input_ids
-        # This is critical - tells cache_wrapper what tokens are being processed
-        self.cache_wrapper.tokens = input_ids
+        # Set the tokens to the full expanded input_ids
+        self.cache_wrapper.set_vision_tokens(input_ids)
 
-        # Set prompt_cache for generation (fixes missing cache usage in vision path!)
         generate_args["prompt_cache"] = self.cache_wrapper.cache
 
         return input_ids, embeddings
