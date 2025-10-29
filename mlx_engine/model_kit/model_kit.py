@@ -203,14 +203,9 @@ class ModelKit:
             prompt_tokens, images_b64, max_image_size
         )
 
-        # Convert input_ids to list for cache validation
-        input_ids_list = (
-            input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
-        )
-
         # Check if we can skip expensive vision processing
         can_skip_vision_processing = self.cache_wrapper.can_reuse_vision_cache(
-            images_b64, input_ids_list
+            images_b64, input_ids
         )
 
         if can_skip_vision_processing:
@@ -228,7 +223,7 @@ class ModelKit:
             )
 
             # Update vision state for next request
-            self.cache_wrapper.record_vision_state(images_b64, input_ids_list)
+            self.cache_wrapper.record_vision_state(images_b64, input_ids)
 
             # Return tokens only, no embeddings (model will use text embeddings for new tokens)
             return unprocessed_tokens, None
@@ -238,13 +233,8 @@ class ModelKit:
             self.model, prompt_tokens, images_b64, max_size=max_image_size
         )
 
-        # Update input_ids_list in case compute_embeddings returns different input_ids
-        input_ids_list = (
-            input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
-        )
-
         # Record vision state for future requests
-        self.cache_wrapper.record_vision_state(images_b64, input_ids_list)
+        self.cache_wrapper.record_vision_state(images_b64, input_ids)
 
         # Initialize cache tracking with the processed input_ids
         # This is critical - tells cache_wrapper what tokens are being processed

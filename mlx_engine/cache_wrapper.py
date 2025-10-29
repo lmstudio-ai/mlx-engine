@@ -61,7 +61,7 @@ class CacheWrapper:
 
         # Vision prompt caching state
         self.prev_images_hash: Optional[str] = None
-        self.prev_expanded_input_ids: Optional[List[int]] = None
+        self.prev_expanded_input_ids: Optional[mx.array] = None
 
     def _get_num_tokens_in_cache(self) -> int | None:
         """
@@ -350,7 +350,7 @@ class CacheWrapper:
         return hashlib.sha256(combined.encode()).hexdigest()
 
     def can_reuse_vision_cache(
-        self, images_b64: List[str], expanded_input_ids: List[int]
+        self, images_b64: List[str], expanded_input_ids: mx.array
     ) -> bool:
         """
         Check if we can skip expensive vision processing and reuse cached KV states.
@@ -394,7 +394,7 @@ class CacheWrapper:
 
         return True
 
-    def record_vision_state(self, images_b64: List[str], expanded_input_ids: List[int]):
+    def record_vision_state(self, images_b64: List[str], expanded_input_ids: mx.array):
         """
         Record vision processing state for future cache validation.
 
