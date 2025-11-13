@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from mlx_engine.utils.disable_hf_download import _original_snapshot_download
-from mlx_lm.tokenizer_utils import load_tokenizer
+import mlx_lm
 
 from mlx_engine.stop_string_processor import StopStringProcessor
 
@@ -31,7 +31,7 @@ class TestStopStringProcessor(unittest.TestCase):
                 ],
             )
         )
-        return load_tokenizer(path)
+        return mlx_lm.tokenizer_utils.load(path)
 
     def process_tokens(self, stop_strings, input_string):
         """Helper method to process tokens and collect results"""

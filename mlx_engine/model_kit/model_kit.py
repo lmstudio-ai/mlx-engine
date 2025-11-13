@@ -63,7 +63,7 @@ class ModelKit:
 
     def _vocab_only_init(self, model_path: Path):
         logger.info(f"Loading model (vocab-only) from {model_path}...")
-        self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(model_path)
+        self.tokenizer = mlx_lm.tokenizer_utils.load(model_path)
         self.detokenizer = self.tokenizer.detokenizer
         logger.info("Model (vocab-only) loaded successfully")
 
@@ -206,7 +206,7 @@ class ModelKit:
         if self.vision_add_on is not None:
             logger.warning("Draft models are currently unsupported for vision models")
             return False
-        draft_tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(path)
+        draft_tokenizer = mlx_lm.tokenizer_utils.load(path)
         if draft_tokenizer.vocab_size != self.tokenizer.vocab_size:
             return False
         return True
