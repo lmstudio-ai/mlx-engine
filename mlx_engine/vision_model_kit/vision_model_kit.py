@@ -76,7 +76,7 @@ class VisionModelKit(ModelKit):
             logger.info(f"Setting eos token ids: {eos_token_ids}")
 
         # Use the mlx_lm tokenizer since it's more robust
-        self.tokenizer = mlx_lm.tokenizer_utils.load_tokenizer(
+        self.tokenizer = mlx_lm.tokenizer_utils.load(
             self.model_path, eos_token_ids=eos_token_ids
         )
         self.detokenizer = self.tokenizer.detokenizer
