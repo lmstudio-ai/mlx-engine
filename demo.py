@@ -206,7 +206,7 @@ if __name__ == "__main__":
         tf_tokenizer = AutoProcessor.from_pretrained(model_path)
         images_base64 = [image_to_base64(img_path) for img_path in args.images]
         conversation = [
-            DEFAULT_SYSTEM_PROMPT,
+            # DEFAULT_SYSTEM_PROMPT,
             {
                 "role": "user",
                 "content": [
@@ -221,7 +221,7 @@ if __name__ == "__main__":
     else:
         tf_tokenizer = AutoTokenizer.from_pretrained(model_path)
         conversation = [
-            DEFAULT_SYSTEM_PROMPT,
+            # DEFAULT_SYSTEM_PROMPT,
             {"role": "user", "content": prompt},
         ]
     prompt = tf_tokenizer.apply_chat_template(
