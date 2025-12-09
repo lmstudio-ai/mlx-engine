@@ -1,23 +1,30 @@
 import logging
 from pathlib import Path
 
-from mlx import nn
 import mlx.core as mx
-
+from mlx import nn
+from mlx_vlm.models.gemma3 import (
+    Model as Gemma3CombinedModel,  # for prepare_inputs_for_multimodal
+)
+from mlx_vlm.models.gemma3 import (
+    ModelConfig as Gemma3ModelConfig,
+)
+from mlx_vlm.models.gemma3 import (
+    TextConfig as Gemma3TextConfig,
+)
+from mlx_vlm.models.gemma3 import (
+    VisionConfig as Gemma3VisionConfig,
+)
 from mlx_vlm.models.gemma3 import (
     VisionModel as Gemma3VisionTower,
-    ModelConfig as Gemma3ModelConfig,
-    VisionConfig as Gemma3VisionConfig,
-    TextConfig as Gemma3TextConfig,
-    Model as Gemma3CombinedModel,  # for prepare_inputs_for_multimodal
 )
 from mlx_vlm.models.gemma3.gemma3 import Gemma3MultiModalProjector
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
-from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
 logger = logging.getLogger(__name__)
 

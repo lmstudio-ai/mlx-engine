@@ -1,6 +1,19 @@
 """PyTorch LFM2-VL model."""
 
-import torch
+try:
+    import torch
+
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+    # Create a minimal torch mock for type hints
+    class _MockTorch:
+        class bfloat16:
+            pass
+
+    torch = _MockTorch()
+
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.lfm2.configuration_lfm2 import Lfm2Config
@@ -89,7 +102,7 @@ class Lfm2VlConfig(PretrainedConfig):
         tile_size=512,
         max_pixels_tolerance=2.0,
         use_thumbnail=True,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16 if HAS_TORCH else None,
         **kwargs,
     ):
         self.vision_config = vision_config

@@ -6,7 +6,13 @@ import os
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
+from mlx_engine.utils.hardware import get_optimal_profile, PerformanceProfileEnum
 from transformers import AutoTokenizer, AutoProcessor
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
 DEFAULT_TEMP = 0.8
@@ -17,7 +23,25 @@ DEFAULT_SYSTEM_PROMPT = {"role": "system", "content": "You are a helpful assista
 def setup_arg_parser():
     """Set up and return the argument parser."""
     parser = argparse.ArgumentParser(
-        description="LM Studio mlx-engine inference script"
+        description="LM Studio mlx-engine inference script",
+        epilog="""
+Examples:
+  # Basic usage with auto performance profile
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+
+  # High-performance mode for M3 Ultra with 512GB RAM
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \\
+    --profile m3_ultra_512 --prefill-mode unbounded
+
+  # Adaptive chunking with custom progress interval
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \\
+    --profile m3_max_128 --adaptive-chunk --progress-interval-ms 500
+
+  # Branching cache with performance optimization
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \\
+    --kv-branching --cache-slots 8 --profile m3_ultra_256
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--model",
@@ -95,6 +119,77 @@ def setup_arg_parser():
     parser.add_argument(
         "--max-img-size", type=int, help="Downscale images to this side length (px)"
     )
+    parser.add_argument(
+        "--enable-branching",
+        action="store_true",
+        help="Enable branching cache support for O(1) branch switching",
+    )
+    parser.add_argument(
+        "--cache-slots",
+        type=int,
+        default=4,
+        help="Number of cache slots for branching (default: 4)",
+    )
+    parser.add_argument(
+        "--checkpoint-branch",
+        type=str,
+        help="Branch ID to checkpoint after generation",
+    )
+    parser.add_argument(
+        "--restore-branch",
+        type=str,
+        help="Branch ID to restore before generation",
+    )
+    parser.add_argument(
+        "--release-branch",
+        type=str,
+        help="Branch ID to release before generation",
+    )
+    parser.add_argument(
+        "--pin-branch",
+        type=str,
+        help="Branch ID to pin before generation",
+    )
+
+    # Performance optimization arguments
+    performance_group = parser.add_argument_group(
+        "Performance Optimization",
+        "Flags for optimizing performance on high-bandwidth Apple Silicon",
+    )
+    performance_group.add_argument(
+        "--profile",
+        choices=["auto", "default_safe", "m3_ultra_512", "m3_max_128", "m3_pro_64"],
+        default="auto",
+        help="Performance profile for hardware optimization (default: auto)",
+    )
+    performance_group.add_argument(
+        "--prefill-mode",
+        choices=["auto", "unbounded", "chunked"],
+        default="auto",
+        help="Prefill strategy mode (default: auto)",
+    )
+    performance_group.add_argument(
+        "--adaptive-chunk",
+        action="store_true",
+        help="Enable adaptive chunk sizing for memory-efficient prefill",
+    )
+    performance_group.add_argument(
+        "--kv-branching",
+        action="store_true",
+        help="Alias for --enable-branching (O(1) branch switching)",
+    )
+    performance_group.add_argument(
+        "--progress-interval-ms",
+        type=int,
+        default=1000,
+        help="Progress update interval in milliseconds (default: 1000)",
+    )
+    performance_group.add_argument(
+        "--max-prefill-tokens",
+        type=int,
+        help="Maximum tokens per prefill pass (profile-dependent if not specified)",
+    )
+
     return parser
 
 
@@ -126,7 +221,11 @@ class GenerationStatsCollector:
         """Print generation statistics."""
         end_time = time.time()
         total_time = end_time - self.start_time
-        time_to_first_token = self.first_token_time - self.start_time
+        time_to_first_token = (
+            (self.first_token_time - self.start_time)
+            if self.first_token_time is not None
+            else 0
+        )
         effective_time = total_time - time_to_first_token
         tokens_per_second = (
             self.total_tokens / effective_time if effective_time > 0 else float("inf")
@@ -238,6 +337,34 @@ if __name__ == "__main__":
     # Clamp image size
     max_img_size = (args.max_img_size, args.max_img_size) if args.max_img_size else None
 
+    # Handle performance profile and prefill configuration
+    # Convert profile string to enum if not auto
+    performance_profile = None
+    if args.profile != "auto":
+        try:
+            profile_map = {
+                "default_safe": PerformanceProfileEnum.DEFAULT_SAFE,
+                "m3_ultra_512": PerformanceProfileEnum.M3_ULTRA_512,
+                "m3_max_128": PerformanceProfileEnum.M3_MAX_128,
+                "m3_pro_64": PerformanceProfileEnum.M3_PRO_64,
+            }
+            performance_profile = profile_map[args.profile]
+        except KeyError:
+            raise ValueError(f"Invalid profile: {args.profile}")
+
+    # Handle branching flag alias
+    enable_branching = args.enable_branching or args.kv_branching
+
+    # Handle prefill mode
+    prefill_mode = args.prefill_mode if args.prefill_mode != "auto" else None
+
+    # Get available memory for profile selection
+    if psutil is not None:
+        available_mem_gb = psutil.virtual_memory().available / (1024**3)
+    else:
+        # Fallback to a reasonable default if psutil is not available
+        available_mem_gb = 32.0
+
     # Generate the response
     generator = create_generator(
         model_kit,
@@ -250,6 +377,16 @@ if __name__ == "__main__":
         prompt_progress_callback=prompt_progress_callback,
         num_draft_tokens=args.num_draft_tokens,
         temp=args.temp,
+        enable_branching=enable_branching,
+        cache_slots=args.cache_slots,
+        checkpoint_branch=getattr(args, "checkpoint_branch", None),
+        restore_branch=getattr(args, "restore_branch", None),
+        release_branch=getattr(args, "release_branch", None),
+        pin_branch=getattr(args, "pin_branch", None),
+        performance_profile=performance_profile,
+        available_mem_gb=available_mem_gb,
+        prefill_mode=prefill_mode,
+        max_prefill_tokens_per_pass=args.max_prefill_tokens,
     )
     for generation_result in generator:
         print(generation_result.text, end="", flush=True)

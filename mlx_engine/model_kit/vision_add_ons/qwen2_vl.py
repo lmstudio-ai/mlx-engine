@@ -1,28 +1,43 @@
-import logging
 import json
+import logging
 from pathlib import Path
 
-from mlx import nn
 import mlx.core as mx
+from mlx import nn
+from mlx_vlm.models.qwen2_5_vl import (
+    Model as Qwen25VLModel,
+)
+from mlx_vlm.models.qwen2_5_vl import (
+    ModelConfig as Qwen25VLModelConfig,
+)
+from mlx_vlm.models.qwen2_5_vl import (
+    TextConfig as Qwen25VLTextConfig,
+)
+from mlx_vlm.models.qwen2_5_vl import (
+    VisionConfig as Qwen25VLVisionConfig,
+)
+from mlx_vlm.models.qwen2_5_vl import (
+    VisionModel as Qwen25VLVisionTower,
+)
+from mlx_vlm.models.qwen2_vl import (
+    Model as Qwen2VLModel,
+)
+from mlx_vlm.models.qwen2_vl import (
+    ModelConfig as Qwen2VLModelConfig,
+)
+from mlx_vlm.models.qwen2_vl import (
+    TextConfig as Qwen2VLTextConfig,
+)
+from mlx_vlm.models.qwen2_vl import (
+    VisionConfig as Qwen2VLVisionConfig,
+)
+from mlx_vlm.models.qwen2_vl import (
+    VisionModel as Qwen2VLVisionTower,
+)
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.model_kit.vision_add_ons.qwen_vl_utils import compute_qwen_vl_embeddings
-
-from mlx_vlm.models.qwen2_5_vl import (
-    VisionModel as Qwen25VLVisionTower,
-    ModelConfig as Qwen25VLModelConfig,
-    VisionConfig as Qwen25VLVisionConfig,
-    TextConfig as Qwen25VLTextConfig,
-    Model as Qwen25VLModel,
-)
-from mlx_vlm.models.qwen2_vl import (
-    VisionModel as Qwen2VLVisionTower,
-    ModelConfig as Qwen2VLModelConfig,
-    VisionConfig as Qwen2VLVisionConfig,
-    TextConfig as Qwen2VLTextConfig,
-    Model as Qwen2VLModel,
-)
 
 logger = logging.getLogger(__name__)
 

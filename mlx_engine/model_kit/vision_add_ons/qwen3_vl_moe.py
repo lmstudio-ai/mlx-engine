@@ -1,20 +1,27 @@
 import logging
 from pathlib import Path
 
-from mlx import nn
 import mlx.core as mx
+from mlx import nn
+from mlx_vlm.models.qwen3_vl_moe import (
+    Model as Qwen3_VL_MoEModel,
+)
+from mlx_vlm.models.qwen3_vl_moe import (
+    ModelConfig as Qwen3_VL_MoEModelConfig,
+)
+from mlx_vlm.models.qwen3_vl_moe import (
+    TextConfig as Qwen3_VL_MoETextConfig,
+)
+from mlx_vlm.models.qwen3_vl_moe import (
+    VisionConfig as Qwen3_VL_MoEVisionConfig,
+)
+from mlx_vlm.models.qwen3_vl_moe import (
+    VisionModel as Qwen3_VL_MoEVisionTower,
+)
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.model_kit.vision_add_ons.qwen_vl_utils import compute_qwen_vl_embeddings
-
-from mlx_vlm.models.qwen3_vl_moe import (
-    VisionModel as Qwen3_VL_MoEVisionTower,
-    ModelConfig as Qwen3_VL_MoEModelConfig,
-    VisionConfig as Qwen3_VL_MoEVisionConfig,
-    TextConfig as Qwen3_VL_MoETextConfig,
-    Model as Qwen3_VL_MoEModel,
-)
 
 logger = logging.getLogger(__name__)
 

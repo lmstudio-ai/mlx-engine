@@ -1,18 +1,72 @@
 import json
-from typing import Callable, Optional, List, Tuple
-import mlx_lm
-from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
-from mlx_engine.cache_wrapper import CacheWrapper
-from pathlib import Path
-import mlx.nn as nn
-import mlx.core as mx
 import logging
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple, Union
+
+import mlx.core as mx
+import mlx.nn as nn
+import mlx_lm
+from mlx_lm.tokenizer_utils import StreamingDetokenizer, TokenizerWrapper
+
+from mlx_engine.cache_wrapper import (
+    BranchingCacheWrapper,
+    CacheWrapper,
+)
+
+
+# Import patch management
+def apply_patches_by_config(config_path: Path) -> None:
+    """
+    Apply compatibility patches based on model configuration.
+
+    Args:
+        config_path: Path to the model's config.json file
+    """
+    try:
+        import json
+
+        with open(config_path, "r") as f:
+            config = json.load(f)
+
+        model_type = config.get("model_type")
+        if not model_type:
+            return
+
+        # Apply ERNIE patches
+        if model_type in ["ernie_4_5", "ernie_4_5_moe"]:
+            try:
+                from .patches.ernie_4_5 import apply_patches as apply_ernie_patches
+
+                apply_ernie_patches()
+                logger.info(f"Applied ERNIE patches for model type: {model_type}")
+            except ImportError:
+                logger.debug(
+                    f"ERNIE patches not available for model type: {model_type}"
+                )
+
+        # Apply Gemma3n patches
+        elif model_type == "gemma3n":
+            try:
+                from .patches.gemma3n import apply_patches as apply_gemma3n_patches
+
+                apply_gemma3n_patches()
+                logger.info(f"Applied Gemma3n patches for model type: {model_type}")
+            except ImportError:
+                logger.debug(
+                    f"Gemma3n patches not available for model type: {model_type}"
+                )
+
+    except Exception as e:
+        logger.error(f"Failed to apply patches for {config_path}: {e}")
+        # Don't raise - patches should be transparent and not break model loading
+
+
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
-from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
-from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 
@@ -61,8 +115,14 @@ class ModelKit:
     # multi-modal add-ons
     vision_add_on: Optional[BaseVisionAddOn] = None
 
+    # branching cache support
+    branching_cache: Optional[BranchingCacheWrapper] = None
+    enable_branching: bool = False
+
     def _vocab_only_init(self, model_path: Path):
         logger.info(f"Loading model (vocab-only) from {model_path}...")
+        # Apply compatibility patches before loading tokenizer
+        apply_patches_by_config(model_path / "config.json")
         self.tokenizer = mlx_lm.tokenizer_utils.load(model_path)
         self.detokenizer = self.tokenizer.detokenizer
         logger.info("Model (vocab-only) loaded successfully")
@@ -88,6 +148,9 @@ class ModelKit:
         logger.info(f"Loading model from {model_path}...")
         config_json = json.loads((model_path / "config.json").read_text())
         self.model_type = config_json.get("model_type", None)
+
+        # Apply compatibility patches before loading the model
+        apply_patches_by_config(model_path / "config.json")
 
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         self.detokenizer = self.tokenizer.detokenizer
@@ -139,7 +202,7 @@ class ModelKit:
         self,
         prompt_tokens,
         images_b64: Optional[List[str]],
-        prompt_progress_callback: Optional[Callable[[float], bool]],
+        prompt_progress_callback: Optional[Callable[[float], Union[bool, None]]],
         generate_args: dict,
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
@@ -230,3 +293,185 @@ class ModelKit:
             self.cache_wrapper.unset_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
         mx.clear_cache()
+
+    def enable_branching_cache(
+        self,
+        max_slots: int = 4,
+        eviction_policy: str = "lru",
+        memory_headroom_ratio: float = 0.1,
+    ) -> None:
+        """
+        Enable branching cache support for this model kit.
+
+        Args:
+            max_slots: Maximum number of cache slots to maintain
+            eviction_policy: Eviction policy ('lru' currently supported)
+            memory_headroom_ratio: Ratio of memory to keep free (0.0-1.0)
+        """
+        if self.enable_branching and self.branching_cache is not None:
+            logger.info("Branching cache already enabled")
+            return
+
+        self.branching_cache = BranchingCacheWrapper(
+            max_slots=max_slots,
+            eviction_policy=eviction_policy,
+            memory_headroom_ratio=memory_headroom_ratio,
+        )
+        self.enable_branching = True
+        logger.info(f"Enabled branching cache with max_slots={max_slots}")
+
+    def checkpoint_branch(
+        self, branch_id: str, prompt_hash: Optional[str] = None, pin: bool = False
+    ) -> None:
+        """
+        Checkpoint the current cache state for a branch.
+
+        Args:
+            branch_id: Unique identifier for the branch
+            prompt_hash: Optional hash of the prompt for identification
+            pin: Whether to pin this branch to prevent eviction
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+        if self.cache_wrapper is None:
+            raise RuntimeError("No cache wrapper available for checkpointing")
+
+        self.branching_cache.checkpoint_branch(
+            branch_id=branch_id,
+            cache=self.cache_wrapper.cache,
+            prompt_hash=prompt_hash,
+            pin=pin,
+        )
+
+    def restore_branch(self, branch_id: str) -> None:
+        """
+        Restore a cached branch state.
+
+        Args:
+            branch_id: The branch identifier to restore
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+            KeyError: If the branch is not found
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+        if self.cache_wrapper is None:
+            raise RuntimeError("No cache wrapper available for restoration")
+
+        restored_cache = self.branching_cache.restore_branch(branch_id)
+        self.cache_wrapper.cache = restored_cache
+
+    def release_branch(self, branch_id: str) -> None:
+        """
+        Release a branch from the cache.
+
+        Args:
+            branch_id: The branch identifier to release
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        self.branching_cache.release_branch(branch_id)
+
+    def pin_branch(self, branch_id: str) -> None:
+        """
+        Pin a branch to prevent eviction.
+
+        Args:
+            branch_id: The branch identifier to pin
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+            KeyError: If the branch is not found
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        self.branching_cache.pin_branch(branch_id)
+
+    def unpin_branch(self, branch_id: str) -> None:
+        """
+        Unpin a branch to allow eviction.
+
+        Args:
+            branch_id: The branch identifier to unpin
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+            KeyError: If the branch is not found
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        self.branching_cache.unpin_branch(branch_id)
+
+    def get_cache_stats(self) -> dict:
+        """
+        Get comprehensive cache statistics.
+
+        Returns:
+            Dictionary containing cache performance metrics
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        return self.branching_cache.get_cache_stats()
+
+    def list_branches(self) -> List[str]:
+        """
+        Get a list of all cached branch IDs.
+
+        Returns:
+            List of branch identifiers
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        return self.branching_cache.list_branches()
+
+    def get_branch_info(self, branch_id: str) -> Optional[dict]:
+        """
+        Get detailed information about a specific branch.
+
+        Args:
+            branch_id: The branch identifier
+
+        Returns:
+            Dictionary with branch information, or None if not found
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        return self.branching_cache.get_branch_info(branch_id)

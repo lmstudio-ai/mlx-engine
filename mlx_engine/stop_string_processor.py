@@ -43,6 +43,7 @@ class StopStringProcessor:
         self.stop_strings = stop_strings
         self.tokenizer = tokenizer
         self.token_id_buffer = []
+        self.all_token_ids = []  # Maintain all tokens for full text checking
 
     def process_token(self, token: int) -> StopStringProcessorResult:
         """Process a new string segment and check how it relates to stop strings.
@@ -58,10 +59,13 @@ class StopStringProcessor:
                 status="no_match", stop_string=None, stop_tokens=None
             )
 
+        self.all_token_ids.append(token)
         self.token_id_buffer.append(token)
 
+        # Check the full accumulated text for stop strings
+        full_text = self.tokenizer.decode(self.all_token_ids)
         result = self._stopping_criteria(
-            string=self.tokenizer.decode(self.token_id_buffer),
+            string=full_text,
             stop_strings=self.stop_strings,
         )
 
@@ -83,14 +87,45 @@ class StopStringProcessor:
             )
 
         elif result.status == "full_stop":
+            # Find the minimal token sequence that contains the stop string
+            stop_tokens = self._find_stop_tokens(result.stop_string or "", full_text)
             return StopStringProcessorResult(
                 status="full_stop",
                 stop_string=result.stop_string,
-                stop_tokens=self.token_id_buffer,
+                stop_tokens=stop_tokens,
             )
 
         else:
             raise ValueError(f"Unknown StopProcessorStatus: {result.status}")
+
+    def _find_stop_tokens(self, stop_string: str, full_text: str) -> List[int]:
+        """Find the minimal token sequence that contains the stop string."""
+        if not stop_string:
+            return []
+
+        # Find the position of the stop string in the full text
+        stop_pos = full_text.find(stop_string)
+        if stop_pos == -1:
+            return self.token_id_buffer
+
+        # Try to find the smallest token sequence that decodes to contain the stop string
+        # Check all possible sequences, preferring shorter ones
+        best_sequence = self.token_id_buffer
+        best_length = len(best_sequence)
+
+        for length in range(1, len(self.all_token_ids) + 1):
+            for start_idx in range(0, len(self.all_token_ids) - length + 1):
+                end_idx = start_idx + length
+                token_sequence = self.all_token_ids[start_idx:end_idx]
+                decoded = self.tokenizer.decode(token_sequence)
+                if stop_string in decoded and length < best_length:
+                    best_sequence = token_sequence
+                    best_length = length
+                    # If we found a sequence of length 1, that's optimal
+                    if length == 1:
+                        return best_sequence
+
+        return best_sequence
 
     class _StoppingCriteriaResult(NamedTuple):
         status: StopStringProcessorStatus
@@ -163,11 +198,11 @@ class StopStringProcessor:
 
     def _check_partial_text_match(
         self, string: str, stop_strings: List[str]
-    ) -> Optional[StopStringProcessorResult]:
+    ) -> Optional["_StoppingCriteriaResult"]:
         """Check for partial matches with any stop sequence."""
         for stop_string in stop_strings:
             if self._sequence_overlap(string, stop_string):
-                return StopStringProcessorResult(
+                return self._StoppingCriteriaResult(
                     status="partial_match", stop_string=None
                 )
         return None

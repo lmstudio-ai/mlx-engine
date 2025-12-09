@@ -1,22 +1,30 @@
 import logging
 from pathlib import Path
 
-from mlx import nn
 import mlx.core as mx
-
-from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx import nn
 from mlx_vlm.models.mistral3 import (
-    VisionModel as Mistral3VisionTower,
-    ModelConfig as Mistral3ModelConfig,
-    VisionConfig as Mistral3VisionConfig,
-    TextConfig as Mistral3TextConfig,
     Model as Mistral3CombinedModel,
 )
+from mlx_vlm.models.mistral3 import (
+    ModelConfig as Mistral3ModelConfig,
+)
+from mlx_vlm.models.mistral3 import (
+    TextConfig as Mistral3TextConfig,
+)
+from mlx_vlm.models.mistral3 import (
+    VisionConfig as Mistral3VisionConfig,
+)
+from mlx_vlm.models.mistral3 import (
+    VisionModel as Mistral3VisionTower,
+)
 from mlx_vlm.models.mistral3.mistral3 import Mistral3MultiModalProjector
+
+from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
-from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
 logger = logging.getLogger(__name__)
 

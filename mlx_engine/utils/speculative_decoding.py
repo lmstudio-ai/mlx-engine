@@ -1,6 +1,7 @@
-from typing import Optional
-import mlx.nn as nn
 import logging
+from typing import Optional
+
+import mlx.nn as nn
 
 from mlx_engine.model_kit.model_kit import ModelKit
 

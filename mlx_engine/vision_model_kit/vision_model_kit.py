@@ -1,17 +1,20 @@
-from typing import Union, Optional, List, Tuple
-from mlx_engine.model_kit.model_kit import ModelKit
 import logging
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple, Union
+
+import mlx.core as mx
+import mlx_lm
+import mlx_vlm
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+
+from mlx_engine.cache_wrapper import BranchingCacheWrapper
+from mlx_engine.model_kit.model_kit import ModelKit
 
 from ._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
 )
 from .vision_model_wrapper import VisionModelWrapper
-import mlx_vlm
-import mlx_lm
-from pathlib import Path
-import mlx.core as mx
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +102,7 @@ class VisionModelKit(ModelKit):
         self,
         prompt_tokens,
         images_b64: Optional[List[str]],
-        prompt_progress_callback,
+        prompt_progress_callback: Optional[Callable[[float], Union[bool, None]]],
         generate_args,
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
@@ -154,3 +157,185 @@ class VisionModelKit(ModelKit):
     @property
     def language_model(self):
         return self.model.language_model
+
+    # branching cache support
+    branching_cache: Optional[BranchingCacheWrapper] = None
+    enable_branching: bool = False
+
+    def enable_branching_cache(
+        self,
+        max_slots: int = 4,
+        eviction_policy: str = "lru",
+        memory_headroom_ratio: float = 0.1,
+    ) -> None:
+        """
+        Enable branching cache support for this vision model kit.
+
+        Args:
+            max_slots: Maximum number of cache slots to maintain
+            eviction_policy: Eviction policy ('lru' currently supported)
+            memory_headroom_ratio: Ratio of memory to keep free (0.0-1.0)
+        """
+        if self.enable_branching and self.branching_cache is not None:
+            logger.info("Branching cache already enabled")
+            return
+
+        self.branching_cache = BranchingCacheWrapper(
+            max_slots=max_slots,
+            eviction_policy=eviction_policy,
+            memory_headroom_ratio=memory_headroom_ratio,
+        )
+        self.enable_branching = True
+        logger.info(
+            f"Enabled branching cache for vision model with max_slots={max_slots}"
+        )
+
+    def checkpoint_branch(
+        self, branch_id: str, prompt_hash: Optional[str] = None, pin: bool = False
+    ) -> None:
+        """
+        Checkpoint the current model state for a branch.
+
+        Args:
+            branch_id: Unique identifier for the branch
+            prompt_hash: Optional hash of the prompt for identification
+            pin: Whether to pin this branch to prevent eviction
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        # For vision models, we checkpoint the entire model state
+        self.branching_cache.checkpoint_branch(
+            branch_id=branch_id, cache=self.model, prompt_hash=prompt_hash, pin=pin
+        )
+
+    def restore_branch(self, branch_id: str) -> None:
+        """
+        Restore a cached branch state.
+
+        Args:
+            branch_id: The branch identifier to restore
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+            KeyError: If the branch is not found
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        restored_model = self.branching_cache.restore_branch(branch_id)
+        self.model = restored_model
+
+    def release_branch(self, branch_id: str) -> None:
+        """
+        Release a branch from the cache.
+
+        Args:
+            branch_id: The branch identifier to release
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        self.branching_cache.release_branch(branch_id)
+
+    def pin_branch(self, branch_id: str) -> None:
+        """
+        Pin a branch to prevent eviction.
+
+        Args:
+            branch_id: The branch identifier to pin
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+            KeyError: If the branch is not found
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        self.branching_cache.pin_branch(branch_id)
+
+    def unpin_branch(self, branch_id: str) -> None:
+        """
+        Unpin a branch to allow eviction.
+
+        Args:
+            branch_id: The branch identifier to unpin
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+            KeyError: If the branch is not found
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        self.branching_cache.unpin_branch(branch_id)
+
+    def get_cache_stats(self) -> dict:
+        """
+        Get comprehensive cache statistics.
+
+        Returns:
+            Dictionary containing cache performance metrics
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        return self.branching_cache.get_cache_stats()
+
+    def list_branches(self) -> List[str]:
+        """
+        Get a list of all cached branch IDs.
+
+        Returns:
+            List of branch identifiers
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        return self.branching_cache.list_branches()
+
+    def get_branch_info(self, branch_id: str) -> Optional[dict]:
+        """
+        Get detailed information about a specific branch.
+
+        Args:
+            branch_id: The branch identifier
+
+        Returns:
+            Dictionary with branch information, or None if not found
+
+        Raises:
+            RuntimeError: If branching cache is not enabled
+        """
+        if not self.enable_branching or self.branching_cache is None:
+            raise RuntimeError(
+                "Branching cache not enabled. Call enable_branching_cache() first."
+            )
+
+        return self.branching_cache.get_branch_info(branch_id)

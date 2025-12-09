@@ -1,8 +1,9 @@
 import base64
+import logging
 from io import BytesIO
 from typing import List
+
 import PIL
-import logging
 
 logger = logging.getLogger(__name__)
 

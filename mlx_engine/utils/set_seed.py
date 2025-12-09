@@ -1,9 +1,24 @@
-import numpy as np
-import torch
-import mlx.core as mx
+import random
 import time
 from typing import Optional
-import random
+
+import mlx.core as mx
+
+try:
+    import numpy as np
+
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None
+
+try:
+    import torch
+
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    torch = None
 
 
 def set_seed(seed: Optional[int]) -> None:
@@ -42,9 +57,11 @@ def set_seed(seed: Optional[int]) -> None:
     # For MLX and MLX_LM
     mx.random.seed(seed)
 
-    # MLX_VLM depends on numpy and torch
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    # MLX_VLM depends on numpy and torch (optional dependencies)
+    if HAS_NUMPY:
+        np.random.seed(seed)  # type: ignore[attr-defined]
+    if HAS_TORCH:
+        torch.manual_seed(seed)  # type: ignore[attr-defined]
 
     # Just in case
     random.seed(seed)

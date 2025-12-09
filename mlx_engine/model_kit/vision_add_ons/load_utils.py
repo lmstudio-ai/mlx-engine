@@ -1,11 +1,12 @@
 import glob
 import json
+import logging
 from pathlib import Path
 from typing import Any, Tuple, Type
+
 import mlx.core as mx
 from mlx import nn
-from mlx_vlm.utils import sanitize_weights, load_processor, skip_multimodal_module
-import logging
+from mlx_vlm.utils import load_processor, sanitize_weights, skip_multimodal_module
 
 
 def load_and_parse_config(

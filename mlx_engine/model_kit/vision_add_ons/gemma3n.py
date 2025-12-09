@@ -1,30 +1,37 @@
+import json
+import logging
 from pathlib import Path
-from mlx import nn
+
 import mlx.core as mx
+from mlx import nn
 from mlx_vlm.models.gemma3n import (
-    VisionModel as Gemma3nVisionTower,
-    ModelConfig as Gemma3nModelConfig,
-    VisionConfig as Gemma3nVisionConfig,
-    TextConfig as Gemma3nTextConfig,
     Model as Gemma3nCombinedModel,
 )
+from mlx_vlm.models.gemma3n import (
+    ModelConfig as Gemma3nModelConfig,
+)
+from mlx_vlm.models.gemma3n import (
+    TextConfig as Gemma3nTextConfig,
+)
+from mlx_vlm.models.gemma3n import (
+    VisionConfig as Gemma3nVisionConfig,
+)
+from mlx_vlm.models.gemma3n import (
+    VisionModel as Gemma3nVisionTower,
+)
 from mlx_vlm.models.gemma3n.gemma3n import Gemma3nMultimodalEmbedder
-from mlx_vlm.utils import sanitize_weights, load_processor
-import logging
-
+from mlx_vlm.utils import load_processor, sanitize_weights
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
-from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
-    common_process_prompt_with_images,
-)
 from mlx_engine.model_kit.vision_add_ons.load_utils import (
     load_and_filter_weights,
     load_and_parse_config,
     maybe_apply_quantization,
     prepare_components,
 )
-import json
-
+from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
+    common_process_prompt_with_images,
+)
 
 logger = logging.getLogger(__name__)
 

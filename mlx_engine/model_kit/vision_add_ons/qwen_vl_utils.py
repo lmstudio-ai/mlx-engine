@@ -1,10 +1,9 @@
 import mlx.core as mx
 from mlx import nn
+from mlx_vlm.utils import prepare_inputs
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
-
-from mlx_vlm.utils import prepare_inputs
 
 
 def compute_qwen_vl_embeddings(

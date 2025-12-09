@@ -173,10 +173,11 @@ class TestVisionModels(unittest.TestCase):
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(progress: float) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print(f"Prompt processing progress: {progress}")
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -441,10 +442,11 @@ You are a helpful assistant.<|im_end|>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(progress: float) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print(f"Prompt processing progress: {progress}")
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -496,10 +498,11 @@ You are a helpful assistant.<|im_end|>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(progress: float) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print(f"Prompt processing progress: {progress}")
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -562,7 +565,7 @@ Summarize this in one sentence<end_of_turn>
             "lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt, text_only=True
         )
 
-    # TODO(will): Parameterize and de-dup
+    # TODO: Parameterize and de-duplicate similar test methods
     def test_gemma3n_text_only_generation_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
@@ -572,10 +575,11 @@ Summarize this in one sentence<end_of_turn>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(progress: float) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print(f"Prompt processing progress: {progress}")
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -618,7 +622,7 @@ Summarize this in one sentence<end_of_turn>
         self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
         self.assertIn("silas", generated_text.lower())
 
-    # TODO(will): Parameterize and de-dup
+    # TODO: Parameterize and de-duplicate similar test methods
     def test_gemma3n_text_only_long_original_prompt_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
@@ -628,10 +632,11 @@ Summarize this in one sentence<end_of_turn>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(progress: float) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print(f"Prompt processing progress: {progress}")
+                return True
 
             generated_text = ""
             for result in create_generator(

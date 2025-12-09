@@ -5,9 +5,10 @@ This module provides derived classes that inherit from the original mlx-lm class
 and override specific methods to handle compatibility issues between mlx-vlm and mlx-lm.
 """
 
-from mlx_lm.models.gemma3n import Model, TextConfig
-from mlx.utils import tree_flatten, tree_unflatten
 import inspect
+
+from mlx.utils import tree_flatten, tree_unflatten
+from mlx_lm.models.gemma3n import Model, TextConfig
 
 
 class CompatibleTextConfig(TextConfig):

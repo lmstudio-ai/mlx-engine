@@ -1,25 +1,32 @@
 import logging
 from pathlib import Path
 
-from mlx import nn
 import mlx.core as mx
-
+from mlx import nn
+from mlx_vlm.models.pixtral import (
+    Model as PixtralCombinedModel,  # for merge_input_ids_with_image_features
+)
+from mlx_vlm.models.pixtral import (
+    ModelConfig as PixtralModelConfig,
+)
+from mlx_vlm.models.pixtral import (
+    TextConfig as PixtralTextConfig,
+)
+from mlx_vlm.models.pixtral import (
+    VisionConfig as PixtralVisionConfig,
+)
 from mlx_vlm.models.pixtral import (
     VisionModel as PixtralVisionTower,
-    ModelConfig as PixtralModelConfig,
-    VisionConfig as PixtralVisionConfig,
-    TextConfig as PixtralTextConfig,
-    Model as PixtralCombinedModel,  # for merge_input_ids_with_image_features
 )
 from mlx_vlm.models.pixtral.pixtral import (
     LlavaMultiModalProjector as PixtralMultiModalProjector,
 )
 
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
-from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
 logger = logging.getLogger(__name__)
 

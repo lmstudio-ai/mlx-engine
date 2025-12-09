@@ -10,6 +10,7 @@ https://github.com/dottxt-ai/outlines-core/issues/222
 """
 
 import re
+
 import outlines_core.fsm.regex
 
 

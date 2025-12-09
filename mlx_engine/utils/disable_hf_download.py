@@ -1,5 +1,6 @@
-from functools import wraps
 import sys
+from functools import wraps
+
 import huggingface_hub
 
 # Store the original function before we patch anything

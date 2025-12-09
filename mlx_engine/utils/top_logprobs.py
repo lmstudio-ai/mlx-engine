@@ -1,6 +1,6 @@
-from mlx_engine.utils.token import Token
-
 import mlx.core as mx
+
+from mlx_engine.utils.token import Token
 
 
 def summarize_top_logprobs(

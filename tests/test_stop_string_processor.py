@@ -167,3 +167,26 @@ class TestStopStringProcessor(unittest.TestCase):
         stop_strings = ["valid", ""]
         with self.assertRaises(ValueError):
             StopStringProcessor(stop_strings, self.tokenizer)
+
+
+# Pytest wrapper to run the unittest with proper environment
+def test_stop_string_processor_with_unittest():
+    """Run stop string processor tests using unittest to avoid mocking conflicts."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "tests.test_stop_string_processor.TestStopStringProcessor",
+        ],
+        capture_output=True,
+        text=True,
+        cwd="/Users/miter/repo/third/mlx-engine",
+    )
+    if result.returncode != 0:
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        assert False, f"Tests failed with return code {result.returncode}"

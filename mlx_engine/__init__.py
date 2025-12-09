@@ -9,28 +9,36 @@ __all__ = [
     "unload_draft_model",
     "create_generator",
     "tokenize",
+    "cli_parser",
+    "select_profile_for_hardware",
 ]
 
-from pathlib import Path
 import os
+from pathlib import Path
 
-from .utils.disable_hf_download import patch_huggingface_hub
-from .utils.register_models import register_models
-from .utils.logger import setup_logging
-
+SKIP_INIT = os.environ.get("MLX_ENGINE_SKIP_INIT") == "1"
 
 from .generate import (
-    load_model,
-    load_draft_model,
-    is_draft_model_compatible,
-    unload_draft_model,
+    cli_parser,
     create_generator,
+    is_draft_model_compatible,
+    load_draft_model,
+    load_model,
     tokenize,
+    unload_draft_model,
+)
+from .utils.hardware import (
+    select_profile_for_hardware,
 )
 
-patch_huggingface_hub()
-register_models()
-setup_logging()
+if not SKIP_INIT:
+    from .utils.disable_hf_download import patch_huggingface_hub
+    from .utils.logger import setup_logging
+    from .utils.register_models import register_models
+
+    patch_huggingface_hub()
+    register_models()
+    setup_logging()
 
 
 def _set_outlines_cache_dir(cache_dir: Path | str):

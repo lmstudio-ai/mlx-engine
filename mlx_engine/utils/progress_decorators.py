@@ -1,8 +1,45 @@
-from typing import Optional, Callable
-from mlx_engine.cache_wrapper import StopPromptProcessing
 import logging
+import time
+from typing import Callable, Optional, Union
+
+from mlx_engine.cache_wrapper import StopPromptProcessing
 
 logger = logging.getLogger(__name__)
+
+
+def backward_compatible(
+    callback: Optional[Callable[[float], Union[bool, None]]],
+) -> Optional[Callable[[float], bool]]:
+    """
+    Wraps a progress callback to ensure backward compatibility with old and new callback patterns.
+
+    This wrapper handles both old-style callbacks that return None (or no explicit return)
+    and new-style callbacks that return bool. It ensures all callbacks return a boolean
+    value as expected by the current implementation.
+
+    Args:
+        callback: A callback that accepts progress (0.0–100.0) and may return
+                  True/False (new style) or None/no return (old style). May be None.
+
+    Returns:
+        A wrapped callback that always returns a boolean value.
+        If callback is None, returns None.
+    """
+    if callback is None:
+        return None
+
+    def inner_callback(percentage: float) -> bool:
+        try:
+            result = callback(percentage)
+            # Handle old-style callbacks that return None or no explicit return
+            if result is None:
+                return True  # Default to continue for old-style callbacks
+            return bool(result)  # Ensure boolean return for new-style callbacks
+        except Exception as e:
+            logger.warning(f"Progress callback failed: {e}. Continuing processing.")
+            return True  # Continue processing if callback fails
+
+    return inner_callback
 
 
 def ratchet(
@@ -96,5 +133,68 @@ def token_count(
         else:
             progress = 100 * processed_tokens / total_tokens
         callback(progress)
+
+    return inner_callback
+
+
+def synthetic_progress(
+    callback: Optional[Callable[[float], bool]],
+    total_tokens: int,
+    tick_count: int = 5,
+) -> Optional[Callable[[float], bool]]:
+    """
+    Creates a synthetic progress callback for unbounded prefill.
+
+    This wrapper generates synthetic progress ticks during unbounded prefill
+    to provide user feedback while the actual prefill happens in one pass.
+
+    Args:
+        callback: A callback that accepts progress (0.0–100.0) and returns
+                  True to continue or False to stop. May be None.
+        total_tokens: Total number of tokens being processed
+        tick_count: Number of synthetic progress ticks to generate
+
+    Returns:
+        A callback that when called will emit synthetic progress.
+        If callback is None, returns None.
+    """
+    if callback is None:
+        return None
+
+    # Generate synthetic progress ticks
+    if tick_count < 2:
+        ticks = [0.0, 100.0]
+    else:
+        ticks = []
+        for i in range(tick_count):
+            if i == 0:
+                ticks.append(0.0)
+            elif i == tick_count - 1:
+                ticks.append(100.0)
+            else:
+                # Use quadratic progression for more realistic progress
+                progress = (i / (tick_count - 1)) ** 2 * 100.0
+                ticks.append(progress)
+
+    # Calculate timing for synthetic progress
+    start_time = time.time()
+    total_duration = 2.0  # Assume 2 seconds for unbounded prefill
+    current_tick = 0
+
+    def inner_callback(progress: float) -> bool:
+        nonlocal current_tick
+
+        # Ignore the actual progress and emit synthetic progress
+        elapsed = time.time() - start_time
+        if elapsed >= total_duration:
+            synthetic_progress = 100.0
+        else:
+            # Find the appropriate tick based on elapsed time
+            progress_ratio = elapsed / total_duration
+            tick_index = int(progress_ratio * (len(ticks) - 1))
+            synthetic_progress = ticks[min(tick_index, len(ticks) - 1)]
+
+        current_tick = min(current_tick + 1, len(ticks) - 1)
+        return callback(synthetic_progress)
 
     return inner_callback

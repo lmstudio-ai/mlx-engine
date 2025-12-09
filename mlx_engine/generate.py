@@ -1,33 +1,50 @@
-from typing import Callable, Iterator, List, Literal, NamedTuple, Optional
 import json
 import logging
-from pathlib import Path
 import sys
+from pathlib import Path
+from typing import Callable, Iterator, List, Literal, NamedTuple, Optional, Union
 
 from mlx_lm.generate import stream_generate
 from mlx_lm.sample_utils import make_sampler
+from outlines.processors.structured import JSONLogitsProcessor
 
+from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE, StopPromptProcessing
+from mlx_engine.utils.progress_decorators import backward_compatible
 from mlx_engine.model_kit.model_kit import ModelKit
-from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )
-from mlx_engine.utils.token import Token
-from mlx_engine.utils.eot_tokens import get_eot_token_ids
-from mlx_engine.utils.top_logprobs import summarize_top_logprobs
 from mlx_engine.stop_string_processor import (
     StopStringProcessor,
     StopStringProcessorResult,
 )
+from mlx_engine.utils.eot_tokens import get_eot_token_ids
+from mlx_engine.utils.hardware import PerformanceProfileCompat
+from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
+from mlx_engine.utils.progress_decorators import (
+    backward_compatible,
+    ratchet,
+    throw_to_stop,
+    token_count,
+)
+from mlx_engine.utils.prompt_processing import plan_prefill_strategy
 from mlx_engine.utils.set_seed import set_seed
 from mlx_engine.utils.speculative_decoding import (
-    determine_draft_model_for_generation,
     configure_num_draft_tokens_in_generate_args,
+    determine_draft_model_for_generation,
 )
-from outlines.processors.structured import JSONLogitsProcessor
-from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.cache_wrapper import StopPromptProcessing, PROMPT_PROCESSING_CHUNK_SIZE
-from mlx_engine.utils.progress_decorators import ratchet, throw_to_stop, token_count
+from mlx_engine.utils.token import Token
+from mlx_engine.utils.top_logprobs import summarize_top_logprobs
+from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
+
+# Import metrics collection
+try:
+    from mlx_engine.utils.logger import get_global_structured_logger
+    from mlx_engine.utils.metrics import get_global_collector
+
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
 
 MAX_TOP_LOGPROBS = 10
 
@@ -140,7 +157,7 @@ def create_generator(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],
     *,
-    prompt_progress_callback: Optional[Callable[[float], bool]] = None,
+    prompt_progress_callback: Optional[Callable[[float], Union[bool, None]]] = None,
     images_b64: Optional[List[str]] = None,
     max_image_size: Optional[tuple[int, int]] = None,
     stop_strings: Optional[List[str]] = None,
@@ -157,6 +174,16 @@ def create_generator(
     max_tokens: Optional[int] = 10000000,
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
+    prefill_mode: Optional[str] = None,
+    performance_profile: Optional[PerformanceProfileCompat] = None,
+    available_mem_gb: Optional[float] = None,
+    max_prefill_tokens_per_pass: Optional[int] = None,
+    enable_branching: Optional[bool] = None,
+    cache_slots: Optional[int] = None,
+    checkpoint_branch: Optional[str] = None,
+    restore_branch: Optional[str] = None,
+    release_branch: Optional[str] = None,
+    pin_branch: Optional[str] = None,
 ) -> Iterator[GenerationResult]:
     """
     Create a generator that streams text generation results from the model.
@@ -168,9 +195,11 @@ def create_generator(
     Args:
         model_kit (ModelKit | VisionModelKit): The initialized model to use for generation
         prompt_tokens (List[int]): List of token IDs representing the input prompt
-        prompt_progress_callback (Optional[Callable[[float], bool]]): Callback function that receives
-            generation progress as a float between 0 and 100. Callback should return True to continue
-            prompt processing, or False to stop generation
+        prompt_progress_callback (Optional[Callable[[float], Union[bool, None]]]): Callback function that receives
+            generation progress as a float between 0 and 100. For backward compatibility, accepts both
+            new-style callbacks that return True/False and old-style callbacks that return None or
+            have no explicit return. All callbacks are treated as continuing processing unless they
+            explicitly return False
         images_b64 (Optional[List[str]]): List of base64-encoded images for vision-language models
         max_image_size (Optional[tuple[int, int]]): Maximum dimensions (width, height) for images.
             Images will be resized to fit within these dimensions while maintaining aspect ratio if
@@ -195,6 +224,12 @@ def create_generator(
             if a draft model is loaded. If set to true, draft model must be loaded or else error.
             If set to false, speculative decoding is disabled even if a draft model is loaded.
         num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
+        enable_branching (Optional[bool]): Enable branching cache support for O(1) branch switching
+        cache_slots (Optional[int]): Number of cache slots for branching (default: 4)
+        checkpoint_branch (Optional[str]): Branch ID to checkpoint after generation
+        restore_branch (Optional[str]): Branch ID to restore before generation
+        release_branch (Optional[str]): Branch ID to release before generation
+        pin_branch (Optional[str]): Branch ID to pin before generation
 
     Yields:
         GenerationResult: A named tuple containing:
@@ -209,7 +244,42 @@ def create_generator(
     """
     set_seed(seed)
 
+    # Handle branching cache operations
+    if enable_branching:
+        if not hasattr(model_kit, "enable_branching_cache"):
+            raise ValueError("Branching cache is not supported for this model type")
+
+        # Initialize branching cache if not already enabled
+        if not getattr(model_kit, "enable_branching", False):
+            cache_slots = cache_slots or 4
+            model_kit.enable_branching_cache(max_slots=cache_slots)
+
+        # Handle branch operations before generation
+        if restore_branch:
+            try:
+                model_kit.restore_branch(restore_branch)
+                logger.info(f"Restored branch: {restore_branch}")
+            except KeyError as e:
+                logger.warning(f"Failed to restore branch {restore_branch}: {e}")
+
+        if release_branch:
+            try:
+                model_kit.release_branch(release_branch)
+                logger.info(f"Released branch: {release_branch}")
+            except RuntimeError as e:
+                logger.warning(f"Failed to release branch {release_branch}: {e}")
+
+        if pin_branch:
+            try:
+                model_kit.pin_branch(pin_branch)
+                logger.info(f"Pinned branch: {pin_branch}")
+            except KeyError as e:
+                logger.warning(f"Failed to pin branch {pin_branch}: {e}")
+
     generate_args = {}
+    # Apply backward compatibility wrapper first to handle both old (None return) and new (bool return) callback patterns
+    prompt_progress_callback = backward_compatible(prompt_progress_callback)
+
     # For each call to create_generator, wrap all prompt progress calls with a ratchet that
     # ensures reported progress monotonically increases. This is needed because prompt processing
     # occurs in different places depending on the model type and prompt content. The prompt will only
@@ -242,6 +312,50 @@ def create_generator(
         model_kit, draft_model, num_draft_tokens, generate_args
     )
 
+    # Plan prefill strategy if parameters provided
+    prefill_plan = None
+    if performance_profile is not None and available_mem_gb is not None:
+        available_mem_bytes = int(available_mem_gb * 1024**3)
+
+        # Convert string performance_profile to PerformanceProfileCompat if needed
+        if isinstance(performance_profile, str):
+            from mlx_engine.utils.hardware import (
+                HardwareInfoCompat,
+                select_profile_for_hardware,
+            )
+
+            # Create a fake hardware info for conversion
+            fake_hardware = HardwareInfoCompat(
+                model_identifier="Mac14,12",  # M3 Ultra identifier
+                total_memory_gb=int(available_mem_gb),
+                bandwidth_gbps=600,
+                is_apple_silicon=True,
+            )
+            performance_profile = select_profile_for_hardware(
+                fake_hardware, performance_profile, int(available_mem_gb)
+            )
+
+        kv_bytes_per_token = performance_profile.kv_bytes_per_token_estimate
+
+        prefill_plan = plan_prefill_strategy(
+            prompt_tokens=len(prompt_tokens),
+            profile=performance_profile,
+            kv_bytes_per_token=kv_bytes_per_token,
+            available_mem_bytes=available_mem_bytes,
+            requested_mode=prefill_mode,
+            speculative_required=draft_model is not None,
+        )
+
+    # Initialize metrics collection if available
+    metrics_collector = None
+    structured_logger = None
+    if METRICS_AVAILABLE:
+        metrics_collector = get_global_collector()
+        structured_logger = get_global_structured_logger()
+
+        # Start prefill timing
+        metrics_collector.start_prefill_timing()
+
     # Process prompt
     try:
         input_tokens, input_embeddings = model_kit.process_prompt(
@@ -252,7 +366,29 @@ def create_generator(
             max_image_size,
             speculative_decoding_toggle,
         )
+
+        # End prefill timing and record metrics
+        if metrics_collector:
+            metrics_collector.end_prefill_timing(len(prompt_tokens))
+
+            # Log prefill performance
+            if structured_logger:
+                structured_logger.log_performance(
+                    operation="prefill",
+                    duration_s=metrics_collector.metrics.prefill_time_s,
+                    tokens=len(prompt_tokens),
+                    additional_data={
+                        "mode": prefill_plan.mode if prefill_plan else "unknown",
+                        "chunk_size": prefill_plan.chunk_size if prefill_plan else None,
+                        "total_chunks": prefill_plan.total_chunks
+                        if prefill_plan
+                        else 1,
+                    },
+                )
+
     except StopPromptProcessing:
+        if metrics_collector:
+            metrics_collector.end_prefill_timing(len(prompt_tokens))
         yield construct_user_cancelled_result()
         return
     if draft_model is None:
@@ -387,6 +523,15 @@ def create_generator(
             top_logprobs=top_logprobs_buffer,
         )
 
+    # Use prefill plan chunk size if available, otherwise default
+    prefill_step_size = (
+        prefill_plan.chunk_size if prefill_plan else PROMPT_PROCESSING_CHUNK_SIZE
+    )
+
+    # Start generation timing
+    if metrics_collector:
+        metrics_collector.start_generation_timing()
+
     stream = stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
@@ -395,10 +540,11 @@ def create_generator(
         max_tokens=max_tokens,
         logits_processors=logits_processors,
         prompt_progress_callback=token_count(throw_to_stop(prompt_progress_callback)),
-        prefill_step_size=PROMPT_PROCESSING_CHUNK_SIZE,
+        prefill_step_size=prefill_step_size,
         **generate_args,
     )
 
+    generated_token_count = 0
     while True:
         try:
             generation_result = next(stream)
@@ -411,6 +557,8 @@ def create_generator(
         # Token processor
         token = generation_result.token
         text += generation_result.text
+        generated_token_count += 1
+
         # record generated token to cache, if cache is active
         if model_kit.is_cross_prompt_cache_active():
             model_kit.record_token_to_cache(token)
@@ -471,6 +619,57 @@ def create_generator(
             top_logprobs_buffer = []
             text = ""
 
+    # Finalize metrics collection
+    if metrics_collector:
+        metrics_collector.end_generation_timing(generated_token_count)
+        metrics_collector.finalize_timing()
+
+        # Update decision metrics
+        if prefill_plan:
+            metrics_collector.update_decision_metrics(
+                mode=prefill_plan.mode,
+                chunk_size=prefill_plan.chunk_size,
+                total_chunks=prefill_plan.total_chunks,
+                reason=prefill_plan.reason,
+            )
+
+        # Update cache stats if available
+        if hasattr(model_kit, "cache_wrapper") and hasattr(
+            model_kit.cache_wrapper, "get_cache_stats"
+        ):
+            cache_stats = model_kit.cache_wrapper.get_cache_stats()
+            metrics_collector.update_cache_metrics(
+                hits=cache_stats.hits,
+                misses=cache_stats.misses,
+                evictions=cache_stats.evictions,
+                size_gb=cache_stats.size_gb,
+                utilization_ratio=cache_stats.utilization_ratio,
+            )
+
+        # Log final metrics
+        if structured_logger:
+            structured_logger.log_metrics(metrics_collector.get_metrics().to_dict())
+
+            # Log generation performance
+            structured_logger.log_performance(
+                operation="generation",
+                duration_s=metrics_collector.metrics.generation_time_s,
+                tokens=generated_token_count,
+                additional_data={
+                    "total_tokens": metrics_collector.metrics.total_tokens,
+                    "tokens_per_second": metrics_collector.metrics.tokens_per_second,
+                    "prefill_tokens_per_second": metrics_collector.metrics.prefill_tokens_per_second,
+                },
+            )
+
+    # Handle post-generation branch checkpoint
+    if enable_branching and checkpoint_branch:
+        try:
+            model_kit.checkpoint_branch(checkpoint_branch)
+            logger.info(f"Checkpointed branch: {checkpoint_branch}")
+        except RuntimeError as e:
+            logger.warning(f"Failed to checkpoint branch {checkpoint_branch}: {e}")
+
 
 def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
     """
@@ -486,3 +685,118 @@ def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
             ready for model input
     """
     return model_kit.tokenize(prompt)
+
+
+def cli_parser():
+    """
+    Create and return the CLI argument parser for mlx-engine.
+
+    Returns:
+        argparse.ArgumentParser: Configured argument parser with all flags
+    """
+    import argparse
+
+    from mlx_engine.utils.kv_cache_quantization import (
+        VALID_KV_BITS,
+        VALID_KV_GROUP_SIZE,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="LM Studio mlx-engine inference script",
+        epilog="""
+Examples:
+  # Basic usage with auto performance profile
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+
+  # High-performance mode for M3 Ultra with 512GB RAM
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \\
+    --profile m3_ultra_512 --prefill-mode unbounded
+
+  # Adaptive chunking with custom progress interval
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \\
+    --profile m3_max_128 --adaptive-chunk --progress-interval-ms 500
+
+  # Branching cache with performance optimization
+  python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \\
+    --kv-branching --cache-slots 8 --profile m3_ultra_256
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Basic arguments
+    parser.add_argument(
+        "--model",
+        required=True,
+        type=str,
+        help="The file system path to the model",
+    )
+    parser.add_argument(
+        "--prompt",
+        default="Explain the rules of chess in one sentence",
+        type=str,
+        help="Message to be processed by the model",
+    )
+    parser.add_argument(
+        "--temp",
+        default=0.8,
+        type=float,
+        help="Sampling temperature",
+    )
+    parser.add_argument(
+        "--max-kv-size",
+        type=int,
+        help="Max context size of the model",
+    )
+    parser.add_argument(
+        "--kv-bits",
+        type=int,
+        choices=VALID_KV_BITS,
+        help="Number of bits for KV cache quantization. Must be between 3 and 8 (inclusive)",
+    )
+    parser.add_argument(
+        "--kv-group-size",
+        type=int,
+        choices=VALID_KV_GROUP_SIZE,
+        help="Group size for KV cache quantization",
+    )
+
+    # Performance optimization arguments
+    performance_group = parser.add_argument_group(
+        "Performance Optimization",
+        "Flags for optimizing performance on high-bandwidth Apple Silicon",
+    )
+    performance_group.add_argument(
+        "--profile",
+        choices=["auto", "default_safe", "m3_ultra_512", "m3_max_128", "m3_pro_64"],
+        default="auto",
+        help="Performance profile for hardware optimization (default: auto)",
+    )
+    performance_group.add_argument(
+        "--prefill-mode",
+        choices=["auto", "unbounded", "chunked"],
+        default="auto",
+        help="Prefill strategy mode (default: auto)",
+    )
+    performance_group.add_argument(
+        "--adaptive-chunk",
+        action="store_true",
+        help="Enable adaptive chunk sizing for memory-efficient prefill",
+    )
+    performance_group.add_argument(
+        "--kv-branching",
+        action="store_true",
+        help="Alias for --enable-branching (O(1) branch switching)",
+    )
+    performance_group.add_argument(
+        "--progress-interval-ms",
+        type=int,
+        default=1000,
+        help="Progress update interval in milliseconds (default: 1000)",
+    )
+    performance_group.add_argument(
+        "--max-prefill-tokens",
+        type=int,
+        help="Maximum tokens per prefill pass (profile-dependent if not specified)",
+    )
+
+    return parser

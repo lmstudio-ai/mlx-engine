@@ -1,8 +1,9 @@
-from typing import List, Union, NamedTuple
+import logging
+from typing import List, NamedTuple, Union
+
 import mlx.core as mx
 from mlx_vlm import prepare_inputs
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-import logging
 
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
 

@@ -1,25 +1,33 @@
 import logging
 from pathlib import Path
 
-from mlx import nn
 import mlx.core as mx
-
-from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx import nn
+from mlx_vlm.models.lfm2_vl import (
+    Model as LFM2VlModel,
+)
+from mlx_vlm.models.lfm2_vl import (
+    ModelConfig as LFM2VlModelConfig,
+)
+from mlx_vlm.models.lfm2_vl import (
+    TextConfig as LFM2VlTextConfig,
+)
+from mlx_vlm.models.lfm2_vl import (
+    VisionConfig as LFM2VlVisionConfig,
+)
 from mlx_vlm.models.lfm2_vl import (
     VisionModel as LFM2VlVisionTower,
-    ModelConfig as LFM2VlModelConfig,
-    VisionConfig as LFM2VlVisionConfig,
-    TextConfig as LFM2VlTextConfig,
-    Model as LFM2VlModel,
 )
 from mlx_vlm.models.lfm2_vl.lfm2_vl import (
     Lfm2VlMultiModalProjector,
     PixelUnshuffleBlock,
 )
+
+from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
+from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
-from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 
 logger = logging.getLogger(__name__)
 

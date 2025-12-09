@@ -42,11 +42,12 @@ To run a demo of model load and inference:
 git clone https://github.com/lmstudio-ai/mlx-engine.git
 cd mlx-engine
 ```
-2. Create a virtual environment (optional)
+2. Create a virtual environment
 ```
  python3.11 -m venv .venv
  source .venv/bin/activate
 ```
+Note: The .venv directory is expected for development and is included in .gitignore.
 3. Install the required dependency packages
 ```
 pip install -U -r requirements.txt
@@ -127,6 +128,51 @@ python -m pytest tests/
 To test specific vision models:
 ```bash
 python -m pytest tests/test_vision_models.py -k pixtral
+```
+
+## Performance Optimization
+
+mlx-engine includes advanced performance optimization features for high-bandwidth Apple Silicon Macs:
+
+### Performance Profiles
+
+Performance profiles automatically optimize memory usage, cache sizing, and prefill strategies based on your hardware:
+
+- `--profile auto` (default): Automatically detects and selects optimal profile
+- `--profile default_safe`: Conservative profile for all Apple Silicon hardware  
+- `--profile m3_pro_64`: Optimized for M3 Pro with 64GB RAM
+- `--profile m3_max_128`: Optimized for M3 Max with 128GB RAM
+- `--profile m3_ultra_512`: Optimized for M3 Ultra with 512GB RAM
+
+### Prefill Strategies
+
+Control how prompts are processed for optimal memory usage:
+
+- `--prefill-mode auto` (default): Automatically choose best strategy
+- `--prefill-mode unbounded`: Process entire prompt at once (requires sufficient memory)
+- `--prefill-mode chunked`: Process prompt in memory-efficient chunks
+
+### Advanced Features
+
+- `--adaptive-chunk`: Enable adaptive chunk sizing for memory-efficient prefill
+- `--kv-branching`: Alias for --enable-branching (O(1) branch switching)
+- `--progress-interval-ms`: Set progress update interval (default: 1000ms)
+- `--max-prefill-tokens`: Override maximum tokens per prefill pass
+
+### Example Usage
+
+```bash
+# High-performance mode for M3 Ultra
+python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
+  --profile m3_ultra_512 --prefill-mode unbounded
+
+# Adaptive chunking for memory efficiency
+python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
+  --profile m3_max_128 --adaptive-chunk
+
+# Branching cache with performance optimization
+python demo.py --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit \
+  --kv-branching --cache-slots 8 --profile m3_ultra_256
 ```
 
 ## Attribution
