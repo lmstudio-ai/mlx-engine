@@ -299,17 +299,6 @@ def create_generator(
 
         generate_args["sampler"] = sampler_func_wrapper
 
-    # Add outlines logits processor if json_schema is provided
-    is_structured_output_request = json_schema is not None
-    if is_structured_output_request:
-        logits_processors.append(
-            JSONLogitsProcessor(
-                json_schema,
-                OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
-                tensor_library_name="mlx",
-            )
-        )
-
     # Validate top_logprobs
     if top_logprobs is None:
         top_logprobs = 0
@@ -324,10 +313,41 @@ def create_generator(
 
     tokenizer = model_kit.tokenizer
 
+    # Remove (probably) incorrect EOS tokens
+    temp_tokens = set()
+    for id in tokenizer.eos_token_ids:
+        text = tokenizer.decode(id)
+        # Specific override for RNJ-1
+        if model_kit.model_type == "gemma3_text" and id == 1 and text == '"':
+            continue
+        temp_tokens.add(id)
+    temp_tokens = temp_tokens.union(get_eot_token_ids(tokenizer, model_kit.model_type))
+
+    if len(temp_tokens) == 0:
+        raise RuntimeError(
+            f"EOS tokens cannot be empty. Before cleaning, the tokens were {tokenizer.eos_token_ids}"
+        )
+    tokenizer.eos_token_ids = temp_tokens
+
     # Add eot token ids to tokenizer
     tokenizer.eos_token_ids = tokenizer.eos_token_ids.union(
         get_eot_token_ids(tokenizer, model_kit.model_type)
     )
+
+    if tokenizer.eos_token_id not in tokenizer.eos_token_ids:
+        tokenizer.eos_token_id = min(tokenizer.eos_token_ids)
+        model_kit.tokenizer._tokenizer.eos_token_id = tokenizer.eos_token_id
+
+    # Add outlines logits processor if json_schema is provided
+    is_structured_output_request = json_schema is not None
+    if is_structured_output_request:
+        logits_processors.append(
+            JSONLogitsProcessor(
+                json_schema,
+                OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
+                tensor_library_name="mlx",
+            )
+        )
 
     # Set up stop string processor if non-empty stop_strings are provided
     stop_string_processor = None
@@ -399,6 +419,8 @@ def create_generator(
         **generate_args,
     )
 
+    print(f"EOS token IDs={tokenizer.eos_token_ids}")
+
     while True:
         try:
             generation_result = next(stream)
@@ -424,6 +446,8 @@ def create_generator(
                 from_draft=generation_result.from_draft,
             )
         )
+        # for t in token_buffer:
+        # print(f"T(id={t.id}, text={t.text})", file=sys.stderr)
         if top_logprobs:
             top_logprobs_buffer.append(
                 summarize_top_logprobs(tokenizer, logprobs, top_logprobs)
@@ -440,6 +464,7 @@ def create_generator(
                     token_buffer,
                     top_logprobs_buffer,
                 )
+                print("STOP STRING DETECTED")
                 break  # stop generation
 
             # If we currently have generated a partial match with a stop sequence, or detected an
@@ -456,6 +481,7 @@ def create_generator(
             # populate stop_condition if we hit an eos token
             stop_condition = None
             if token in tokenizer.eos_token_ids:
+                print("STOP TOKEN DETECTED")
                 stop_condition = GenerationStopCondition(
                     stop_reason="eos_token",
                     stop_string=tokenizer.decode(token),
