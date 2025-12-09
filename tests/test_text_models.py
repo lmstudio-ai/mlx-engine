@@ -1,4 +1,5 @@
 import json
+import pytest
 import unittest
 from pathlib import Path
 import logging
@@ -323,6 +324,41 @@ class TestStructuredGen(unittest.TestCase):
         self.assertIn("name", generated_text)
         self.assertIn("hex", generated_text)
 
+        # throw if not valid JSON
+        json.loads(generated_text)
+
+    @pytest.mark.heavy
+    def test_structured_gen_rnj_1(self):
+        """Test Structured Generation with RNJ-1 model"""
+        model_path = model_getter("lmstudio-community/rnj-1-instruct-MLX-4bit")
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=4096,
+        )
+        prompt_template = """<|start_header_id|>system<|end_header_id|>
+You are rnj-1, a foundation model trained by Essential AI.
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+{user_text}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+"""
+        prompt = prompt_template.format(user_text=self.prompt)
+        prompt_tokens = tokenize(model_kit, prompt)
+        generated_text = ""
+        for result in create_generator(
+            model_kit=model_kit,
+            prompt_tokens=prompt_tokens,
+            seed=0,
+            temp=0.0,
+            max_tokens=100,
+            json_schema=self.json_schema,
+        ):
+            print(result.text, end="", flush=True)
+            generated_text += result.text
+            if result.stop_condition:
+                break
+        print("\n", flush=True)
+
+        # This is what the structured output would force without EOT token correction
+        assert "<|end_of_text|>" not in generated_text
         # throw if not valid JSON
         json.loads(generated_text)
 
