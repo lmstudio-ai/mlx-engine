@@ -136,6 +136,29 @@ def unload_draft_model(model_kit: ModelKit | VisionModelKit) -> None:
     model_kit.unload_draft_model()
 
 
+def _sanitize_eos_tokens(model_kit: ModelKit | VisionModelKit) -> None:
+    # Remove (probably) incorrect EOS tokens
+    tokenizer = model_kit.tokenizer
+    temp_tokens = set()
+    for id in tokenizer.eos_token_ids:
+        text = tokenizer.decode(id)
+        # Specific override for RNJ-1
+        if model_kit.model_type == "gemma3_text" and id == 1 and text == '"':
+            continue
+        temp_tokens.add(id)
+    temp_tokens = temp_tokens.union(get_eot_token_ids(tokenizer, model_kit.model_type))
+
+    if len(temp_tokens) == 0:
+        raise RuntimeError(
+            f"EOS tokens cannot be empty. Before cleaning, the tokens were {tokenizer.eos_token_ids}"
+        )
+    tokenizer.eos_token_ids = temp_tokens
+
+    if tokenizer.eos_token_id not in tokenizer.eos_token_ids:
+        tokenizer.eos_token_id = min(tokenizer.eos_token_ids)
+        tokenizer._tokenizer.eos_token_id = tokenizer.eos_token_id
+
+
 def create_generator(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],
@@ -311,27 +334,8 @@ def create_generator(
     token_buffer: List[Token] = []
     top_logprobs_buffer: List[List[Token]] = []
 
+    _sanitize_eos_tokens(model_kit)
     tokenizer = model_kit.tokenizer
-
-    # Remove (probably) incorrect EOS tokens
-    temp_tokens = set()
-    for id in tokenizer.eos_token_ids:
-        text = tokenizer.decode(id)
-        # Specific override for RNJ-1
-        if model_kit.model_type == "gemma3_text" and id == 1 and text == '"':
-            continue
-        temp_tokens.add(id)
-    temp_tokens = temp_tokens.union(get_eot_token_ids(tokenizer, model_kit.model_type))
-
-    if len(temp_tokens) == 0:
-        raise RuntimeError(
-            f"EOS tokens cannot be empty. Before cleaning, the tokens were {tokenizer.eos_token_ids}"
-        )
-    tokenizer.eos_token_ids = temp_tokens
-
-    if tokenizer.eos_token_id not in tokenizer.eos_token_ids:
-        tokenizer.eos_token_id = min(tokenizer.eos_token_ids)
-        model_kit.tokenizer._tokenizer.eos_token_id = tokenizer.eos_token_id
 
     # Add outlines logits processor if json_schema is provided
     is_structured_output_request = json_schema is not None
