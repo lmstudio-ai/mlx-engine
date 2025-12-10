@@ -329,11 +329,6 @@ def create_generator(
         )
     tokenizer.eos_token_ids = temp_tokens
 
-    # Add eot token ids to tokenizer
-    tokenizer.eos_token_ids = tokenizer.eos_token_ids.union(
-        get_eot_token_ids(tokenizer, model_kit.model_type)
-    )
-
     if tokenizer.eos_token_id not in tokenizer.eos_token_ids:
         tokenizer.eos_token_id = min(tokenizer.eos_token_ids)
         model_kit.tokenizer._tokenizer.eos_token_id = tokenizer.eos_token_id
