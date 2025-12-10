@@ -419,8 +419,6 @@ def create_generator(
         **generate_args,
     )
 
-    print(f"EOS token IDs={tokenizer.eos_token_ids}")
-
     while True:
         try:
             generation_result = next(stream)
@@ -446,8 +444,6 @@ def create_generator(
                 from_draft=generation_result.from_draft,
             )
         )
-        # for t in token_buffer:
-        # print(f"T(id={t.id}, text={t.text})", file=sys.stderr)
         if top_logprobs:
             top_logprobs_buffer.append(
                 summarize_top_logprobs(tokenizer, logprobs, top_logprobs)
@@ -464,7 +460,6 @@ def create_generator(
                     token_buffer,
                     top_logprobs_buffer,
                 )
-                print("STOP STRING DETECTED")
                 break  # stop generation
 
             # If we currently have generated a partial match with a stop sequence, or detected an
@@ -481,7 +476,6 @@ def create_generator(
             # populate stop_condition if we hit an eos token
             stop_condition = None
             if token in tokenizer.eos_token_ids:
-                print("STOP TOKEN DETECTED")
                 stop_condition = GenerationStopCondition(
                     stop_reason="eos_token",
                     stop_string=tokenizer.decode(token),
