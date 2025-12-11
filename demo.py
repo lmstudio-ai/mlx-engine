@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, AutoProcessor
 DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
 DEFAULT_TEMP = 0.8
 
-DEFAULT_SYSTEM_PROMPT = {"role": "system", "content": "You are a helpful assistant."}
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def setup_arg_parser():
@@ -30,6 +30,17 @@ def setup_arg_parser():
         default=DEFAULT_PROMPT,
         type=str,
         help="Message to be processed by the model",
+    )
+    parser.add_argument(
+        "--system",
+        default=DEFAULT_SYSTEM_PROMPT,
+        type=str,
+        help="System prompt for the model",
+    )
+    parser.add_argument(
+        "--no-system",
+        action="store_true",
+        help="Disable the system prompt",
     )
     parser.add_argument(
         "--images",
@@ -199,14 +210,18 @@ if __name__ == "__main__":
     # Tokenize the prompt
     prompt = args.prompt
 
+    # Build conversation with optional system prompt
+    conversation = []
+    if not args.no_system:
+        conversation.append({"role": "system", "content": args.system})
+
     # Handle the prompt according to the input type
     # If images are provided, add them to the prompt
     images_base64 = []
     if args.images:
         tf_tokenizer = AutoProcessor.from_pretrained(model_path)
         images_base64 = [image_to_base64(img_path) for img_path in args.images]
-        conversation = [
-            DEFAULT_SYSTEM_PROMPT,
+        conversation.append(
             {
                 "role": "user",
                 "content": [
@@ -216,14 +231,11 @@ if __name__ == "__main__":
                     ],
                     {"type": "text", "text": prompt},
                 ],
-            },
-        ]
+            }
+        )
     else:
         tf_tokenizer = AutoTokenizer.from_pretrained(model_path)
-        conversation = [
-            DEFAULT_SYSTEM_PROMPT,
-            {"role": "user", "content": prompt},
-        ]
+        conversation.append({"role": "user", "content": prompt})
     prompt = tf_tokenizer.apply_chat_template(
         conversation, tokenize=False, add_generation_prompt=True
     )
