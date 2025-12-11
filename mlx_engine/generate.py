@@ -13,7 +13,7 @@ from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )
 from mlx_engine.utils.token import Token
-from mlx_engine.utils.eot_tokens import get_eot_token_ids
+from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
 from mlx_engine.stop_string_processor import (
     StopStringProcessor,
@@ -120,7 +120,7 @@ def load_model(
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
-    _sanitize_eos_tokens(model_kit)
+    sanitize_eos_tokens(model_kit)
     return model_kit
 
 
@@ -136,29 +136,6 @@ def is_draft_model_compatible(
 
 def unload_draft_model(model_kit: ModelKit | VisionModelKit) -> None:
     model_kit.unload_draft_model()
-
-
-def _sanitize_eos_tokens(model_kit: ModelKit | VisionModelKit) -> None:
-    # Remove (probably) incorrect EOS tokens
-    tokenizer = model_kit.tokenizer
-    temp_tokens = set()
-    for id in tokenizer.eos_token_ids:
-        text = tokenizer.decode(id)
-        # Specific override for RNJ-1
-        if model_kit.model_type == "gemma3_text" and id == 1 and text == '"':
-            continue
-        temp_tokens.add(id)
-    temp_tokens = temp_tokens.union(get_eot_token_ids(tokenizer, model_kit.model_type))
-
-    if len(temp_tokens) == 0:
-        raise RuntimeError(
-            f"EOS tokens cannot be empty. Before cleaning, the tokens were {tokenizer.eos_token_ids}"
-        )
-    tokenizer.eos_token_ids = temp_tokens
-
-    if tokenizer.eos_token_id not in tokenizer.eos_token_ids:
-        tokenizer.eos_token_id = min(tokenizer.eos_token_ids)
-        tokenizer._tokenizer.eos_token_id = tokenizer.eos_token_id
 
 
 def create_generator(

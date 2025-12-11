@@ -1,4 +1,6 @@
 from typing import Optional
+from mlx_engine.model_kit.model_kit import ModelKit
+from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
 
 # Taken from https://github.com/ggml-org/llama.cpp/blob/971f245/src/llama-vocab.cpp#L1807-L1814
 DEFAULT_EOT_TOKENS = [
@@ -15,7 +17,7 @@ DEFAULT_EOT_TOKENS = [
 MODEL_TYPE_TO_EOT_TOKENS = {"gpt_oss": ["<|return|>", "<|call|>"]}
 
 
-def get_eot_token_ids(tokenizer, model_type: Optional[str] = None) -> set[int]:
+def _get_eot_token_ids(tokenizer, model_type: Optional[str] = None) -> set[int]:
     """
     Get the token ID of common end-of-text tokens, using the provided tokenizer.
 
@@ -43,3 +45,26 @@ def get_eot_token_ids(tokenizer, model_type: Optional[str] = None) -> set[int]:
     ]
 
     return set(single_int + single_element_list)
+
+
+def sanitize_eos_tokens(model_kit: ModelKit | VisionModelKit) -> None:
+    # Remove (probably) incorrect EOS tokens
+    tokenizer = model_kit.tokenizer
+    temp_tokens = set()
+    for id in tokenizer.eos_token_ids:
+        text = tokenizer.decode(id)
+        # Specific override for RNJ-1
+        if model_kit.model_type == "gemma3_text" and id == 1 and text == '"':
+            continue
+        temp_tokens.add(id)
+    temp_tokens = temp_tokens.union(_get_eot_token_ids(tokenizer, model_kit.model_type))
+
+    if len(temp_tokens) == 0:
+        raise RuntimeError(
+            f"EOS tokens cannot be empty. Before cleaning, the tokens were {tokenizer.eos_token_ids}"
+        )
+    tokenizer.eos_token_ids = temp_tokens
+
+    if tokenizer.eos_token_id not in tokenizer.eos_token_ids:
+        tokenizer.eos_token_id = min(tokenizer.eos_token_ids)
+        tokenizer._tokenizer.eos_token_id = tokenizer.eos_token_id
