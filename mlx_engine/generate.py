@@ -13,7 +13,7 @@ from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )
 from mlx_engine.utils.token import Token
-from mlx_engine.utils.eot_tokens import get_eot_token_ids
+from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
 from mlx_engine.stop_string_processor import (
     StopStringProcessor,
@@ -110,9 +110,9 @@ def load_model(
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
             )
-        return VisionModelKit(model_path, vocab_only, trust_remote_code)
+        model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
     else:
-        return ModelKit(
+        model_kit = ModelKit(
             model_path,
             vocab_only,
             max_kv_size,
@@ -120,6 +120,8 @@ def load_model(
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
+    sanitize_eos_tokens(model_kit)
+    return model_kit
 
 
 def load_draft_model(model_kit: ModelKit | VisionModelKit, path: str | Path) -> None:
@@ -299,17 +301,6 @@ def create_generator(
 
         generate_args["sampler"] = sampler_func_wrapper
 
-    # Add outlines logits processor if json_schema is provided
-    is_structured_output_request = json_schema is not None
-    if is_structured_output_request:
-        logits_processors.append(
-            JSONLogitsProcessor(
-                json_schema,
-                OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
-                tensor_library_name="mlx",
-            )
-        )
-
     # Validate top_logprobs
     if top_logprobs is None:
         top_logprobs = 0
@@ -324,10 +315,16 @@ def create_generator(
 
     tokenizer = model_kit.tokenizer
 
-    # Add eot token ids to tokenizer
-    tokenizer.eos_token_ids = tokenizer.eos_token_ids.union(
-        get_eot_token_ids(tokenizer, model_kit.model_type)
-    )
+    # Add outlines logits processor if json_schema is provided
+    is_structured_output_request = json_schema is not None
+    if is_structured_output_request:
+        logits_processors.append(
+            JSONLogitsProcessor(
+                json_schema,
+                OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
+                tensor_library_name="mlx",
+            )
+        )
 
     # Set up stop string processor if non-empty stop_strings are provided
     stop_string_processor = None
