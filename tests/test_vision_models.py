@@ -157,21 +157,15 @@ class TestVisionModels:
 
     @pytest.mark.heavy
     @pytest.mark.parametrize(
-        "test_params",
+        "model",
         [
-            {
-                "model": "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit",
-                "character": "clara",
-            },
-            {
-                "model": "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
-                "character": "elias",
-            },
+            "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit",
+            "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
         ],
     )
-    def test_mistral3_text_only_generation_caching(self, test_params):
+    def test_mistral3_text_only_generation_caching(self, model):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
-        model_path = model_getter(test_params["model"])
+        model_path = model_getter(model)
 
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
 
@@ -201,19 +195,19 @@ class TestVisionModels:
             return generated_text, num_prompt_processing_callbacks
 
         # Generation 1 - model creates a long story
-        prompt = "<s>[INST]Tell me a 500 word story[/INST]"
+        prompt = "<s>[INST]Tell me a 500 word story about the bravest soul in the middle ages, and their weapon of choice[/INST]"
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
         assert num_prompt_processing_callbacks == 2  # single batch - 0%, 100%
-        assert test_params["character"] in generated_text.lower()
+        assert "aldric" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
-        prompt += generated_text + "[INST]What was the main characters name?[/INST]"
+        prompt += generated_text + "[INST]What was the main character's name?[/INST]"
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
         assert num_tokens > 512
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
         assert num_prompt_processing_callbacks == 2  # single batch - 0%, 100%
-        assert f"**{test_params['character']}**" in generated_text.lower()
+        assert "aldric" in generated_text.lower()
 
     def test_qwen2_vision(self):
         """Test Qwen2 VL 7B Instruct model"""
