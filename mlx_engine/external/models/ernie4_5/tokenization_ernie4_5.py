@@ -17,7 +17,7 @@ from shutil import copyfile
 from typing import List, Optional, Tuple
 import sentencepiece as spm
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer
 from transformers.utils import logging
 
 
