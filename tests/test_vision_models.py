@@ -1,4 +1,3 @@
-import unittest
 import base64
 from pathlib import Path
 import pytest
@@ -15,9 +14,9 @@ from textwrap import dedent
 MAX_IMAGE_SIZE = (1024, 1024)
 
 
-class TestVisionModels(unittest.TestCase):
+class TestVisionModels:
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         """Set up test resources that will be shared across all test methods"""
         cls.description_prompt = "What is this"
         cls.text_only_prompt = "What is a toucan?"
@@ -74,16 +73,15 @@ class TestVisionModels(unittest.TestCase):
         print()
 
         # Verify the output
-        self.assertGreater(
-            len(generated_text), 0, f"Model {model_name} failed to generate any text"
+        assert len(generated_text) > 0, (
+            f"Model {model_name} failed to generate any text"
         )
         accept_phrases = ["toucan"]
         if supplemental_accept_phrases:
             accept_phrases += supplemental_accept_phrases
         bird_spotted = any(word in generated_text.lower() for word in accept_phrases)
-        self.assertTrue(
-            bird_spotted,
-            f"Model {model_name} failed to any of {accept_phrases} in the image",
+        assert bird_spotted, (
+            f"Model {model_name} failed to any of {accept_phrases} in the image"
         )
 
         return generated_text
@@ -107,10 +105,7 @@ class TestVisionModels(unittest.TestCase):
             )
         except AttributeError as e:
             # mlx-lm prompt processing fails
-            self.assertIn(
-                "'NoneType' object has no attribute 'shape'",
-                str(e),
-            )
+            assert "'NoneType' object has no attribute 'shape'" in str(e)
 
     def test_pixtral_vision(self):
         """Test Pixtral 12B model"""
@@ -161,11 +156,22 @@ class TestVisionModels(unittest.TestCase):
         )
 
     @pytest.mark.heavy
-    def test_mistral3_text_only_generation_caching(self):
+    @pytest.mark.parametrize(
+        "test_params",
+        [
+            {
+                "model": "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit",
+                "character": "clara",
+            },
+            {
+                "model": "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+                "character": "elias",
+            },
+        ],
+    )
+    def test_mistral3_text_only_generation_caching(self, test_params):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
-        model_path = model_getter(
-            "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit"
-        )
+        model_path = model_getter(test_params["model"])
 
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
 
@@ -197,17 +203,17 @@ class TestVisionModels(unittest.TestCase):
         # Generation 1 - model creates a long story
         prompt = "<s>[INST]Tell me a 500 word story[/INST]"
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(num_prompt_processing_callbacks, 2)  # single batch - 0%, 100%
-        self.assertIn("clara", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0%, 100%
+        assert test_params["character"] in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         prompt += generated_text + "[INST]What was the main characters name?[/INST]"
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
-        self.assertGreater(num_tokens, 512)
+        assert num_tokens > 512
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0%, 100%
-        self.assertIn("**clara**", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0%, 100%
+        assert f"**{test_params['character']}**" in generated_text.lower()
 
     def test_qwen2_vision(self):
         """Test Qwen2 VL 7B Instruct model"""
@@ -308,9 +314,8 @@ You are a helpful assistant.<|im_end|>
         is_word_accepted = any(
             word in generated_text.lower() for word in acceptable_words
         )
-        self.assertTrue(
-            is_word_accepted,
-            f"Expected one of {acceptable_words} but got {generated_text.lower()}",
+        assert is_word_accepted, (
+            f"Expected one of {acceptable_words} but got {generated_text.lower()}"
         )
 
         # Test case 2: Second image added in continued conversation
@@ -321,16 +326,16 @@ You are a helpful assistant.<|im_end|>
 """
         images_b64 = [self.toucan_image_b64, self.chameleon_image_b64]
         generated_text = generate_text(prompt, images_b64)
-        self.assertIn("toucan", generated_text.lower())
-        self.assertIn("chameleon", generated_text.lower())
+        assert "toucan" in generated_text.lower()
+        assert "chameleon" in generated_text.lower()
 
-    @unittest.skip("Unavailable since this requires trust_remote_code")
+    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
     def test_florence_vision(self):
         """Test Florence 2 Large model"""
         prompt = self.description_prompt
         self.toucan_test_runner("mlx-community/Florence-2-base-ft-4bit", prompt)
 
-    @unittest.skip("Unavailable since this requires trust_remote_code")
+    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
     def test_florence_text_only(self):
         """Test Florence 2 Large model with only text"""
         prompt = self.text_only_prompt
@@ -339,18 +344,18 @@ You are a helpful assistant.<|im_end|>
                 "mlx-community/Florence-2-base-ft-4bit", prompt, text_only=True
             )
         except ValueError as e:
-            self.assertIn(
-                "Using this model without any images attached is not supported yet.",
-                str(e),
+            assert (
+                "Using this model without any images attached is not supported yet."
+                in str(e)
             )
 
-    @unittest.skip("Unavailable since this requires trust_remote_code")
+    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
     def test_molmo_vision(self):
         """Test Molmo 7B model"""
         prompt = self.description_prompt
         self.toucan_test_runner("mlx-community/Molmo-7B-D-0924-4bit", prompt)
 
-    @unittest.skip("Unavailable since this requires trust_remote_code")
+    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
     def test_molmo_text_only(self):
         """Test Molmo 7B model with only text"""
         prompt = self.text_only_prompt
@@ -415,9 +420,9 @@ You are a helpful assistant.<|im_end|>
                 "mlx-community/paligemma2-3b-pt-896-4bit", prompt, text_only=True
             )
         except ValueError as e:
-            self.assertIn(
-                "Using this model without any images attached is not supported yet.",
-                str(e),
+            assert (
+                "Using this model without any images attached is not supported yet."
+                in str(e)
             )
 
     def test_gemma3_vision(self):
@@ -470,8 +475,8 @@ You are a helpful assistant.<|im_end|>
             <start_of_turn>model
             """)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(num_prompt_processing_callbacks, 2)  # single batch - 0, 100
-        self.assertIn("silas", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         prompt += generated_text + dedent("""\
@@ -482,10 +487,10 @@ You are a helpful assistant.<|im_end|>
             """)
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
-        self.assertGreater(num_tokens, 512)
+        assert num_tokens > 512
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
-        self.assertIn("silas", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        assert "silas" in generated_text.lower()
 
     def test_gemma3_text_only_long_original_prompt_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
@@ -531,12 +536,10 @@ Summarize this in one sentence<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
-        self.assertGreater(num_tokens, 1024)
+        assert num_tokens > 1024
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(
-            4, num_prompt_processing_callbacks
-        )  # 4 batches, so 0, x, x, 100
-        self.assertIn("benjamin franklin", generated_text.lower())
+        assert num_prompt_processing_callbacks == 4  # 4 batches, so 0, x, x, 100
+        assert "benjamin franklin" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         prompt += generated_text + dedent("""\
@@ -547,8 +550,8 @@ Summarize this in one sentence<end_of_turn>
                 """)
         print(prompt)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
-        self.assertIn("benjamin franklin", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        assert "benjamin franklin" in generated_text.lower()
 
     def test_gemma3n_vision(self):
         """Test gemma 3n model"""
@@ -601,8 +604,8 @@ Summarize this in one sentence<end_of_turn>
             <start_of_turn>model
             """)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(num_prompt_processing_callbacks, 2)  # single batch - 0, 100
-        self.assertIn("silas", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         prompt += generated_text + dedent("""\
@@ -613,10 +616,10 @@ Summarize this in one sentence<end_of_turn>
             """)
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
-        self.assertGreater(num_tokens, 512)
+        assert num_tokens > 512
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
-        self.assertIn("silas", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        assert "silas" in generated_text.lower()
 
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_long_original_prompt_caching(self):
@@ -663,12 +666,10 @@ Summarize this in one sentence<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
-        self.assertGreater(num_tokens, 1024)
+        assert num_tokens > 1024
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(
-            4, num_prompt_processing_callbacks
-        )  # 4 batches, so 0, x, x, 100
-        self.assertIn("benjamin franklin", generated_text.lower())
+        assert num_prompt_processing_callbacks == 4  # 4 batches, so 0, x, x, 100
+        assert "benjamin franklin" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         prompt += generated_text + dedent("""\
@@ -679,8 +680,8 @@ Summarize this in one sentence<end_of_turn>
                 """)
         print(prompt)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        self.assertEqual(2, num_prompt_processing_callbacks)  # single batch - 0, 100
-        self.assertIn("benjamin franklin", generated_text.lower())
+        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        assert "benjamin franklin" in generated_text.lower()
 
     def test_gemma3n_vision_long_prompt_progress_reported(self):
         """Ensure progress is reported during prompt processing with a vision prompt"""
@@ -726,9 +727,9 @@ Summarize this in one sentence<end_of_turn>
                 break
         print("\n", flush=True)
         print(progress_values)
-        self.assertGreater(len(progress_values), 0)
+        assert len(progress_values) > 0
         for i in range(len(progress_values) - 1):
-            self.assertGreater(progress_values[i + 1], progress_values[i])
+            assert progress_values[i + 1] > progress_values[i]
 
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):
@@ -737,8 +738,24 @@ Summarize this in one sentence<end_of_turn>
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
         model_kit = load_model(model_path=model_path)
-        self.assertFalse(
-            is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+        assert not is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
+
+    @pytest.mark.heavy
+    def test_devstral_small_2_vision(self):
+        """Test Devstral Small 2 model"""
+        prompt = f"<s>[SYSTEM_PROMPT]You are a helpful assistant.[/SYSTEM_PROMPT][INST][IMG]{self.description_prompt}[/INST]"
+        self.toucan_test_runner(
+            "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", prompt
+        )
+
+    @pytest.mark.heavy
+    def test_devstral_small_2_text_only(self):
+        """Test Devstral Small 2 model with text only"""
+        prompt = f"<s>[SYSTEM_PROMPT]You are a helpful assistant.[/SYSTEM_PROMPT][INST][IMG]{self.text_only_prompt}[/INST]"
+        self.toucan_test_runner(
+            "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+            prompt,
+            text_only=True,
         )
 
 
