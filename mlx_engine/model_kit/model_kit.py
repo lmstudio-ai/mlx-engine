@@ -15,6 +15,7 @@ from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
+from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ class ModelKit:
         self.model_type = config_json.get("model_type", None)
 
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
+        fix_mistral_pre_tokenizer(
+            tokenizer=self.tokenizer, model_path=model_path, model_type=self.model_type
+        )
         self.detokenizer = self.tokenizer.detokenizer
         self.cache_wrapper = CacheWrapper(
             self.model,
