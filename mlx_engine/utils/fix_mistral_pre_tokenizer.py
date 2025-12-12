@@ -7,6 +7,8 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
+# List taken from here
+# https://github.com/huggingface/transformers/blob/b9951b4/src/transformers/tokenization_utils_tokenizers.py#L1187
 _LEGACY_MISTRAL_MODEL_TYPES = [
     "mistral",
     "mistral3",
