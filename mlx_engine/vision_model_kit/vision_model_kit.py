@@ -67,15 +67,15 @@ class VisionModelKit(ModelKit):
         self.model = VisionModelWrapper(self.model)
 
         # Set the eos_token_ids (check root level first, then text_config)
-        eos_tokens_ids_raw = self.config.get("eos_token_id")
-        if eos_tokens_ids_raw is None:
-            eos_tokens_ids_raw = self.config.get("text_config", {}).get("eos_token_id")
+        eos_token_ids_raw = self.config.get("eos_token_id")
+        if eos_token_ids_raw is None:
+            eos_token_ids_raw = self.config.get("text_config", {}).get("eos_token_id")
         eos_token_ids = None
-        if eos_tokens_ids_raw is not None:
+        if eos_token_ids_raw is not None:
             eos_token_ids = (
-                [eos_tokens_ids_raw]
-                if isinstance(eos_tokens_ids_raw, int)
-                else list(set(eos_tokens_ids_raw))
+                [eos_token_ids_raw]
+                if isinstance(eos_token_ids_raw, int)
+                else list(set(eos_token_ids_raw))
             )
             logger.info(f"Setting eos token ids: {eos_token_ids}")
 
