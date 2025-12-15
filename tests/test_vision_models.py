@@ -160,7 +160,7 @@ class TestVisionModels:
         "model",
         [
             "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit",
-            "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+            "lmstudio-community/Devstral-Small-2-24B-Instruct-2512-MLX-4bit",
         ],
     )
     def test_mistral3_text_only_generation_caching(self, model):
