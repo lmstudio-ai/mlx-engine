@@ -112,13 +112,8 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         final_inputs_embeds = Mistral3CombinedModel.merge_input_ids_with_image_features(
             self.config.image_token_index, image_features, inputs_embeds, input_ids
         )
-        if input_ids.shape[1] == final_inputs_embeds.shape[1]:
-            return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
-        # Return fake input_ids b/c the original lmstudio-community MLX upload had an incorrect
-        # processor_config.json that caused input_ids have extra placeholder image tokens.
-        return mx.array(
-            [0] * final_inputs_embeds.squeeze(0).shape[0]
-        ), final_inputs_embeds.squeeze(0)
+        # remove batch dimension
+        return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
     
     @staticmethod
     def _is_lmstudio_mistral_3_2_small(model_path: Path) -> bool:
