@@ -1,5 +1,4 @@
 import logging
-import math
 from pathlib import Path
 
 from mlx import nn
@@ -30,10 +29,9 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
     def __init__(self, model_path: Path):
         """Initialize Mistral3VisionAddOn with vision components loaded from the given path."""
         super().__init__()
-        self.model_path = Path(model_path)
 
-        processor_kwargs = {}
-        if self._is_lmstudio_mistral_3_2_small():
+        processor_kwargs = None
+        if self._is_lmstudio_mistral_3_2_small(model_path):
             processor_kwargs = {
                 "patch_size": 14,
                 "spatial_merge_size": 2,
@@ -122,7 +120,8 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
             [0] * final_inputs_embeds.squeeze(0).shape[0]
         ), final_inputs_embeds.squeeze(0)
     
-    def _is_lmstudio_mistral_3_2_small(self) -> bool:
+    @staticmethod
+    def _is_lmstudio_mistral_3_2_small(model_path: Path) -> bool:
         return "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX" in str(
-            self.model_path
+            model_path
         )
