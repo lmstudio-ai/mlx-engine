@@ -1,4 +1,5 @@
 import logging
+import math
 from pathlib import Path
 
 from mlx import nn
@@ -29,6 +30,18 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
     def __init__(self, model_path: Path):
         """Initialize Mistral3VisionAddOn with vision components loaded from the given path."""
         super().__init__()
+        self.model_path = Path(model_path)
+
+        processor_kwargs = {}
+        if self._is_lmstudio_mistral_3_2_small():
+            processor_kwargs = {
+                "patch_size": 14,
+                "spatial_merge_size": 2,
+            }
+            logger.info(
+                "Detected LM Studio Mistral Small 3.2 model. "
+                f"Using custom processor kwargs: {processor_kwargs}"
+            )
 
         self.vision_tower, self.multi_modal_projector, self.config, self.processor = (
             load_vision_addon(
@@ -39,6 +52,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
                 vision_tower_class=Mistral3VisionTower,
                 multi_modal_projector_class=Mistral3MultiModalProjector,
                 logger=logger,
+                processor_kwargs=processor_kwargs,
             )
         )
 
@@ -107,3 +121,8 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         return mx.array(
             [0] * final_inputs_embeds.squeeze(0).shape[0]
         ), final_inputs_embeds.squeeze(0)
+    
+    def _is_lmstudio_mistral_3_2_small(self) -> bool:
+        return "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX" in str(
+            self.model_path
+        )
