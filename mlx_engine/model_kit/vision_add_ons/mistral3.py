@@ -114,7 +114,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         )
         # remove batch dimension
         return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
-    
+
     @staticmethod
     def _is_lmstudio_mistral_3_2_small(model_path: Path) -> bool:
         return "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX" in str(

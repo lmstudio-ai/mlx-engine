@@ -230,7 +230,9 @@ def load_vision_addon(
     )
 
     # Load processor
-    processor = load_processor(model_path=model_path, add_detokenizer=True, **processor_kwargs)
+    processor = load_processor(
+        model_path=model_path, add_detokenizer=True, **processor_kwargs
+    )
 
     # Load and filter weights
     vision_weights = load_and_filter_weights(model_path, components)
