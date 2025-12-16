@@ -196,7 +196,6 @@ def load_vision_addon(
     vision_tower_class: Type[nn.Module],
     multi_modal_projector_class: Type[nn.Module] | None,
     logger: logging.Logger,
-    processor_kwargs: dict = {},
 ) -> Tuple[nn.Module, nn.Module | None, Any, Any]:
     """
     Load vision add-on components, configuration, and processor.
@@ -230,7 +229,7 @@ def load_vision_addon(
     )
 
     # Load processor
-    processor = load_processor(model_path=model_path, add_detokenizer=True, **processor_kwargs)
+    processor = load_processor(model_path=model_path, add_detokenizer=True)
 
     # Load and filter weights
     vision_weights = load_and_filter_weights(model_path, components)
