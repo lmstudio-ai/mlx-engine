@@ -30,7 +30,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         """Initialize Mistral3VisionAddOn with vision components loaded from the given path."""
         super().__init__()
 
-        processor_kwargs = None
+        processor_kwargs: dict | None = None
         if self._is_lmstudio_mistral_3_2_small(model_path):
             processor_kwargs = {
                 "patch_size": 14,
