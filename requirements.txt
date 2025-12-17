@@ -23,9 +23,9 @@ jsonschema==4.25.1
 jsonschema-specifications==2025.9.1
 lark==1.3.1
 mlx==0.30.0
-mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@085e36e
+mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@f3ed856
 mlx-metal==0.30.0
-mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@a010fd3
+mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@1d8622b0
 nest-asyncio==1.6.0
 outlines==1.1.1
 outlines-core==0.1.26
