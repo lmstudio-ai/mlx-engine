@@ -46,7 +46,7 @@ class LFM2VisionAddOn(BaseVisionAddOn):
             )
         )
 
-        self._ensure_channel_first_fast_processor(self.processor)
+        self._ensure_channel_first_if_fast_processor(self.processor)
 
         # this particular block comes from
         # https://github.com/Blaizzy/mlx-vlm/blob/f02d63e8f5b521e8c75f129a63d2660efd132693/mlx_vlm/models/lfm2_vl/lfm2_vl.py#L102-L105
@@ -121,7 +121,7 @@ class LFM2VisionAddOn(BaseVisionAddOn):
         return input_ids, final_inputs_embeds
 
     @staticmethod
-    def _ensure_channel_first_fast_processor(processor) -> None:
+    def _ensure_channel_first_if_fast_processor(processor) -> None:
         """Override input_data_format is "channels_first" to avoid double permutes."""
         image_processor = getattr(processor, "image_processor", None)
         if image_processor and getattr(image_processor, "is_fast", False):
