@@ -20,6 +20,7 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
 )
 from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
+from transformers.image_utils import ChannelDimension
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ class LFM2VisionAddOn(BaseVisionAddOn):
                 logger=logger,
             )
         )
+
+        self._ensure_channel_first_fast_processor(self.processor)
 
         # this particular block comes from
         # https://github.com/Blaizzy/mlx-vlm/blob/f02d63e8f5b521e8c75f129a63d2660efd132693/mlx_vlm/models/lfm2_vl/lfm2_vl.py#L102-L105
@@ -116,3 +119,26 @@ class LFM2VisionAddOn(BaseVisionAddOn):
         if input_ids.shape[1] == final_inputs_embeds.shape[1]:
             return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
         return input_ids, final_inputs_embeds
+
+    @staticmethod
+    def _ensure_channel_first_fast_processor(processor) -> None:
+        """Override input_data_format is "channels_first" to avoid double permutes."""
+        image_processor = getattr(processor, "image_processor", None)
+        if image_processor and getattr(image_processor, "is_fast", False):
+            # LFM2 model shipped with preprocessor_config.json "input_data_format": "channels_last"
+            # ref: https://huggingface.co/mlx-community/LFM2-VL-450M-4bit/blob/main/preprocessor_config.json#L20
+
+            # mlx-vlm sets use_fast=True when loading the processor
+            # ref: https://github.com/Blaizzy/mlx-vlm/blob/1d8622b061cd39b7af6738500c60804a3f171095/mlx_vlm/utils.py#L367
+
+            # In transformers fast processors, torchvision pil_to_tensor call naturally permutes
+            # from "channels_last" -> "channels_first"
+            # ref: https://github.com/huggingface/transformers/blob/dd24a80666b72c85f02c6cf9df18164cc174ab74/src/transformers/image_processing_utils_fast.py#L689-L690
+            # ref: https://github.com/pytorch/vision/blob/96e779759a883651e6ec2b394bf89de8beb5b709/torchvision/transforms/functional.py#L211
+
+            # transformers fast processors still sees "channels_last" in config, so still forces a
+            # permute after pil_to_tensor, causing an incorrect double-permute.
+            # ref: https://github.com/huggingface/transformers/blob/dd24a80666b72c85f02c6cf9df18164cc174ab74/src/transformers/image_processing_utils_fast.py#L703-L705
+
+            # So since we ship with torchvision, set to ChannelDimension.FIRST to avoid this
+            image_processor.input_data_format = ChannelDimension.FIRST
