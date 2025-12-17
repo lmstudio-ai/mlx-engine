@@ -30,6 +30,17 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         """Initialize Mistral3VisionAddOn with vision components loaded from the given path."""
         super().__init__()
 
+        processor_kwargs: dict | None = None
+        if self._is_lmstudio_mistral_3_2_small(model_path):
+            processor_kwargs = {
+                "patch_size": 14,
+                "spatial_merge_size": 2,
+            }
+            logger.info(
+                "Detected LM Studio Mistral Small 3.2 model. "
+                f"Using custom processor kwargs: {processor_kwargs}"
+            )
+
         self.vision_tower, self.multi_modal_projector, self.config, self.processor = (
             load_vision_addon(
                 model_path=model_path,
@@ -39,6 +50,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
                 vision_tower_class=Mistral3VisionTower,
                 multi_modal_projector_class=Mistral3MultiModalProjector,
                 logger=logger,
+                processor_kwargs=processor_kwargs,
             )
         )
 
@@ -100,10 +112,11 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         final_inputs_embeds = Mistral3CombinedModel.merge_input_ids_with_image_features(
             self.config.image_token_index, image_features, inputs_embeds, input_ids
         )
-        if input_ids.shape[1] == final_inputs_embeds.shape[1]:
-            return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
-        # Return fake input_ids b/c the original lmstudio-community MLX upload had an incorrect
-        # processor_config.json that caused input_ids have extra placeholder image tokens.
-        return mx.array(
-            [0] * final_inputs_embeds.squeeze(0).shape[0]
-        ), final_inputs_embeds.squeeze(0)
+        # remove batch dimension
+        return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
+
+    @staticmethod
+    def _is_lmstudio_mistral_3_2_small(model_path: Path) -> bool:
+        return "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX" in str(
+            model_path
+        )
