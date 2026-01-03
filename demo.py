@@ -8,6 +8,14 @@ from mlx_engine.generate import load_model, load_draft_model, create_generator, 
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 from transformers import AutoTokenizer, AutoProcessor
+from huggingface_hub import snapshot_download
+from pathlib import Path
+
+Path("./models/Qwen3-4B-MLX-4bit").mkdir(exist_ok=True)
+snapshot_download(
+    repo_id="Qwen/Qwen3-4B-MLX-4bit",
+    local_dir="./models/Qwen3-4B-MLX-4bit"
+)
 
 app = FastAPI()
 
