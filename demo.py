@@ -2,11 +2,14 @@ import argparse
 import base64
 import time
 import os
+from fastapi import FastAPI
 
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 from transformers import AutoTokenizer, AutoProcessor
+
+app = FastAPI()
 
 DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
 DEFAULT_TEMP = 0.8
