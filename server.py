@@ -1,3 +1,4 @@
+from typing import Annotated, Literal
 import argparse
 import base64
 import time
@@ -7,112 +8,103 @@ from mlx_engine.generate import load_model, load_draft_model, create_generator, 
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 from transformers import AutoTokenizer, AutoProcessor
+from fastapi import FastAPI, Query, Depends
+from pydantic import BaseModel, Field
 
+from huggingface_hub import snapshot_download
+
+app = FastAPI()
+@app.put("/download/")
+async def download(repo_id: str):
+    creator, model = repo_id.split('/')
+    snapshot_download(
+    repo_id=repo_id,
+    local_dir=f"./models/{creator}/{model}"
+    )
 
 DEFAULT_PROMPT = "Explain the rules of chess in one sentence" 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 DEFAULT_TEMP = 0.8
 
-
-def setup_arg_parser():
-    """Set up and return the argument parser."""
-    parser = argparse.ArgumentParser(
-        description="LM Studio mlx-engine inference script"
+class InferenceParams(BaseModel):
+    """
+    Pydantic model representing the query parameters for MLX Engine Inference.
+    """
+    model: str = Field(
+        description="The file system path to the model"
     )
-    parser.add_argument(
-        "--model",
-        required=True,
-        type=str,
-        help="The file system path to the model",
+    prompt: str | None = Field(
+        default=DEFAULT_PROMPT, 
+        description="Message to be processed by the model"
     )
-    parser.add_argument(
-        "--prompt",
-        default=DEFAULT_PROMPT,
-        type=str,
-        help="Message to be processed by the model",
+    system: str | None = Field(
+        default=DEFAULT_SYSTEM_PROMPT, 
+        description="System prompt for the model"
     )
-    parser.add_argument(
-        "--system",
-        default=DEFAULT_SYSTEM_PROMPT,
-        type=str,
-        help="System prompt for the model",
+    no_system: bool | None  = Field(
+        default=False, 
+        alias="no-system",
+        description="Disable the system prompt"
     )
-    parser.add_argument(
-        "--no-system",
-        action="store_true",
-        help="Disable the system prompt",
+    # Use Query for lists to ensure FastAPI hanldes ?images=a&images=b correctly
+    images: list[str] | None  = Field(
+        default=None, 
+        description="Path of the images to process"
     )
-    parser.add_argument(
-        "--images",
-        type=str,
-        nargs="+",
-        help="Path of the images to process",
+    temp: float | None = Field(
+        default=DEFAULT_TEMP, 
+        description="Sampling temperature"
     )
-    parser.add_argument(
-        "--temp",
-        default=DEFAULT_TEMP,
-        type=float,
-        help="Sampling temperature",
+    stop_strings: list[str] | None = Field(
+        default=None, 
+        description="Strings that will stop the generation"
     )
-    parser.add_argument(
-        "--stop-strings",
-        type=str,
-        nargs="+",
-        help="Strings that will stop the generation",
+    top_logprobs: int | None = Field(
+        default=0, 
+        description="Number of top logprobs to return"
     )
-    parser.add_argument(
-        "--top-logprobs",
-        type=int,
-        default=0,
-        help="Number of top logprobs to return",
+    max_kv_size: int | None = Field(
+        default=None, 
+        description="Max context size of the model"
     )
-    parser.add_argument(
-        "--max-kv-size",
-        type=int,
-        help="Max context size of the model",
+    # Note: Pydantic specific validation (ge/le) can replace 'choices' logic, 
+    # or you can use a custom validator if the choices are non-linear.
+    kv_bits: int | None = Field(
+        default=None, 
+        alias="kv-bits",
+        ge=3,
+        le=8,
+        description="Number of bits for KV cache quantization. Must be between 3 and 8"
     )
-    parser.add_argument(
-        "--kv-bits",
-        type=int,
-        choices=VALID_KV_BITS,
-        help="Number of bits for KV cache quantization. Must be between 3 and 8 (inclusive)",
+    kv_group_size: int | None = Field(
+        default=None, 
+        description="Group size for KV cache quantization"
     )
-    parser.add_argument(
-        "--kv-group-size",
-        type=int,
-        choices=VALID_KV_GROUP_SIZE,
-        help="Group size for KV cache quantization",
+    quantized_kv_start: int | None = Field(
+        default=None, 
+        description="When --kv-bits is set, start quantizing the KV cache from this step onwards"
     )
-    parser.add_argument(
-        "--quantized-kv-start",
-        type=int,
-        help="When --kv-bits is set, start quantizing the KV cache from this step onwards",
+    draft_model: str | None =  Field(
+        default=None, 
+        description="The file system path to the draft model for speculative decoding"
     )
-    parser.add_argument(
-        "--draft-model",
-        type=str,
-        help="The file system path to the draft model for speculative decoding.",
+    num_draft_tokens: int | None = Field(
+        default=None, 
+        description="Number of tokens to draft when using speculative decoding"
     )
-    parser.add_argument(
-        "--num-draft-tokens",
-        type=int,
-        help="Number of tokens to draft when using speculative decoding.",
+    print_prompt_progress: bool | None = Field(
+        default=False, 
+        description="Enable printed prompt processing progress callback"
     )
-    parser.add_argument(
-        "--print-prompt-progress",
-        action="store_true",
-        help="Enable printed prompt processing progress callback",
+    max_img_size: int | None = Field(
+        default=None, 
+        description="Downscale images to this side length (px)"
     )
-    parser.add_argument(
-        "--max-img-size", type=int, help="Downscale images to this side length (px)"
-    )
-    return parser
 
 
 def image_to_base64(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
-
 
 class GenerationStatsCollector:
     def __init__(self):
@@ -150,38 +142,14 @@ class GenerationStatsCollector:
             )
         print(f" - Time to first token: {time_to_first_token:.2f}s")
         print(f" - Total tokens generated: {self.total_tokens}")
+        
         print(f" - Total time: {total_time:.2f}s")
 
-
-def resolve_model_path(model_arg):
-    # If it's a full path or local file, return as-is
-    if os.path.exists(model_arg):
-        return model_arg
-
-    # Check common local directories
-    local_paths = [
-        os.path.expanduser("~/.lmstudio/models"),
-        os.path.expanduser("~/.cache/lm-studio/models"),
-    ]
-
-    for path in local_paths:
-        full_path = os.path.join(path, model_arg)
-        if os.path.exists(full_path):
-            return full_path
-
-    raise ValueError(f"Could not find model '{model_arg}' in local directories")
-
-
-if __name__ == "__main__":
-    # Parse arguments
-    parser = setup_arg_parser()
-    args = parser.parse_args()
-    if isinstance(args.images, str):
-        args.images = [args.images]
-
-    # Set up prompt processing callback
+    
+@app.put("/generate/")
+async def generate(generate_query: Annotated[InferenceParams, Depends()]):
     def prompt_progress_callback(percent):
-        if args.print_prompt_progress:
+        if generate_query.print_prompt_progress:
             width = 40  # bar width
             filled = int(width * percent / 100)
             bar = "█" * filled + "░" * (width - filled)
@@ -189,38 +157,33 @@ if __name__ == "__main__":
             if percent >= 100:
                 print()  # new line when done
         return True  # Progress callback must return True to continue
-
-    # Load the model
-    model_path = resolve_model_path("./models/lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit")
+        
     print("Loading model...", end="\n", flush=True)
+    print(generate_query.model)
     model_kit = load_model(
-        str(model_path),
-        max_kv_size=args.max_kv_size,
+        str(generate_query.model),
+        max_kv_size=generate_query.max_kv_size,
         trust_remote_code=False,
-        kv_bits=args.kv_bits,
-        kv_group_size=args.kv_group_size,
-        quantized_kv_start=args.quantized_kv_start,
+        kv_bits=generate_query.kv_bits,
+        kv_group_size=generate_query.kv_group_size,
+        quantized_kv_start=generate_query.quantized_kv_start,
     )
     print("\rModel load complete ✓", end="\n", flush=True)
 
-    # Load draft model if requested
-    if args.draft_model:
-        load_draft_model(model_kit=model_kit, path=resolve_model_path(args.draft_model))
-
     # Tokenize the prompt
-    prompt = args.prompt
+    prompt = generate_query.prompt
 
     # Build conversation with optional system prompt
     conversation = []
-    if not args.no_system:
-        conversation.append({"role": "system", "content": args.system})
+    if not generate_query.no_system:
+        conversation.append({"role": "system", "content": generate_query.system})
 
     # Handle the prompt according to the input type
     # If images are provided, add them to the prompt
     images_base64 = []
-    if args.images:
-        tf_tokenizer = AutoProcessor.from_pretrained(model_path)
-        images_base64 = [image_to_base64(img_path) for img_path in args.images]
+    if len(generate_query.images) == 0:
+        tf_tokenizer = AutoProcessor.from_pretrained(generate_query.model)
+        images_base64 = [image_to_base64(img_path) for img_path in generate_query.images]
         conversation.append(
             {
                 "role": "user",
@@ -234,21 +197,21 @@ if __name__ == "__main__":
             }
         )
     else:
-        tf_tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tf_tokenizer = AutoTokenizer.from_pretrained(generate_query.model)
         conversation.append({"role": "user", "content": prompt})
     prompt = tf_tokenizer.apply_chat_template(
         conversation, tokenize=False, add_generation_prompt=True
     )
     prompt_tokens = tokenize(model_kit, prompt)
-
-    # Record top logprobs
+    
+   # Record top logprobs
     logprobs_list = []
 
     # Initialize generation stats collector
     stats_collector = GenerationStatsCollector()
 
     # Clamp image size
-    max_img_size = (args.max_img_size, args.max_img_size) if args.max_img_size else None
+    max_img_size = (generate_query.max_img_size, generate_query.max_img_size) if generate_query.max_img_size else None
 
     # Generate the response
     generator = create_generator(
@@ -256,15 +219,17 @@ if __name__ == "__main__":
         prompt_tokens,
         images_b64=images_base64,
         max_image_size=max_img_size,
-        stop_strings=args.stop_strings,
+        stop_strings=generate_query.stop_strings,
         max_tokens=1024,
-        top_logprobs=args.top_logprobs,
+        top_logprobs=generate_query.top_logprobs,
         prompt_progress_callback=prompt_progress_callback,
-        num_draft_tokens=args.num_draft_tokens,
-        temp=args.temp,
+        num_draft_tokens=generate_query.num_draft_tokens,
+        temp=generate_query.temp,
     )
+    result = ""
     for generation_result in generator:
         print(generation_result.text, end="", flush=True)
+        result += generation_result.text
         stats_collector.add_tokens(generation_result.tokens)
         logprobs_list.extend(generation_result.top_logprobs)
 
@@ -276,5 +241,6 @@ if __name__ == "__main__":
             if generation_result.stop_condition.stop_string:
                 print(f"Stop string: {generation_result.stop_condition.stop_string}")
 
-    if args.top_logprobs:
+    if generate_query.top_logprobs:
         [print(x) for x in logprobs_list]
+    return result
