@@ -141,16 +141,18 @@ class TestVisionModels:
 
     def test_lfm2_5_vl_vision(self):
         """Test LFM2.5-VL 1.6B model"""
-        prompt = f"""<|startoftext|><|im_start|>user
+        prompt = f"""<|im_start|>user
 <image>{self.description_prompt}<|im_end|>
-<|im_start|>assistant"""
+<|im_start|>assistant
+"""
         self.toucan_test_runner("lmstudio-community/LFM2.5-VL-1.6B-MLX-4bit", prompt)
 
     def test_lfm2_5_vl_text_only(self):
         """Test LFM2.5-VL 1.6B model"""
-        prompt = f"""<|startoftext|><|im_start|>user
+        prompt = f"""<|im_start|>user
 {self.text_only_prompt}<|im_end|>
-<|im_start|>assistant"""
+<|im_start|>assistant
+"""
         self.toucan_test_runner(
             "lmstudio-community/LFM2.5-VL-1.6B-MLX-4bit", prompt, text_only=True
         )
