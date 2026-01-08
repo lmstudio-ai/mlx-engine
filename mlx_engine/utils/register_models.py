@@ -22,8 +22,15 @@ def register_models():
     AutoTokenizer.register(Ernie4_5_Config, Ernie4_5_Tokenizer, exist_ok=True)
     AutoTokenizer.register(Ernie4_5_MoeConfig, Ernie4_5_Tokenizer, exist_ok=True)
 
-    # mlx-vlm is not compatible with the transformers version of lfm2
-    # See https://github.com/lmstudio-ai/mlx-engine/issues/211#issuecomment-3397933488
+    # There are two versions of the Lfm2VlProcessor. The first "legacy" processor was release
+    # as remote code in the model artifact [1], but was removed [2] when the processor was merged
+    # into transformers [3]. The merged implementation of the processor differs from the legacy
+    # version, so we need to keep both and route models with the legacy config to the legacy
+    # processor and models with the new config to the new processor.
+    # 
+    # [1] https://huggingface.co/LiquidAI/LFM2-VL-1.6B/commit/5c24786dc2d7eb472899e4e3333f92f938233d4f
+    # [2] https://huggingface.co/LiquidAI/LFM2-VL-1.6B/commit/125f2f31caac7328be8dae2e9204a06d6cf5b51c
+    # [3] https://github.com/huggingface/transformers/blob/c7e5b749a6392ea2f42fea983af41f825b0bc78d/src/transformers/models/lfm2_vl/processing_lfm2_vl.py#L52
     del processing_auto.PROCESSOR_MAPPING_NAMES["lfm2_vl"]
     # Ensure both the HF config and the local config route through the shim.
     AutoProcessor.register(HFLfm2VlConfig, RouterLfm2VlProcessor, exist_ok=True)
