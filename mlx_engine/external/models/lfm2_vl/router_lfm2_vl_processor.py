@@ -11,7 +11,7 @@ from .processing_lfm2_vl import Lfm2VlProcessor as MlxLfm2VlProcessor
 logger = logging.getLogger(__name__)
 
 
-class RouterLfm2VlProcessor:
+class Lfm2VlProcessor:
     """
     Minimal shim that routes processor instantiation to the correct implementation
     based on the saved processor_config.json shape.
