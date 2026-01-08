@@ -22,7 +22,7 @@ def register_models():
     AutoTokenizer.register(Ernie4_5_Config, Ernie4_5_Tokenizer, exist_ok=True)
     AutoTokenizer.register(Ernie4_5_MoeConfig, Ernie4_5_Tokenizer, exist_ok=True)
 
-    # There are two versions of the Lfm2VlProcessor. The first "legacy" processor was release
+    # There are two versions of the Lfm2VlProcessor. The first "legacy" processor was released
     # as remote code in the model artifact [1], but was removed [2] when the processor was merged
     # into transformers [3]. The merged implementation of the processor differs from the legacy
     # version, so we need to keep both and route models with the legacy config to the legacy
