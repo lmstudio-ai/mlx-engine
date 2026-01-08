@@ -7,7 +7,6 @@ from mlx_engine.external.models.ernie4_5_moe.configuration_ernie4_5_moe import (
     Ernie4_5_MoeConfig,
 )
 from mlx_engine.external.models.ernie4_5.tokenization_ernie4_5 import Ernie4_5_Tokenizer
-from mlx_engine.external.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig
 from mlx_engine.external.models.lfm2_vl.router_lfm2_vl_processor import (
     Lfm2VlProcessor as RouterLfm2VlProcessor,
 )
