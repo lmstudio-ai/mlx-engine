@@ -44,20 +44,17 @@ class Lfm2VlProcessor:
 
     @staticmethod
     def _load_processor_config(pretrained_model_name_or_path):
-        try:
-            path = Path(pretrained_model_name_or_path)
+        path = Path(pretrained_model_name_or_path)
 
-            if path.is_dir():
-                processor_file = path / "processor_config.json"
-            else:
-                processor_file = path
-
-            if processor_file.is_file():
-                return json.loads(processor_file.read_text())
-        except Exception:
-            logger.warning(
-                "Failed to read processor_config.json for LFM2-VL; defaulting to legacy mlx processor",
-                exc_info=True,
+        if not path.is_dir():
+            raise ValueError(
+                f"LFM2-VL processor requires a local directory path, got: {pretrained_model_name_or_path}"
             )
 
-        return {}
+        processor_file = path / "processor_config.json"
+        if not processor_file.is_file():
+            raise ValueError(
+                f"processor_config.json not found in {pretrained_model_name_or_path}"
+            )
+
+        return json.loads(processor_file.read_text())
