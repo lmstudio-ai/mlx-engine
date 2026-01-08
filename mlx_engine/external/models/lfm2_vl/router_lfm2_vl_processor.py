@@ -21,7 +21,7 @@ class Lfm2VlProcessor:
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         processor_config = cls._load_processor_config(pretrained_model_name_or_path)
 
-        # Newer LFM2.5-style configs nest vision settings under "image_processor".
+        # Newer LFM2 configs nest vision settings under "image_processor".
         # Older LFM2 configs keep them flat and require the custom mlx-engine implementation.
         uses_nested_image_processor = isinstance(
             processor_config.get("image_processor"), dict
