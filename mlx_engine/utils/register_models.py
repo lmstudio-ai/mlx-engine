@@ -9,6 +9,13 @@ from mlx_engine.external.models.ernie4_5_moe.configuration_ernie4_5_moe import (
 from mlx_engine.external.models.ernie4_5.tokenization_ernie4_5 import Ernie4_5_Tokenizer
 from mlx_engine.external.models.lfm2_vl.processing_lfm2_vl import Lfm2VlProcessor
 from mlx_engine.external.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig
+from mlx_engine.external.models.lfm2_vl.router_lfm2_vl_processor import (
+    RouterLfm2VlProcessor,
+)
+from transformers.models.lfm2_vl.configuration_lfm2_vl import (
+    Lfm2VlConfig as HFLfm2VlConfig,
+)
+import transformers.models.lfm2_vl.processing_lfm2_vl as hf_lfm2_processing
 
 
 def register_models():
@@ -20,4 +27,9 @@ def register_models():
     # mlx-vlm is not compatible with the transformers version of lfm2
     # See https://github.com/lmstudio-ai/mlx-engine/issues/211#issuecomment-3397933488
     del processing_auto.PROCESSOR_MAPPING_NAMES["lfm2_vl"]
-    AutoProcessor.register(Lfm2VlConfig, Lfm2VlProcessor, exist_ok=False)
+    # Ensure both the HF config and the local config route through the shim.
+    AutoProcessor.register(HFLfm2VlConfig, RouterLfm2VlProcessor, exist_ok=True)
+    AutoProcessor.register(Lfm2VlConfig, RouterLfm2VlProcessor, exist_ok=True)
+
+    # Monkey-patch the HF processor class name to point at the shim so processor_class lookups hit the router.
+    hf_lfm2_processing.Lfm2VlProcessor = RouterLfm2VlProcessor
