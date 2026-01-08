@@ -22,22 +22,20 @@ class Lfm2VlProcessor:
         processor_config = cls._load_processor_config(pretrained_model_name_or_path)
 
         # Newer LFM2.5-style configs nest vision settings under "image_processor".
-        # Older LFM2 configs keep them flat and require the custom mlx implementation.
+        # Older LFM2 configs keep them flat and require the custom mlx-engine implementation.
         uses_nested_image_processor = isinstance(
             processor_config.get("image_processor"), dict
         )
 
-        target_cls = (
-            HFLfm2VlProcessor if uses_nested_image_processor else MlxLfm2VlProcessor
-        )
-
-        if not uses_nested_image_processor:
-            logger.info(
-                "Routing LFM2-VL processor to mlx-engine implementation (legacy flat config)"
-            )
-        else:
+        if uses_nested_image_processor:
+            target_cls = HFLfm2VlProcessor
             logger.info(
                 "Routing LFM2-VL processor to transformers implementation (nested config)"
+            )
+        else:
+            target_cls = MlxLfm2VlProcessor
+            logger.info(
+                "Routing LFM2-VL processor to mlx-engine implementation (legacy flat config)"
             )
 
         return target_cls.from_pretrained(
