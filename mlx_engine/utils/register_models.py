@@ -32,6 +32,4 @@ def register_models():
     # [2] https://huggingface.co/LiquidAI/LFM2-VL-1.6B/commit/125f2f31caac7328be8dae2e9204a06d6cf5b51c
     # [3] https://github.com/huggingface/transformers/blob/c7e5b749a6392ea2f42fea983af41f825b0bc78d/src/transformers/models/lfm2_vl/processing_lfm2_vl.py#L52
     del processing_auto.PROCESSOR_MAPPING_NAMES["lfm2_vl"]
-    # Ensure both the HF config and the local config route through the shim.
     AutoProcessor.register(HFLfm2VlConfig, RouterLfm2VlProcessor, exist_ok=True)
-    AutoProcessor.register(Lfm2VlConfig, RouterLfm2VlProcessor, exist_ok=True)
