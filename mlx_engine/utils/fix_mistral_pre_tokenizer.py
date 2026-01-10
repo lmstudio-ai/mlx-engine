@@ -1,6 +1,6 @@
 from tokenizers import Tokenizer
 from pathlib import Path
-from mlx_lm.tokenizer_utils import TokenizerWrapper
+from mlx_lm.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
 import logging
 from transformers import LlamaTokenizer
 import traceback
@@ -34,6 +34,9 @@ def fix_mistral_pre_tokenizer(
     Tokenization is considered broken if it doesn't handle whitespace correctly. For example, tokenizing
     `Hello world` should result in tokens `["Hello", " world"]`, and not `["Hello", "world"]`. Note the missing
     whitespace before `world`
+    
+    This also fixes decoding issues by using BPEStreamingDetokenizer which properly handles
+    byte-level BPE tokens like Ġ (the space marker used by Mistral/GPT-2 style tokenizers).
     """
     if model_type not in _LEGACY_MISTRAL_MODEL_TYPES:
         return
@@ -45,10 +48,20 @@ def fix_mistral_pre_tokenizer(
         logger.info("Tokenizer working as expected.")
         return
 
-    # Fix pre-tokenizer
+    # Fix pre-tokenizer and detokenizer
     try:
         tok = Tokenizer.from_file(str(model_path / "tokenizer.json"))
+        # Fix encoding (pre-tokenizer)
         tokenizer._tokenizer._tokenizer.pre_tokenizer = tok.pre_tokenizer
+        
+        # Fix decoding by using BPEStreamingDetokenizer instead of the default
+        # NaiveStreamingDetokenizer. BPEStreamingDetokenizer properly handles
+        # byte-level BPE tokens like Ġ (which represents a space).
+        # This is the same detokenizer that mlx_vlm uses for Mistral models.
+        # Note: TokenizerWrapper.detokenizer is a property that creates instances
+        # from _detokenizer_class, so we need to override that class.
+        tokenizer._detokenizer_class = BPEStreamingDetokenizer
+        logger.info("Replaced detokenizer class with BPEStreamingDetokenizer")
     except Exception:
         logger.warning(f"Failed to fix tokenizer: {traceback.format_exc()}.")
         return
@@ -68,3 +81,4 @@ def _tokenizer_is_broken(tokenizer: TokenizerWrapper) -> bool:
     test_prompt = "Tell me about Paris"
     tokens = tokenizer.tokenize(test_prompt)
     return tokens[-2:] == ["about", "Paris"]
+

@@ -12,8 +12,24 @@ from fastapi import FastAPI, Query, Depends
 from pydantic import BaseModel, Field
 
 from huggingface_hub import snapshot_download
+from mlx_vlm.convert import convert
+
 
 app = FastAPI()
+
+@app.put("/convert/")
+async def convert(model_id: str):
+    creator, model = model_id.split('/')
+    convert(
+        hf_path=model_id,
+        mlx_path=f"./models/{creator}/{model}",
+        quantize=True,
+        q_bits=4,
+        q_group_size=64,
+        upload_repo=None
+    )
+    print(f"Model converted and saved to {output_path}")
+
 @app.put("/download/")
 async def download(repo_id: str):
     creator, model = repo_id.split('/')
@@ -181,7 +197,7 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
     # Handle the prompt according to the input type
     # If images are provided, add them to the prompt
     images_base64 = []
-    if len(generate_query.images) == 0:
+    if len(generate_query.images) != 0:
         tf_tokenizer = AutoProcessor.from_pretrained(generate_query.model)
         images_base64 = [image_to_base64(img_path) for img_path in generate_query.images]
         conversation.append(
