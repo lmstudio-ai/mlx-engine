@@ -61,31 +61,6 @@ Downloads a model from Hugging Face.
 - `repo_id` (input query): Hugging Face repo ID.
 - Saves to: `./models/{creator}/{model}`
 
-## Usage Examples
-
-### Text Generation
-
-```bash
-curl -X PUT "http://localhost:8000/generate/?model=./models/mistralai/Mistral-7B-Instruct-v0.2&prompt=Hello"
-```
-
-### Image Generation (VLM)
-
-```bash
-curl -X 'PUT' \
-  'http://localhost:8000/generate/?model=./models/llava-hf/llava-1.5-7b-hf&prompt=What is in this image?' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "images": ["/path/to/image.jpg"]
-}'
-```
-
-### Speculative Decoding
-
-```bash
-curl -X PUT "http://localhost:8000/generate/?model=./models/mlx-community/Mistral-7B-Instruct-v0.2-4bit&draft_model=./models/mlx-community/Mistral-7B-Instruct-v0.2-4bit-draft&num_draft_tokens=5&prompt=Write a long story"
-```
-
 ## Acknowledgements
 
 This project is based on the open-source work from [LM Studio](https://lmstudio.ai/). Thank you to the LM Studio team!
