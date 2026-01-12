@@ -17,20 +17,27 @@ from mlx_vlm.convert import convert
 
 app = FastAPI()
 
-@app.put("/convert/")
-async def convert(model_id: str):
-    creator, model = model_id.split('/')
+class convertionParams(BaseModel):
+    model_id: str = Field(description="The Hugging Face model ID"),
+    quantize: bool | None = Field(description="Quantize the model", default=True),
+    q_bits: int | None = Field(description="Number of bits for KV cache quantization", default=4),
+    q_group_size: int | None = Field(description="Group size for KV cache quantization", default=64),
+    upload_repo: str | None = Field(description="Upload the model to Hugging Face", default=None),
+
+@app.put("/download/convert")
+async def convertion(params: convertionParams):
+    creator, model = params.model_id.split('/')
     convert(
-        hf_path=model_id,
+        hf_path=params.model_id,
         mlx_path=f"./models/{creator}/{model}",
-        quantize=True,
-        q_bits=4,
-        q_group_size=64,
-        upload_repo=None
+        quantize=params.quantize,
+        q_bits=params.q_bits,
+        q_group_size=params.q_group_size,
+        upload_repo=params.upload_repo
     )
     print(f"Model converted and saved to {output_path}")
 
-@app.put("/download/")
+@app.put("/download/direct")
 async def download(repo_id: str):
     creator, model = repo_id.split('/')
     snapshot_download(
@@ -38,9 +45,13 @@ async def download(repo_id: str):
     local_dir=f"./models/{creator}/{model}"
     )
 
-DEFAULT_PROMPT = "Explain the rules of chess in one sentence" 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 DEFAULT_TEMP = 0.8
+
+class Message(BaseModel):
+    role: str = Field(description="The role of the message")
+    content: str = Field(description="The content of the message")
+    name: str | None = Field(description="The name of the message", default="")
 
 class InferenceParams(BaseModel):
     """
@@ -49,25 +60,11 @@ class InferenceParams(BaseModel):
     model: str = Field(
         description="The file system path to the model"
     )
-    prompt: str | None = Field(
-        default=DEFAULT_PROMPT, 
+    messages: list[Message] = Field(
+        default=[], 
         description="Message to be processed by the model"
     )
-    system: str | None = Field(
-        default=DEFAULT_SYSTEM_PROMPT, 
-        description="System prompt for the model"
-    )
-    no_system: bool | None  = Field(
-        default=False, 
-        alias="no-system",
-        description="Disable the system prompt"
-    )
-    # Use Query for lists to ensure FastAPI hanldes ?images=a&images=b correctly
-    images: list[str] | None  = Field(
-        default=None, 
-        description="Path of the images to process"
-    )
-    temp: float | None = Field(
+    temperature: float | None = Field(
         default=DEFAULT_TEMP, 
         description="Sampling temperature"
     )
@@ -83,8 +80,6 @@ class InferenceParams(BaseModel):
         default=None, 
         description="Max context size of the model"
     )
-    # Note: Pydantic specific validation (ge/le) can replace 'choices' logic, 
-    # or you can use a custom validator if the choices are non-linear.
     kv_bits: int | None = Field(
         default=None, 
         alias="kv-bits",
@@ -115,6 +110,10 @@ class InferenceParams(BaseModel):
     max_img_size: int | None = Field(
         default=None, 
         description="Downscale images to this side length (px)"
+    )
+    json_schema: str | None = Field(
+        default=None, 
+        description="JSON schema for the response"
     )
 
 
@@ -162,7 +161,7 @@ class GenerationStatsCollector:
         print(f" - Total time: {total_time:.2f}s")
 
     
-@app.put("/generate/")
+@app.put("/v1/chat/completions")
 async def generate(generate_query: Annotated[InferenceParams, Depends()]):
     def prompt_progress_callback(percent):
         if generate_query.print_prompt_progress:
@@ -186,61 +185,29 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
     )
     print("\rModel load complete ✓", end="\n", flush=True)
 
-    # Tokenize the prompt
-    prompt = generate_query.prompt
-
     # Build conversation with optional system prompt
-    conversation = []
-    if not generate_query.no_system:
-        conversation.append({"role": "system", "content": generate_query.system})
-
-    # Handle the prompt according to the input type
-    # If images are provided, add them to the prompt
-    images_base64 = []
-    if len(generate_query.images) != 0:
-        tf_tokenizer = AutoProcessor.from_pretrained(generate_query.model)
-        images_base64 = [image_to_base64(img_path) for img_path in generate_query.images]
-        conversation.append(
-            {
-                "role": "user",
-                "content": [
-                    *[
-                        {"type": "image", "base64": image_b64}
-                        for image_b64 in images_base64
-                    ],
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        )
-    else:
-        tf_tokenizer = AutoTokenizer.from_pretrained(generate_query.model)
-        conversation.append({"role": "user", "content": prompt})
+    conversation = generate_query.messages
+    tf_tokenizer = AutoTokenizer.from_pretrained(generate_query.model)
     prompt = tf_tokenizer.apply_chat_template(
         conversation, tokenize=False, add_generation_prompt=True
     )
     prompt_tokens = tokenize(model_kit, prompt)
-    
    # Record top logprobs
     logprobs_list = []
 
     # Initialize generation stats collector
     stats_collector = GenerationStatsCollector()
 
-    # Clamp image size
-    max_img_size = (generate_query.max_img_size, generate_query.max_img_size) if generate_query.max_img_size else None
-
     # Generate the response
     generator = create_generator(
         model_kit,
         prompt_tokens,
-        images_b64=images_base64,
-        max_image_size=max_img_size,
         stop_strings=generate_query.stop_strings,
         max_tokens=1024,
         top_logprobs=generate_query.top_logprobs,
         prompt_progress_callback=prompt_progress_callback,
         num_draft_tokens=generate_query.num_draft_tokens,
-        temp=generate_query.temp,
+        temp=generate_query.temperature 
     )
     result = ""
     for generation_result in generator:
@@ -259,4 +226,17 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
 
     if generate_query.top_logprobs:
         [print(x) for x in logprobs_list]
-    return result
+
+    response = {
+            "object": "chat.completion",
+            "model": generate_query.model,
+            "created": int(time.time()),
+            "usage": {
+                "prompt_tokens": stats_collector.total_tokens,
+                "completion_tokens": stats_collector.total_tokens,
+                "total_tokens": stats_collector.total_tokens,
+            },
+            "choices": Message(content=result, role="assistant"),
+            "response_format": generate_query.json_schema
+        }
+    return response 
