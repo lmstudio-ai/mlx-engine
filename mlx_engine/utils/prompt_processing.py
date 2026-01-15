@@ -4,7 +4,7 @@ from mlx import nn
 import mlx.core as mx
 
 from mlx_engine.cache_wrapper import CacheWrapper
-from mlx_engine.utils.prompt_progress_events import V2ProgressCallback
+from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 
 
 def process_prompt_text_only(
@@ -13,7 +13,7 @@ def process_prompt_text_only(
     generate_args: dict,
     draft_model: Optional[nn.Module],
     speculative_decoding_toggle: Optional[bool],
-    prompt_progress_callback: V2ProgressCallback,
+    prompt_progress_reporter: PromptProgressReporter,
 ):
     if cache_wrapper is None:
         raise ValueError("Cache wrapper is not initialized, cannot process prompt")
@@ -36,7 +36,7 @@ def process_prompt_text_only(
     # Check for common tokens with the previous cache and re-use the cache if possible
     prompt_tokens = cache_wrapper.update_cache(
         prompt_tokens,
-        prompt_progress_callback,
+        prompt_progress_reporter,
     )
     generate_args["prompt_cache"] = cache_wrapper.cache
     return prompt_tokens

@@ -1,12 +1,8 @@
 import unittest
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper, StopPromptProcessing
-from tests.shared import model_getter, print_progress_event
+from tests.shared import model_getter, RecordingReporter, CancellingReporter
 from mlx_engine.generate import load_model, tokenize
-from mlx_engine.utils.prompt_progress_events import (
-    PromptProgressBeginEvent,
-    PromptProgressEvent,
-)
 
 
 class TestCacheWrapper(unittest.TestCase):
@@ -64,50 +60,34 @@ class TestCacheWrapper(unittest.TestCase):
         )
         prompt_tokens = mx.array(tokenize(model_kit, long_prompt))
         tokens_to_process = len(prompt_tokens) - num_tokens_to_exclude
-        # ceiling division
-        expected_chunks = (tokens_to_process + chunk_size - 1) // chunk_size
+        # ceiling division +1 for finish
+        expected_chunks = (tokens_to_process + chunk_size - 1) // chunk_size + 1
 
-        # First attempt: Progress callback that cancels after a few updates
-        first_progress_calls = []
-
-        def cancelling_progress_callback(
-            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
-        ) -> bool:
-            first_progress_calls.append(event)
-            print_progress_event(event)
-            if len(first_progress_calls) >= 3:
-                return False
-            return True
+        # First attempt: Reporter that cancels after 3 events
+        cancelling_reporter = CancellingReporter(cancel_after=3)
 
         with self.assertRaises(StopPromptProcessing):
             model_kit.cache_wrapper.update_cache(
                 prompt_tokens=prompt_tokens,
-                prompt_progress_callback=cancelling_progress_callback,
+                reporter=cancelling_reporter,
                 num_tokens_to_exclude=1,
             )
-        first_attempt_progress_calls = len(first_progress_calls)
+        first_attempt_event_count = len(cancelling_reporter.events)
 
-        # Second attempt: Progress callback that doesn't cancel
-        second_progress_calls = []
-
-        def non_cancelling_progress_callback(
-            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
-        ) -> bool:
-            second_progress_calls.append(event)
-            print_progress_event(event)
-            return True
+        # Second attempt: Reporter that doesn't cancel
+        recording_reporter = RecordingReporter()
 
         result_tokens = model_kit.cache_wrapper.update_cache(
             prompt_tokens=prompt_tokens,
-            prompt_progress_callback=non_cancelling_progress_callback,
+            reporter=recording_reporter,
             num_tokens_to_exclude=1,
         )
-        second_attempt_progress_calls = len(second_progress_calls)
+        second_attempt_event_count = len(recording_reporter.events)
 
         self.assertEqual(
-            second_attempt_progress_calls,
-            # +1 for the final 100% callback, +1 for the duplicate 0% callback
-            expected_chunks - first_attempt_progress_calls + 2,
+            second_attempt_event_count,
+            # +1 for finish, +1 for the begin event on retry
+            expected_chunks - first_attempt_event_count + 2,
         )
 
         # Verify that the second attempt completed successfully

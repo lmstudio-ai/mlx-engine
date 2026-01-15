@@ -9,11 +9,7 @@ from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
-from mlx_engine.utils.prompt_progress_events import (
-    PromptProgressBeginEvent,
-    PromptProgressEvent,
-    V2ProgressCallback,
-)
+from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 
 
 PROMPT_PROCESSING_CHUNK_SIZE = 512
@@ -179,7 +175,7 @@ class CacheWrapper:
         model,
         cache,
         tokens,
-        progress_callback: V2ProgressCallback,
+        reporter: PromptProgressReporter,
         is_draft: bool,
     ):
         """
@@ -189,7 +185,7 @@ class CacheWrapper:
             model: The model to use for cache filling
             cache: The cache to fill
             tokens: Tokens to process
-            progress_callback: V2 callback for reporting progress
+            reporter: Reporter for reporting progress
             is_draft: Whether this is draft model prefill (True) or main model (False)
         """
         remaining_tokens = tokens
@@ -208,9 +204,8 @@ class CacheWrapper:
 
             mx.clear_cache()
 
-            # Emit V2 progress event with token count
-            event = PromptProgressEvent(prefill_tokens_processed=num_processed)
-            should_continue = progress_callback(event, is_draft)
+            # Report progress
+            should_continue = reporter.update(is_draft, num_processed)
             if should_continue is False:  # If it's None, assume continue generation
                 logger.info("Prompt processing was cancelled by the user.")
                 num_tokens_in_cache = self._get_num_tokens_in_cache()
@@ -271,7 +266,7 @@ class CacheWrapper:
     def update_cache(
         self,
         prompt_tokens: mx.array,
-        prompt_progress_callback: V2ProgressCallback,
+        reporter: PromptProgressReporter,
         *,
         num_tokens_to_exclude: int = 1,
     ) -> mx.array:
@@ -281,7 +276,7 @@ class CacheWrapper:
 
         Args:
             prompt_tokens (mx.array): The prompt tokens.
-            prompt_progress_callback: V2 callback function to report prompt processing progress.
+            reporter: Reporter for reporting prompt processing progress.
             num_tokens_to_exclude (int): The number of tokens that should not be added to the cache.
 
         Returns:
@@ -294,13 +289,13 @@ class CacheWrapper:
         )
         cached_tokens = total_prompt_tokens - len(prompt_tokens)
 
-        # Emit begin event
-        begin_event = PromptProgressBeginEvent(
+        # Report begin
+        reporter.begin(
+            is_draft=False,
             cached_tokens=cached_tokens,
             total_prompt_tokens=total_prompt_tokens,
             prefill_tokens_processed=0,
         )
-        prompt_progress_callback(begin_event, is_draft=False)
 
         # Prefill the cache with the non-excluded prompt tokens
         num_tokens_to_exclude = min(num_tokens_to_exclude, len(prompt_tokens))
@@ -314,7 +309,7 @@ class CacheWrapper:
                     model=self.draft_model,
                     cache=draft_cache,
                     tokens=prefill_tokens,
-                    progress_callback=prompt_progress_callback,
+                    reporter=reporter,
                     is_draft=True,
                 )
             # Fill main model cache
@@ -323,9 +318,12 @@ class CacheWrapper:
                 model=self.model,
                 cache=main_cache,
                 tokens=prefill_tokens,
-                progress_callback=prompt_progress_callback,
+                reporter=reporter,
                 is_draft=False,
             )
+
+        # Report finish
+        reporter.finish(is_draft=False)
 
         # Return the tokens that must still be processed outside of the cache
         non_prefill_tokens = prompt_tokens[-num_tokens_to_exclude:]

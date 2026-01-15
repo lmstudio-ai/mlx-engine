@@ -27,13 +27,12 @@ from mlx_engine.utils.speculative_decoding import (
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
 from mlx_engine.cache_wrapper import StopPromptProcessing, PROMPT_PROCESSING_CHUNK_SIZE
-from mlx_engine.utils.progress_decorators import (
-    ratchet,
-    throw_to_stop,
-    mlx_lm_converter,
-    default_callback,
+from mlx_engine.utils.prompt_progress_reporter import (
+    PromptProgressReporter,
+    DefaultPromptProgressReporter,
+    ThrowToStopReporter,
+    MlxLmReporterAdapter,
 )
-from mlx_engine.utils.prompt_progress_events import V2ProgressCallback
 
 MAX_TOP_LOGPROBS = 10
 
@@ -148,7 +147,7 @@ def create_generator(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],
     *,
-    prompt_progress_callback: Optional[V2ProgressCallback] = None,
+    prompt_progress_reporter: Optional[PromptProgressReporter] = None,
     images_b64: Optional[List[str]] = None,
     max_image_size: Optional[tuple[int, int]] = None,
     stop_strings: Optional[List[str]] = None,
@@ -176,9 +175,9 @@ def create_generator(
     Args:
         model_kit (ModelKit | VisionModelKit): The initialized model to use for generation
         prompt_tokens (List[int]): List of token IDs representing the input prompt
-        prompt_progress_callback (Optional[Callable[[float], bool]]): Callback function that receives
-            generation progress as a float between 0 and 100. Callback should return True to continue
-            prompt processing, or False to stop generation
+        prompt_progress_reporter (Optional[PromptProgressReporter]): Reporter for receiving prompt
+            processing progress updates. Reporter methods should return True to continue processing,
+            or False to stop generation
         images_b64 (Optional[List[str]]): List of base64-encoded images for vision-language models
         max_image_size (Optional[tuple[int, int]]): Maximum dimensions (width, height) for images.
             Images will be resized to fit within these dimensions while maintaining aspect ratio if
@@ -218,13 +217,8 @@ def create_generator(
     set_seed(seed)
 
     generate_args = {}
-    if prompt_progress_callback is None:
-        prompt_progress_callback = default_callback
-    # Apply ratchet decorator to ensure monotonically increasing progress
-    # This prevents progress from appearing to move backwards when prompt processing
-    # occurs in different contexts or is already cached.
-    # See https://github.com/lmstudio-ai/mlx-engine/issues/226.
-    prompt_progress_callback = ratchet(prompt_progress_callback)
+    if prompt_progress_reporter is None:
+        prompt_progress_reporter = DefaultPromptProgressReporter()
 
     # Set up kv cache
     if type(model_kit) is not VisionModelKit:
@@ -255,7 +249,7 @@ def create_generator(
         input_tokens, input_embeddings = model_kit.process_prompt(
             prompt_tokens,
             images_b64,
-            prompt_progress_callback,
+            prompt_progress_reporter,
             generate_args,
             max_image_size,
             speculative_decoding_toggle,
@@ -394,8 +388,8 @@ def create_generator(
     # When cache is NOT active (vision prompts), stream_generate handles prompt processing
     # When cache IS active (text-only), cache_wrapper already handled it
     if not model_kit.is_cross_prompt_cache_active():
-        mlx_lm_callback = mlx_lm_converter(
-            throw_to_stop(prompt_progress_callback), emit_begin_event=True
+        mlx_lm_callback = MlxLmReporterAdapter(
+            ThrowToStopReporter(prompt_progress_reporter), emit_begin=True
         )
     else:
         mlx_lm_callback = None

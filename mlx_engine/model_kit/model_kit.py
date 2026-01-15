@@ -16,7 +16,7 @@ from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
-from mlx_engine.utils.prompt_progress_events import V2ProgressCallback
+from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ class ModelKit:
         self,
         prompt_tokens,
         images_b64: Optional[List[str]],
-        prompt_progress_callback: V2ProgressCallback,
+        prompt_progress_reporter: PromptProgressReporter,
         generate_args: dict,
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
@@ -165,7 +165,7 @@ class ModelKit:
                 generate_args,
                 self.draft_model,
                 speculative_decoding_toggle,
-                prompt_progress_callback,
+                prompt_progress_reporter,
             ), None
         ### WITH IMAGES PROMPT PROCESSING ###
         if self.vision_add_on is None:

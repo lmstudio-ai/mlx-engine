@@ -7,7 +7,7 @@ import logging
 from tests.shared import (
     model_getter,
     model_load_and_tokenize_prompt,
-    print_progress_event,
+    RecordingReporter,
 )
 from mlx_engine.generate import (
     load_model,
@@ -16,10 +16,6 @@ from mlx_engine.generate import (
     unload_draft_model,
     tokenize,
     create_generator,
-)
-from mlx_engine.utils.prompt_progress_events import (
-    PromptProgressBeginEvent,
-    PromptProgressEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,15 +73,7 @@ Who is this passage about? Only say the name, and nothing else<|im_end|>
 """
         prompt_tokens = tokenize(model_kit, prompt)
         generated_text = ""
-        prompt_progress_callback_times_called = 0
-
-        def prompt_progress_callback(
-            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
-        ) -> bool:
-            nonlocal prompt_progress_callback_times_called
-            prompt_progress_callback_times_called += 1
-            print_progress_event(event)
-            return True
+        reporter = RecordingReporter()
 
         def generate() -> None:
             nonlocal generated_text
@@ -95,7 +83,7 @@ Who is this passage about? Only say the name, and nothing else<|im_end|>
                 seed=0,
                 max_tokens=10,
                 temp=0.0,
-                prompt_progress_callback=prompt_progress_callback,
+                prompt_progress_reporter=reporter,
             ):
                 print(result.text, end="", flush=True)
                 generated_text += result.text
@@ -104,13 +92,17 @@ Who is this passage about? Only say the name, and nothing else<|im_end|>
             print("\n", flush=True)
 
         def reset_state() -> None:
-            nonlocal prompt_progress_callback_times_called, generated_text
+            nonlocal generated_text
             generated_text = ""
-            prompt_progress_callback_times_called = 0
+            reporter.events.clear()
 
         ### Generation 1
         generate()
-        self.assertEqual(prompt_progress_callback_times_called, 4)
+        self.assertEqual(len(reporter.events), 5)
+        # First generation should have no cached tokens
+        begin_event = reporter.events[0]
+        self.assertEqual(begin_event["type"], "begin")
+        self.assertEqual(begin_event["cached_tokens"], 0)
         self.assertGreater(len(generated_text), 0, "Model failed to generate any text")
         ben_franklin_in_response = "Benjamin Franklin" in generated_text
         self.assertTrue(
@@ -129,8 +121,12 @@ repeat<|im_end|>
 
         ### Generation 2
         generate()
-        # Expect prompt cache to be intact, so we should only get 0%, 100% callbacks and no intermediates
-        self.assertEqual(prompt_progress_callback_times_called, 2)
+        # Expect prompt cache to be intact, so we should only get begin, 1x update, and finish callbacks
+        self.assertEqual(len(reporter.events), 3)
+        # Second generation should have cached tokens from first generation
+        begin_event = reporter.events[0]
+        self.assertEqual(begin_event["type"], "begin")
+        self.assertGreater(begin_event["cached_tokens"], 0)
         self.assertGreater(len(generated_text), 0, "Model failed to generate any text")
         ben_franklin_in_response = "Benjamin Franklin" in generated_text
         self.assertTrue(
@@ -156,15 +152,7 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
             f"Generation 1 number of prompt tokens: {len(prompt_tokens)}",
         )
         generated_text_list_1 = []
-        prompt_progress_callback_times_called = 0
-
-        def prompt_progress_callback(
-            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
-        ) -> bool:
-            nonlocal prompt_progress_callback_times_called
-            prompt_progress_callback_times_called += 1
-            print_progress_event(event)
-            return True
+        reporter = RecordingReporter()
 
         # accumulating to list allows pass by reference
         def generate(text_accumulator: list) -> None:
@@ -174,7 +162,7 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
                 seed=0,
                 max_tokens=10,
                 temp=0.0,
-                prompt_progress_callback=prompt_progress_callback,
+                prompt_progress_reporter=reporter,
             ):
                 print(result.text, end="", flush=True)
                 text_accumulator.append(result.text)
@@ -185,7 +173,11 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         ### Generation 1 - fills cache
         generate(text_accumulator=generated_text_list_1)
         generated_text_1 = "".join(generated_text_list_1)
-        self.assertEqual(prompt_progress_callback_times_called, 4)
+        self.assertEqual(len(reporter.events), 5)
+        # First generation should have no cached tokens
+        begin_event = reporter.events[0]
+        self.assertEqual(begin_event["type"], "begin")
+        self.assertEqual(begin_event["cached_tokens"], 0)
         self.assertGreater(
             len(generated_text_1), 0, "Model failed to generate any text"
         )
@@ -211,12 +203,16 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
             f"Generation 2 number of prompt tokens: {len(prompt_tokens)}",
         )
         generated_text_list_2 = []
-        prompt_progress_callback_times_called = 0
+        reporter.events.clear()
         generate(text_accumulator=generated_text_list_2)
         generated_text_2 = "".join(generated_text_list_2)
         # Expect prompt cache to be intact for the first half of the file_content, so we should get 1
-        # intermediate callback this time
-        self.assertEqual(prompt_progress_callback_times_called, 3)
+        # intermediate update callback this time (begin + 2x update + finish = 4)
+        self.assertEqual(len(reporter.events), 4)
+        # Second generation should have some cached tokens (partial cache hit after trim)
+        begin_event = reporter.events[0]
+        self.assertEqual(begin_event["type"], "begin")
+        self.assertGreater(begin_event["cached_tokens"], 0)
         self.assertGreater(
             len(generated_text_2), 0, "Model failed to generate any text"
         )
