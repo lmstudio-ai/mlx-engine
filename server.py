@@ -48,21 +48,26 @@ async def download(repo_id: str):
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 DEFAULT_TEMP = 0.8
 
+class Content(BaseModel):
+    type: Literal["text", "image_url"] = Field(description="The type of the content")
+    text: str | None = Field(description="The text", default=None)
+    url: str | None = Field(default=None, description="Image URL object")
+
 class Message(BaseModel):
-    role: str = Field(description="The role of the message")
-    content: str = Field(description="The content of the message")
-    name: str | None = Field(description="The name of the message", default="")
+    role: Literal["system", "user", "assistant"] = Field(description="The role of the message")
+    content: list[Content] | str = Field(description="The content of the message")
+    name: str | None = Field(description="The name of the message", default=None)
 
 class InferenceParams(BaseModel):
     """
     Pydantic model representing the query parameters for MLX Engine Inference.
     """
-    model: str = Field(
-        description="The file system path to the model"
-    )
     messages: list[Message] = Field(
         default=[], 
         description="Message to be processed by the model"
+    )
+    model: str = Field(
+        description="The file system path to the model"
     )
     temperature: float | None = Field(
         default=DEFAULT_TEMP, 
@@ -115,6 +120,10 @@ class InferenceParams(BaseModel):
         default=None, 
         description="JSON schema for the response"
     )
+    stream: bool | None = Field(
+        default=False, 
+        description="Enable streaming of the response"
+    )
 
 
 def image_to_base64(image_path):
@@ -160,8 +169,17 @@ class GenerationStatsCollector:
         
         print(f" - Total time: {total_time:.2f}s")
 
-    
-@app.put("/v1/chat/completions")
+@app.get("/v1/models")
+async def models():
+    models = []
+    for model in os.listdir("./models"):
+        for file in os.listdir(f"./models/{model}"):
+            models.append(model + "/" + file)
+    models.sort()
+    return models
+
+
+@app.post("/v1/chat/completions")
 async def generate(generate_query: Annotated[InferenceParams, Depends()]):
     def prompt_progress_callback(percent):
         if generate_query.print_prompt_progress:
@@ -184,9 +202,17 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
         quantized_kv_start=generate_query.quantized_kv_start,
     )
     print("\rModel load complete ✓", end="\n", flush=True)
-
+    tf_tokenizer = AutoProcessor.from_pretrained(generate_query.model)
+    images_base64 = []
+    for message in generate_query.messages:
+        if message.role == "user":
+            for content in message.content:
+                if content.type == "image_url" and content.url is not None:
+                    images_base64.append(image_to_base64(content.url))
+                    #content.url = image_to_base64(content.url)
     # Build conversation with optional system prompt
     conversation = generate_query.messages
+
     tf_tokenizer = AutoTokenizer.from_pretrained(generate_query.model)
     prompt = tf_tokenizer.apply_chat_template(
         conversation, tokenize=False, add_generation_prompt=True
@@ -202,6 +228,7 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
     generator = create_generator(
         model_kit,
         prompt_tokens,
+        images_b64=images_base64,
         stop_strings=generate_query.stop_strings,
         max_tokens=1024,
         top_logprobs=generate_query.top_logprobs,
@@ -236,7 +263,7 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
                 "completion_tokens": stats_collector.total_tokens,
                 "total_tokens": stats_collector.total_tokens,
             },
-            "choices": Message(content=result, role="assistant"),
+            "choices": [Message(content=result, role="assistant")],
             "response_format": generate_query.json_schema
         }
     return response 
