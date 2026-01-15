@@ -70,7 +70,9 @@ class TestCacheWrapper(unittest.TestCase):
         # First attempt: Progress callback that cancels after a few updates
         first_progress_calls = []
 
-        def cancelling_progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+        def cancelling_progress_callback(
+            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+        ) -> bool:
             first_progress_calls.append(event)
             print_progress_event(event)
             if len(first_progress_calls) >= 3:
@@ -88,7 +90,9 @@ class TestCacheWrapper(unittest.TestCase):
         # Second attempt: Progress callback that doesn't cancel
         second_progress_calls = []
 
-        def non_cancelling_progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+        def non_cancelling_progress_callback(
+            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+        ) -> bool:
             second_progress_calls.append(event)
             print_progress_event(event)
             return True

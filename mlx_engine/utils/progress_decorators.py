@@ -10,7 +10,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def default_callback(event: Union[PromptProgressBeginEvent, PromptProgressEvent], is_draft: bool) -> bool:
+def default_callback(
+    event: Union[PromptProgressBeginEvent, PromptProgressEvent], is_draft: bool
+) -> bool:
     """
     A no-op callback that always returns True to continue processing.
 
@@ -38,21 +40,23 @@ def ratchet(
     """
     max_tokens_processed = -1
 
-    def inner_callback(event: Union[PromptProgressBeginEvent, PromptProgressEvent], is_draft: bool) -> bool:
+    def inner_callback(
+        event: Union[PromptProgressBeginEvent, PromptProgressEvent], is_draft: bool
+    ) -> bool:
         nonlocal max_tokens_processed
-        
+
         # Always pass through BeginEvent (it resets the ratchet)
         if isinstance(event, PromptProgressBeginEvent):
             max_tokens_processed = event.prefill_tokens_processed
             return callback(event, is_draft)
-        
+
         # For ProgressEvent, check if we've regressed
         if isinstance(event, PromptProgressEvent):
             if event.prefill_tokens_processed <= max_tokens_processed:
                 return True  # Skip callback, continue processing
             max_tokens_processed = event.prefill_tokens_processed
             return callback(event, is_draft)
-        
+
         # Unknown event type, pass through
         return callback(event, is_draft)
 
@@ -80,7 +84,10 @@ def throw_to_stop(
     Raises:
         StopPromptProcessing: When the original callback returns False.
     """
-    def inner_callback(event: Union[PromptProgressBeginEvent, PromptProgressEvent], is_draft: bool) -> bool:
+
+    def inner_callback(
+        event: Union[PromptProgressBeginEvent, PromptProgressEvent], is_draft: bool
+    ) -> bool:
         should_continue = callback(event, is_draft)
         if not should_continue:
             logger.info("Prompt processing was cancelled by the user.")
@@ -113,20 +120,20 @@ def mlx_lm_converter(
         as is expected by mlx-lm's stream_generate.
     """
     first_call = True
-    
+
     def inner_callback(processed_tokens: int, total_tokens: int) -> None:
         nonlocal first_call
-        
+
         # Emit BeginEvent on first call if requested (for vision processing)
         if first_call and emit_begin_event:
             first_call = False
             begin_event = PromptProgressBeginEvent(
                 cached_tokens=0,
                 total_prompt_tokens=total_tokens,
-                prefill_tokens_processed=0
+                prefill_tokens_processed=0,
             )
             callback(begin_event, is_draft=False)
-        
+
         else:
             # Emit progress event with current token count
             event = PromptProgressEvent(prefill_tokens_processed=processed_tokens)

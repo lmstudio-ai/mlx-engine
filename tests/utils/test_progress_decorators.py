@@ -1,11 +1,14 @@
 import unittest
-from mlx_engine.utils.progress_decorators import ratchet, throw_to_stop, mlx_lm_converter
+from mlx_engine.utils.progress_decorators import (
+    ratchet,
+    throw_to_stop,
+    mlx_lm_converter,
+)
 from mlx_engine.utils.prompt_progress_events import (
     PromptProgressBeginEvent,
     PromptProgressEvent,
 )
 from mlx_engine.cache_wrapper import StopPromptProcessing
-from typing import Callable, TypeVar
 
 
 def create_v2_callback(
@@ -170,10 +173,10 @@ class TestMlxLmConverter(unittest.TestCase):
 
         # Simulate a typical progress sequence (only passing tokens_processed, total_tokens)
         inputs = [
-            (0, 100),   # First call - will emit Begin + Progress
+            (0, 100),  # First call - will emit Begin + Progress
             (25, 100),  # Progress
             (50, 100),  # Progress
-            (100, 100), # Progress (complete)
+            (100, 100),  # Progress (complete)
         ]
 
         for tokens_processed, total_tokens in inputs:
@@ -212,7 +215,7 @@ class TestMlxLmConverter(unittest.TestCase):
 
         # Should only get ProgressEvents, no BeginEvent
         self.assertEqual(len(received_calls), 4)
-        
+
         expected_tokens = [0, 25, 50, 100]
         for index, expected_token_count in enumerate(expected_tokens):
             self.assertIsInstance(received_calls[index], PromptProgressEvent)

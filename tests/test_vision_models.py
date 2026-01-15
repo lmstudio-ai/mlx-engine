@@ -195,7 +195,9 @@ class TestVisionModels:
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+            def progress_callback(
+                event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+            ) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print_progress_event(event)
@@ -463,7 +465,9 @@ You are a helpful assistant.<|im_end|>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+            def progress_callback(
+                event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+            ) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print_progress_event(event)
@@ -519,7 +523,9 @@ You are a helpful assistant.<|im_end|>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+            def progress_callback(
+                event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+            ) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print_progress_event(event)
@@ -594,7 +600,9 @@ Summarize this in one sentence<end_of_turn>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+            def progress_callback(
+                event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+            ) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print_progress_event(event)
@@ -651,7 +659,9 @@ Summarize this in one sentence<end_of_turn>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+            def progress_callback(
+                event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+            ) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
                 print_progress_event(event)
@@ -724,7 +734,9 @@ Summarize this in one sentence<end_of_turn>
         prompt_tokens = tokenize(model_kit, prompt)
         progress_values = []
 
-        def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+        def progress_callback(
+            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+        ) -> bool:
             nonlocal progress_values
             # Track tokens processed (not percentages)
             if isinstance(event, PromptProgressEvent):

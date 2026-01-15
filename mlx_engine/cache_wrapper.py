@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Any
+from typing import List, Optional, Any
 import logging
 from mlx_lm.models.cache import (
     make_prompt_cache,
@@ -194,7 +194,6 @@ class CacheWrapper:
         """
         remaining_tokens = tokens
         num_processed = 0
-        total_tokens = len(tokens)
 
         while remaining_tokens.size > 0:
             current_chunk_size = min(self.chunk_size, remaining_tokens.size)
@@ -208,7 +207,7 @@ class CacheWrapper:
             num_processed += current_chunk_size
 
             mx.clear_cache()
-            
+
             # Emit V2 progress event with token count
             event = PromptProgressEvent(prefill_tokens_processed=num_processed)
             should_continue = progress_callback(event, is_draft)
@@ -290,21 +289,23 @@ class CacheWrapper:
         """
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         total_prompt_tokens = len(prompt_tokens)
-        prompt_tokens = self._get_unprocessed_tokens(prompt_tokens, num_tokens_to_exclude)
+        prompt_tokens = self._get_unprocessed_tokens(
+            prompt_tokens, num_tokens_to_exclude
+        )
         cached_tokens = total_prompt_tokens - len(prompt_tokens)
-        
+
         # Emit begin event
         begin_event = PromptProgressBeginEvent(
             cached_tokens=cached_tokens,
             total_prompt_tokens=total_prompt_tokens,
-            prefill_tokens_processed=0
+            prefill_tokens_processed=0,
         )
         prompt_progress_callback(begin_event, is_draft=False)
 
         # Prefill the cache with the non-excluded prompt tokens
         num_tokens_to_exclude = min(num_tokens_to_exclude, len(prompt_tokens))
         prefill_tokens = prompt_tokens[:-num_tokens_to_exclude]
-        
+
         with mx.stream(generation_stream):
             if self.draft_model is not None:
                 # Fill draft model cache

@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 import logging
 
-from tests.shared import model_getter, model_load_and_tokenize_prompt, print_progress_event
+from tests.shared import (
+    model_getter,
+    model_load_and_tokenize_prompt,
+    print_progress_event,
+)
 from mlx_engine.generate import (
     load_model,
     load_draft_model,
@@ -75,7 +79,9 @@ Who is this passage about? Only say the name, and nothing else<|im_end|>
         generated_text = ""
         prompt_progress_callback_times_called = 0
 
-        def prompt_progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+        def prompt_progress_callback(
+            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+        ) -> bool:
             nonlocal prompt_progress_callback_times_called
             prompt_progress_callback_times_called += 1
             print_progress_event(event)
@@ -152,7 +158,9 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         generated_text_list_1 = []
         prompt_progress_callback_times_called = 0
 
-        def prompt_progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+        def prompt_progress_callback(
+            event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool
+        ) -> bool:
             nonlocal prompt_progress_callback_times_called
             prompt_progress_callback_times_called += 1
             print_progress_event(event)

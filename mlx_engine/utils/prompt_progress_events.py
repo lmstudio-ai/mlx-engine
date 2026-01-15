@@ -21,4 +21,9 @@ class V2ProgressCallback(Protocol):
     Receives either a BeginEvent or ProgressEvent, plus an is_draft flag,
     and returns a bool indicating whether to continue processing (True) or cancel (False).
     """
-    def __call__(self, event: Union[PromptProgressBeginEvent, PromptProgressEvent], is_draft: bool) -> bool: ...
+
+    def __call__(
+        self,
+        event: Union[PromptProgressBeginEvent, PromptProgressEvent],
+        is_draft: bool,
+    ) -> bool: ...
