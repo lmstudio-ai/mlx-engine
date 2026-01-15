@@ -210,7 +210,7 @@ class TestVisionModels:
         # Generation 1 - model creates a long story
         prompt = "<s>[INST]Tell me a 500 word story about the bravest soul in the middle ages, and their weapon of choice[/INST]"
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 2  # single batch - Begin, Finished
+        assert len(reporter.events) == 3  # begin, update, finish
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -222,7 +222,7 @@ class TestVisionModels:
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
         assert num_tokens > 512
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 2  # single batch - Begin, Finished
+        assert len(reporter.events) == 3  # begin, update, finish
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
