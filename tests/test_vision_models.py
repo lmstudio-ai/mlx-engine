@@ -7,7 +7,11 @@ from mlx_engine.generate import (
     create_generator,
     is_draft_model_compatible,
 )
-from tests.shared import model_getter
+from mlx_engine.utils.prompt_progress_events import (
+    PromptProgressBeginEvent,
+    PromptProgressEvent,
+)
+from tests.shared import model_getter, print_progress_event
 from textwrap import dedent
 
 
@@ -191,10 +195,11 @@ class TestVisionModels:
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+                print_progress_event(event)
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -215,7 +220,7 @@ class TestVisionModels:
         # Generation 1 - model creates a long story
         prompt = "<s>[INST]Tell me a 500 word story about the bravest soul in the middle ages, and their weapon of choice[/INST]"
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0%, 100%
+        assert num_prompt_processing_callbacks == 2  # single batch - Begin, Finished
         assert "aldric" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
@@ -458,10 +463,11 @@ You are a helpful assistant.<|im_end|>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+                print_progress_event(event)
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -487,7 +493,7 @@ You are a helpful assistant.<|im_end|>
             <start_of_turn>model
             """)
         generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        assert num_prompt_processing_callbacks == 2  # single batch - Begin, Finished
         assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
@@ -513,10 +519,11 @@ You are a helpful assistant.<|im_end|>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+                print_progress_event(event)
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -587,10 +594,11 @@ Summarize this in one sentence<end_of_turn>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+                print_progress_event(event)
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -643,10 +651,11 @@ Summarize this in one sentence<end_of_turn>
             prompt_tokens = tokenize(model_kit, prompt)
             num_prompt_processing_callbacks = 0
 
-            def progress_callback(progress: float) -> None:
+            def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
                 nonlocal num_prompt_processing_callbacks
                 num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+                print_progress_event(event)
+                return True
 
             generated_text = ""
             for result in create_generator(
@@ -715,10 +724,12 @@ Summarize this in one sentence<end_of_turn>
         prompt_tokens = tokenize(model_kit, prompt)
         progress_values = []
 
-        def progress_callback(progress: float) -> bool:
+        def progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
             nonlocal progress_values
-            progress_values.append(progress)
-            print(f"Prompt processing progress: {progress}")
+            # Track tokens processed (not percentages)
+            if isinstance(event, PromptProgressEvent):
+                progress_values.append(event.prefill_tokens_processed)
+            print_progress_event(event)
             return True
 
         generated_text = ""

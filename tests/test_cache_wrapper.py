@@ -1,8 +1,12 @@
 import unittest
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper, StopPromptProcessing
-from tests.shared import model_getter
+from tests.shared import model_getter, print_progress_event
 from mlx_engine.generate import load_model, tokenize
+from mlx_engine.utils.prompt_progress_events import (
+    PromptProgressBeginEvent,
+    PromptProgressEvent,
+)
 
 
 class TestCacheWrapper(unittest.TestCase):
@@ -66,8 +70,9 @@ class TestCacheWrapper(unittest.TestCase):
         # First attempt: Progress callback that cancels after a few updates
         first_progress_calls = []
 
-        def cancelling_progress_callback(progress):
-            first_progress_calls.append(progress)
+        def cancelling_progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+            first_progress_calls.append(event)
+            print_progress_event(event)
             if len(first_progress_calls) >= 3:
                 return False
             return True
@@ -83,8 +88,9 @@ class TestCacheWrapper(unittest.TestCase):
         # Second attempt: Progress callback that doesn't cancel
         second_progress_calls = []
 
-        def non_cancelling_progress_callback(progress):
-            second_progress_calls.append(progress)
+        def non_cancelling_progress_callback(event: PromptProgressBeginEvent | PromptProgressEvent, is_draft: bool) -> bool:
+            second_progress_calls.append(event)
+            print_progress_event(event)
             return True
 
         result_tokens = model_kit.cache_wrapper.update_cache(

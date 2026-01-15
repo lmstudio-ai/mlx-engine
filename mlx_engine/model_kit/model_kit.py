@@ -1,5 +1,5 @@
 import json
-from typing import Callable, Optional, List, Tuple
+from typing import Optional, List, Tuple
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
 from mlx_engine.cache_wrapper import CacheWrapper
@@ -16,6 +16,7 @@ from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
+from mlx_engine.utils.prompt_progress_events import V2ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ class ModelKit:
         self,
         prompt_tokens,
         images_b64: Optional[List[str]],
-        prompt_progress_callback: Optional[Callable[[float], bool]],
+        prompt_progress_callback: V2ProgressCallback,
         generate_args: dict,
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
@@ -166,7 +167,7 @@ class ModelKit:
                 speculative_decoding_toggle,
                 prompt_progress_callback,
             ), None
-        ### WITH IMAGES PROMPT PROCESSING ###s
+        ### WITH IMAGES PROMPT PROCESSING ###
         if self.vision_add_on is None:
             raise ValueError(
                 "Vision add-on is not loaded, but images were provided for processing"

@@ -1,9 +1,10 @@
-from typing import Optional, Callable
+from typing import Optional
 
 from mlx import nn
 import mlx.core as mx
 
 from mlx_engine.cache_wrapper import CacheWrapper
+from mlx_engine.utils.prompt_progress_events import V2ProgressCallback
 
 
 def process_prompt_text_only(
@@ -12,7 +13,7 @@ def process_prompt_text_only(
     generate_args: dict,
     draft_model: Optional[nn.Module],
     speculative_decoding_toggle: Optional[bool],
-    prompt_progress_callback: Optional[Callable[[float], bool]],
+    prompt_progress_callback: V2ProgressCallback,
 ):
     if cache_wrapper is None:
         raise ValueError("Cache wrapper is not initialized, cannot process prompt")

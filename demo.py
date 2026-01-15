@@ -2,10 +2,15 @@ import argparse
 import base64
 import time
 import os
+import sys
 
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
+from mlx_engine.utils.prompt_progress_events import (
+    PromptProgressBeginEvent,
+    PromptProgressEvent,
+)
 from transformers import AutoTokenizer, AutoProcessor
 
 DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
@@ -29,7 +34,7 @@ def setup_arg_parser():
         "--prompt",
         default=DEFAULT_PROMPT,
         type=str,
-        help="Message to be processed by the model",
+        help="Message to be processed by the model. Use '-' to read from stdin",
     )
     parser.add_argument(
         "--system",
@@ -180,14 +185,15 @@ if __name__ == "__main__":
         args.images = [args.images]
 
     # Set up prompt processing callback
-    def prompt_progress_callback(percent):
-        if args.print_prompt_progress:
-            width = 40  # bar width
-            filled = int(width * percent / 100)
-            bar = "█" * filled + "░" * (width - filled)
-            print(f"\rProcessing prompt: |{bar}| ({percent:.1f}%)", end="", flush=True)
-            if percent >= 100:
-                print()  # new line when done
+    def prompt_progress_callback(
+        prompt_progress_event: PromptProgressBeginEvent | PromptProgressEvent,
+        is_draft: bool,
+    ) -> bool:
+        if args.print_prompt_progress is True:
+            print(
+                "Prompt progress callback event: "
+                f"{prompt_progress_event} is_draft={is_draft}"
+            )
         return True  # Progress callback must return True to continue
 
     # Load the model
@@ -209,6 +215,9 @@ if __name__ == "__main__":
 
     # Tokenize the prompt
     prompt = args.prompt
+    if prompt == "-":
+        stdin_prompt = sys.stdin.read()
+        prompt = stdin_prompt
 
     # Build conversation with optional system prompt
     conversation = []

@@ -9,6 +9,11 @@ from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
+from mlx_engine.utils.prompt_progress_events import (
+    PromptProgressBeginEvent,
+    PromptProgressEvent,
+    V2ProgressCallback,
+)
 
 
 PROMPT_PROCESSING_CHUNK_SIZE = 512
@@ -174,9 +179,8 @@ class CacheWrapper:
         model,
         cache,
         tokens,
-        progress_callback: Callable[[float], bool],
-        start_progress: float,
-        end_progress: float,
+        progress_callback: V2ProgressCallback,
+        is_draft: bool,
     ):
         """
         Fill a KV cache for a specific model
@@ -185,9 +189,8 @@ class CacheWrapper:
             model: The model to use for cache filling
             cache: The cache to fill
             tokens: Tokens to process
-            progress_callback: Callback for reporting progress
-            start_progress: Starting progress percentage
-            end_progress: Ending progress percentage
+            progress_callback: V2 callback for reporting progress
+            is_draft: Whether this is draft model prefill (True) or main model (False)
         """
         remaining_tokens = tokens
         num_processed = 0
@@ -204,12 +207,11 @@ class CacheWrapper:
             remaining_tokens = remaining_tokens[current_chunk_size:]
             num_processed += current_chunk_size
 
-            # Scale progress to fit between start_progress and end_progress
-            progress = start_progress + (end_progress - start_progress) * (
-                num_processed / total_tokens
-            )
             mx.clear_cache()
-            should_continue = progress_callback(progress)
+            
+            # Emit V2 progress event with token count
+            event = PromptProgressEvent(prefill_tokens_processed=num_processed)
+            should_continue = progress_callback(event, is_draft)
             if should_continue is False:  # If it's None, assume continue generation
                 logger.info("Prompt processing was cancelled by the user.")
                 num_tokens_in_cache = self._get_num_tokens_in_cache()
@@ -270,7 +272,7 @@ class CacheWrapper:
     def update_cache(
         self,
         prompt_tokens: mx.array,
-        prompt_progress_callback,
+        prompt_progress_callback: V2ProgressCallback,
         *,
         num_tokens_to_exclude: int = 1,
     ) -> mx.array:
@@ -280,47 +282,48 @@ class CacheWrapper:
 
         Args:
             prompt_tokens (mx.array): The prompt tokens.
-            prompt_progress_callback (Callable): A callback function to report prompt processing progress.
+            prompt_progress_callback: V2 callback function to report prompt processing progress.
             num_tokens_to_exclude (int): The number of tokens that should not be added to the cache.
 
         Returns:
             mx.array: The prompt tokens to be used for the next generation.
         """
-        if prompt_progress_callback is None:
-
-            def prompt_progress_callback(_) -> bool:
-                return True
-
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
-        prompt_tokens = self._get_unprocessed_tokens(
-            prompt_tokens, num_tokens_to_exclude
+        total_prompt_tokens = len(prompt_tokens)
+        prompt_tokens = self._get_unprocessed_tokens(prompt_tokens, num_tokens_to_exclude)
+        cached_tokens = total_prompt_tokens - len(prompt_tokens)
+        
+        # Emit begin event
+        begin_event = PromptProgressBeginEvent(
+            cached_tokens=cached_tokens,
+            total_prompt_tokens=total_prompt_tokens,
+            prefill_tokens_processed=0
         )
+        prompt_progress_callback(begin_event, is_draft=False)
 
         # Prefill the cache with the non-excluded prompt tokens
         num_tokens_to_exclude = min(num_tokens_to_exclude, len(prompt_tokens))
         prefill_tokens = prompt_tokens[:-num_tokens_to_exclude]
-        prompt_progress_callback(0)
+        
         with mx.stream(generation_stream):
             if self.draft_model is not None:
-                # Fill draft model cache (0% to 50% progress)
+                # Fill draft model cache
                 draft_cache = self.cache[len(self.model.layers) :]
                 self._prefill(
                     model=self.draft_model,
                     cache=draft_cache,
                     tokens=prefill_tokens,
                     progress_callback=prompt_progress_callback,
-                    start_progress=0,
-                    end_progress=50,
+                    is_draft=True,
                 )
-            # Fill main model cache (50% to 100% progress for draft model, 0% to 100% otherwise)
+            # Fill main model cache
             main_cache = self.cache[: len(self.model.layers)]
             self._prefill(
                 model=self.model,
                 cache=main_cache,
                 tokens=prefill_tokens,
                 progress_callback=prompt_progress_callback,
-                start_progress=50 if self.draft_model is not None else 0,
-                end_progress=100,
+                is_draft=False,
             )
 
         # Return the tokens that must still be processed outside of the cache

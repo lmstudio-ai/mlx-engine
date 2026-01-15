@@ -3,6 +3,18 @@ import sys
 import subprocess
 
 from mlx_engine.generate import load_model, load_draft_model, tokenize
+from mlx_engine.utils.prompt_progress_events import (
+    PromptProgressBeginEvent,
+    PromptProgressEvent,
+)
+
+
+def print_progress_event(event: PromptProgressBeginEvent | PromptProgressEvent) -> None:
+    """Helper to print progress events in a readable format"""
+    if isinstance(event, PromptProgressBeginEvent):
+        print(f"Begin: {event.prefill_tokens_processed}/{event.total_prompt_tokens} (cached: {event.cached_tokens})")
+    else:
+        print(f"Progress: {event.prefill_tokens_processed} tokens")
 
 
 def model_getter(model_name: str):

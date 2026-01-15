@@ -27,7 +27,8 @@ from mlx_engine.utils.speculative_decoding import (
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
 from mlx_engine.cache_wrapper import StopPromptProcessing, PROMPT_PROCESSING_CHUNK_SIZE
-from mlx_engine.utils.progress_decorators import ratchet, throw_to_stop, token_count
+from mlx_engine.utils.progress_decorators import ratchet, throw_to_stop, mlx_lm_converter, default_callback
+from mlx_engine.utils.prompt_progress_events import V2ProgressCallback
 
 MAX_TOP_LOGPROBS = 10
 
@@ -142,7 +143,7 @@ def create_generator(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],
     *,
-    prompt_progress_callback: Optional[Callable[[float], bool]] = None,
+    prompt_progress_callback: Optional[V2ProgressCallback] = None,
     images_b64: Optional[List[str]] = None,
     max_image_size: Optional[tuple[int, int]] = None,
     stop_strings: Optional[List[str]] = None,
@@ -212,11 +213,11 @@ def create_generator(
     set_seed(seed)
 
     generate_args = {}
-    # For each call to create_generator, wrap all prompt progress calls with a ratchet that
-    # ensures reported progress monotonically increases. This is needed because prompt processing
-    # occurs in different places depending on the model type and prompt content. The prompt will only
-    # be processed once, but some contexts are not aware that the prompt is already processed, which
-    # can cause the progress to look like it is being reset when it is actually already complete.
+    if prompt_progress_callback is None:
+        prompt_progress_callback = default_callback
+    # Apply ratchet decorator to ensure monotonically increasing progress
+    # This prevents progress from appearing to move backwards when prompt processing
+    # occurs in different contexts or is already cached.
     # See https://github.com/lmstudio-ai/mlx-engine/issues/226.
     prompt_progress_callback = ratchet(prompt_progress_callback)
 
@@ -384,6 +385,17 @@ def create_generator(
             top_logprobs=top_logprobs_buffer,
         )
 
+    # Determine callback for mlx-lm based on processing mode
+    # When cache is NOT active (vision prompts), stream_generate handles prompt processing
+    # When cache IS active (text-only), cache_wrapper already handled it
+    if not model_kit.is_cross_prompt_cache_active():
+        mlx_lm_callback = mlx_lm_converter(
+            throw_to_stop(prompt_progress_callback),
+            emit_begin_event=True
+        )
+    else:
+        mlx_lm_callback = None
+    
     stream = stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
@@ -391,7 +403,7 @@ def create_generator(
         prompt=input_tokens,
         max_tokens=max_tokens,
         logits_processors=logits_processors,
-        prompt_progress_callback=token_count(throw_to_stop(prompt_progress_callback)),
+        prompt_progress_callback=mlx_lm_callback,
         prefill_step_size=PROMPT_PROCESSING_CHUNK_SIZE,
         **generate_args,
     )
