@@ -7,7 +7,7 @@ from mlx_engine.generate import (
     create_generator,
     is_draft_model_compatible,
 )
-from tests.shared import model_getter
+from tests.shared import model_getter, RecordingReporter
 from textwrap import dedent
 
 
@@ -189,12 +189,7 @@ class TestVisionModels:
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
-            num_prompt_processing_callbacks = 0
-
-            def progress_callback(progress: float) -> None:
-                nonlocal num_prompt_processing_callbacks
-                num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+            reporter = RecordingReporter()
 
             generated_text = ""
             for result in create_generator(
@@ -203,19 +198,22 @@ class TestVisionModels:
                 seed=0,
                 temp=0.0,
                 max_tokens=1000,
-                prompt_progress_callback=progress_callback,
+                prompt_progress_reporter=reporter,
             ):
                 generated_text += result.text
                 print(result.text, end="", flush=True)
                 if result.stop_condition:
                     break
             print("\n", flush=True)
-            return generated_text, num_prompt_processing_callbacks
+            return generated_text, reporter
 
         # Generation 1 - model creates a long story
         prompt = "<s>[INST]Tell me a 500 word story about the bravest soul in the middle ages, and their weapon of choice[/INST]"
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0%, 100%
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 2  # single batch - Begin, Finished
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
         assert "aldric" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
@@ -223,8 +221,11 @@ class TestVisionModels:
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
         assert num_tokens > 512
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0%, 100%
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 2  # single batch - Begin, Finished
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0  # Cache should be used
         assert "aldric" in generated_text.lower()
 
     def test_qwen2_vision(self):
@@ -456,12 +457,7 @@ You are a helpful assistant.<|im_end|>
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
-            num_prompt_processing_callbacks = 0
-
-            def progress_callback(progress: float) -> None:
-                nonlocal num_prompt_processing_callbacks
-                num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+            reporter = RecordingReporter()
 
             generated_text = ""
             for result in create_generator(
@@ -471,14 +467,14 @@ You are a helpful assistant.<|im_end|>
                 temp=0.0,
                 max_tokens=1000,
                 repetition_penalty=1.01,  # to enable this code path
-                prompt_progress_callback=progress_callback,
+                prompt_progress_reporter=reporter,
             ):
                 generated_text += result.text
                 print(result.text, end="", flush=True)
                 if result.stop_condition:
                     break
             print("\n", flush=True)
-            return generated_text, num_prompt_processing_callbacks
+            return generated_text, reporter
 
         # Generation 1 - model creates a long story
         prompt = dedent("""\
@@ -486,8 +482,11 @@ You are a helpful assistant.<|im_end|>
             Tell me a 500-word story<end_of_turn>
             <start_of_turn>model
             """)
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
         assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
@@ -500,8 +499,11 @@ You are a helpful assistant.<|im_end|>
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
         assert num_tokens > 512
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0  # Cache should be used
         assert "silas" in generated_text.lower()
 
     def test_gemma3_text_only_long_original_prompt_caching(self):
@@ -511,12 +513,7 @@ You are a helpful assistant.<|im_end|>
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
-            num_prompt_processing_callbacks = 0
-
-            def progress_callback(progress: float) -> None:
-                nonlocal num_prompt_processing_callbacks
-                num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+            reporter = RecordingReporter()
 
             generated_text = ""
             for result in create_generator(
@@ -526,14 +523,14 @@ You are a helpful assistant.<|im_end|>
                 temp=0.0,
                 max_tokens=1000,
                 repetition_penalty=1.01,  # to enable this code path
-                prompt_progress_callback=progress_callback,
+                prompt_progress_reporter=reporter,
             ):
                 generated_text += result.text
                 print(result.text, end="", flush=True)
                 if result.stop_condition:
                     break
             print("\n", flush=True)
-            return generated_text, num_prompt_processing_callbacks
+            return generated_text, reporter
 
         # Generation 1 - send model a long excerpt to summarize
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
@@ -549,8 +546,11 @@ Summarize this in one sentence<end_of_turn>
 """
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 4  # 4 batches, so 0, x, x, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 5  # begin, update, update, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
         assert "benjamin franklin" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
@@ -561,8 +561,11 @@ Summarize this in one sentence<end_of_turn>
                 <start_of_turn>model
                 """)
         print(prompt)
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0  # Cache should be used
         assert "benjamin franklin" in generated_text.lower()
 
     def test_gemma3n_vision(self):
@@ -585,12 +588,7 @@ Summarize this in one sentence<end_of_turn>
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
-            num_prompt_processing_callbacks = 0
-
-            def progress_callback(progress: float) -> None:
-                nonlocal num_prompt_processing_callbacks
-                num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+            reporter = RecordingReporter()
 
             generated_text = ""
             for result in create_generator(
@@ -600,14 +598,14 @@ Summarize this in one sentence<end_of_turn>
                 temp=0.0,
                 max_tokens=1000,
                 repetition_penalty=1.01,  # to enable this code path
-                prompt_progress_callback=progress_callback,
+                prompt_progress_reporter=reporter,
             ):
                 generated_text += result.text
                 print(result.text, end="", flush=True)
                 if result.stop_condition:
                     break
             print("\n", flush=True)
-            return generated_text, num_prompt_processing_callbacks
+            return generated_text, reporter
 
         # Generation 1 - model creates a long story
         prompt = dedent("""\
@@ -615,8 +613,11 @@ Summarize this in one sentence<end_of_turn>
             Tell me a 500-word story<end_of_turn>
             <start_of_turn>model
             """)
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
         assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
@@ -629,8 +630,11 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
         assert num_tokens > 512
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0  # Cache should be used
         assert "silas" in generated_text.lower()
 
     # TODO(will): Parameterize and de-dup
@@ -641,12 +645,7 @@ Summarize this in one sentence<end_of_turn>
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
-            num_prompt_processing_callbacks = 0
-
-            def progress_callback(progress: float) -> None:
-                nonlocal num_prompt_processing_callbacks
-                num_prompt_processing_callbacks += 1
-                print(f"Prompt processing progress: {progress}")
+            reporter = RecordingReporter()
 
             generated_text = ""
             for result in create_generator(
@@ -656,14 +655,14 @@ Summarize this in one sentence<end_of_turn>
                 temp=0.0,
                 max_tokens=1000,
                 repetition_penalty=1.01,  # to enable this code path
-                prompt_progress_callback=progress_callback,
+                prompt_progress_reporter=reporter,
             ):
                 generated_text += result.text
                 print(result.text, end="", flush=True)
                 if result.stop_condition:
                     break
             print("\n", flush=True)
-            return generated_text, num_prompt_processing_callbacks
+            return generated_text, reporter
 
         # Generation 1 - send model a long excerpt to summarize
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
@@ -679,8 +678,11 @@ Summarize this in one sentence<end_of_turn>
 """
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 4  # 4 batches, so 0, x, x, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 5  # begin, update, update, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
         assert "benjamin franklin" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
@@ -691,8 +693,11 @@ Summarize this in one sentence<end_of_turn>
                 <start_of_turn>model
                 """)
         print(prompt)
-        generated_text, num_prompt_processing_callbacks = generate_text(prompt)
-        assert num_prompt_processing_callbacks == 2  # single batch - 0, 100
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0  # Cache should be used
         assert "benjamin franklin" in generated_text.lower()
 
     def test_gemma3n_vision_long_prompt_progress_reported(self):
@@ -713,13 +718,7 @@ Summarize this in one sentence<end_of_turn>
 <start_of_turn>model
 """
         prompt_tokens = tokenize(model_kit, prompt)
-        progress_values = []
-
-        def progress_callback(progress: float) -> bool:
-            nonlocal progress_values
-            progress_values.append(progress)
-            print(f"Prompt processing progress: {progress}")
-            return True
+        reporter = RecordingReporter()
 
         generated_text = ""
         for result in create_generator(
@@ -731,13 +730,20 @@ Summarize this in one sentence<end_of_turn>
             temp=0.0,
             max_tokens=1,  # We only care about pre-fill in this test
             repetition_penalty=1.01,
-            prompt_progress_callback=progress_callback,
+            prompt_progress_reporter=reporter,
         ):
             generated_text += result.text
             print(result.text, end="", flush=True)
             if result.stop_condition:
                 break
         print("\n", flush=True)
+
+        # Extract progress values from update events
+        progress_values = [
+            event["prefill_tokens_processed"]
+            for event in reporter.events
+            if event["type"] == "update"
+        ]
         print(progress_values)
         assert len(progress_values) > 0
         for i in range(len(progress_values) - 1):

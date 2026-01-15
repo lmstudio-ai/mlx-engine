@@ -2,10 +2,12 @@ import argparse
 import base64
 import time
 import os
+import sys
 
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
+from mlx_engine.utils.prompt_progress_reporter import LoggerReporter
 from transformers import AutoTokenizer, AutoProcessor
 
 DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
@@ -29,7 +31,7 @@ def setup_arg_parser():
         "--prompt",
         default=DEFAULT_PROMPT,
         type=str,
-        help="Message to be processed by the model",
+        help="Message to be processed by the model. Use '-' to read from stdin",
     )
     parser.add_argument(
         "--system",
@@ -179,17 +181,6 @@ if __name__ == "__main__":
     if isinstance(args.images, str):
         args.images = [args.images]
 
-    # Set up prompt processing callback
-    def prompt_progress_callback(percent):
-        if args.print_prompt_progress:
-            width = 40  # bar width
-            filled = int(width * percent / 100)
-            bar = "█" * filled + "░" * (width - filled)
-            print(f"\rProcessing prompt: |{bar}| ({percent:.1f}%)", end="", flush=True)
-            if percent >= 100:
-                print()  # new line when done
-        return True  # Progress callback must return True to continue
-
     # Load the model
     model_path = resolve_model_path(args.model)
     print("Loading model...", end="\n", flush=True)
@@ -209,6 +200,9 @@ if __name__ == "__main__":
 
     # Tokenize the prompt
     prompt = args.prompt
+    if prompt == "-":
+        stdin_prompt = sys.stdin.read()
+        prompt = stdin_prompt
 
     # Build conversation with optional system prompt
     conversation = []
@@ -259,7 +253,9 @@ if __name__ == "__main__":
         stop_strings=args.stop_strings,
         max_tokens=1024,
         top_logprobs=args.top_logprobs,
-        prompt_progress_callback=prompt_progress_callback,
+        prompt_progress_reporter=LoggerReporter()
+        if args.print_prompt_progress
+        else None,
         num_draft_tokens=args.num_draft_tokens,
         temp=args.temp,
     )

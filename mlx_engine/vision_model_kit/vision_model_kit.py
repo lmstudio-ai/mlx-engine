@@ -1,5 +1,6 @@
 from typing import Union, Optional, List, Tuple
 from mlx_engine.model_kit.model_kit import ModelKit
+from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 import logging
 
 from ._transformers_compatibility import (
@@ -103,7 +104,7 @@ class VisionModelKit(ModelKit):
         self,
         prompt_tokens,
         images_b64: Optional[List[str]],
-        prompt_progress_callback,
+        prompt_progress_reporter: PromptProgressReporter,
         generate_args,
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
