@@ -206,7 +206,7 @@ class CacheWrapper:
 
             # Report progress
             should_continue = reporter.update(is_draft, num_processed)
-            if should_continue is False:  # If it's None, assume continue generation
+            if not should_continue:
                 logger.info("Prompt processing was cancelled by the user.")
                 num_tokens_in_cache = self._get_num_tokens_in_cache()
                 if num_tokens_in_cache is not None and num_tokens_in_cache > len(

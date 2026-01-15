@@ -30,7 +30,6 @@ from mlx_engine.cache_wrapper import StopPromptProcessing, PROMPT_PROCESSING_CHU
 from mlx_engine.utils.prompt_progress_reporter import (
     PromptProgressReporter,
     DefaultPromptProgressReporter,
-    ThrowToStopReporter,
     MlxLmReporterAdapter,
 )
 
@@ -389,7 +388,7 @@ def create_generator(
     # When cache IS active (text-only), cache_wrapper already handled it
     if not model_kit.is_cross_prompt_cache_active():
         mlx_lm_callback = MlxLmReporterAdapter(
-            ThrowToStopReporter(prompt_progress_reporter), emit_begin=True
+            prompt_progress_reporter, emit_begin=True
         )
     else:
         mlx_lm_callback = None

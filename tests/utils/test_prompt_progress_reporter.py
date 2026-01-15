@@ -173,3 +173,35 @@ class TestMlxLmReporterAdapter(unittest.TestCase):
 
         # Only 2 calls: update at 50, finish at 100
         self.assertEqual(len(inner.events), 2)
+
+    def test_adapter_raises_on_cancellation(self):
+        """Test that adapter raises StopPromptProcessing when inner reporter cancels."""
+        inner = MockReporter(return_value=False)
+        adapter = MlxLmReporterAdapter(inner, emit_begin=True)
+
+        # First call triggers begin which returns False, causing StopPromptProcessing
+        with self.assertRaises(StopPromptProcessing):
+            adapter(0, 100)
+
+    def test_adapter_raises_on_update_cancellation(self):
+        """Test that adapter raises StopPromptProcessing when update cancels."""
+        # Use a reporter that allows begin but cancels on update
+        call_count = [0]
+
+        class CancelOnSecondCallReporter(MockReporter):
+            def begin(self, *args, **kwargs):
+                call_count[0] += 1
+                super().begin(*args, **kwargs)
+                return True
+
+            def update(self, *args, **kwargs):
+                call_count[0] += 1
+                super().update(*args, **kwargs)
+                return False  # Cancel on update
+
+        inner = CancelOnSecondCallReporter()
+        adapter = MlxLmReporterAdapter(inner, emit_begin=True)
+
+        adapter(0, 100)  # Begin - succeeds
+        with self.assertRaises(StopPromptProcessing):
+            adapter(50, 100)  # Update - cancels
