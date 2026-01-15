@@ -7,7 +7,7 @@ import sys
 from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
-from mlx_engine.utils.prompt_progress_reporter import LogReporter
+from mlx_engine.utils.prompt_progress_reporter import LoggerReporter
 from transformers import AutoTokenizer, AutoProcessor
 
 DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
@@ -253,7 +253,9 @@ if __name__ == "__main__":
         stop_strings=args.stop_strings,
         max_tokens=1024,
         top_logprobs=args.top_logprobs,
-        prompt_progress_reporter=LogReporter() if args.print_prompt_progress else None,
+        prompt_progress_reporter=LoggerReporter()
+        if args.print_prompt_progress
+        else None,
         num_draft_tokens=args.num_draft_tokens,
         temp=args.temp,
     )

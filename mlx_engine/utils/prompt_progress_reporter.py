@@ -90,7 +90,7 @@ class DefaultPromptProgressReporter(PromptProgressReporter):
         return True
 
 
-class LogReporter(PromptProgressReporter):
+class LoggerReporter(PromptProgressReporter):
     """A reporter that logs all events it receives."""
 
     def begin(
