@@ -21,7 +21,7 @@ class PromptProgressEvent:
 class ProgressContext:
     cached_tokens: int
     total_prompt_tokens: int
-    last_prefill_tokens_processed: int = 0
+    last_prefill_tokens_processed: int
 
 
 PromptProgressCallbackEvent = PromptProgressBeginEvent | PromptProgressEvent
