@@ -157,6 +157,59 @@ class TestVisionModels:
             "lmstudio-community/LFM2.5-VL-1.6B-MLX-4bit", prompt, text_only=True
         )
 
+    def test_lfm2_5_vl_text_only_generation_caching(self):
+        """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
+        model_path = model_getter("lmstudio-community/LFM2.5-VL-1.6B-MLX-4bit")
+        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+
+        def generate_text(prompt):
+            prompt_tokens = tokenize(model_kit, prompt)
+            reporter = RecordingReporter()
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=1000,
+                prompt_progress_reporter=reporter,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return generated_text, reporter
+
+        # Generation 1 - model creates a long story
+        prompt = dedent("""\
+            <|im_start|>user
+            Tell me a 500-word story<|im_end|>
+            <|im_start|>assistant
+            """)
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
+
+        # Generation 2 - ask for a detail about the story, should not reprocess
+        prompt += generated_text + dedent("""\
+            <|im_end|>
+            <|im_start|>user
+            What was the main character's name?<|im_end|>
+            <|im_start|>assistant
+            """)
+        num_tokens = len(model_kit.tokenize(prompt))
+        # Without caching, prompts > 512 tokens cause multi-batch processing
+        assert num_tokens > 512
+        generated_text, reporter = generate_text(prompt)
+        assert len(reporter.events) == 3  # begin, update, finish
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0  # Cache should be used
+
     @pytest.mark.heavy
     def test_mistral3_vision(self):
         prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
