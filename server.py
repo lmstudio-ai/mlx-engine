@@ -13,6 +13,12 @@ from pydantic import BaseModel, Field
 
 from huggingface_hub import snapshot_download
 from mlx_vlm.convert import convert
+from fastapi.responses import StreamingResponse
+import json
+
+from mlx_audio.tts.utils import load_model as load_tts_model
+#remove this import after finished with audio
+import sounddevice as sd
 
 
 app = FastAPI()
@@ -37,7 +43,7 @@ async def convertion(params: convertionParams):
     )
     print(f"Model converted and saved to {output_path}")
 
-@app.put("/download/direct")
+@app.put("/download/huggingface")
 async def download(repo_id: str):
     creator, model = repo_id.split('/')
     snapshot_download(
@@ -59,19 +65,29 @@ class Message(BaseModel):
     name: str | None = Field(description="The name of the message", default=None)
 
 class InferenceParams(BaseModel):
-    """
-    Pydantic model representing the query parameters for MLX Engine Inference.
-    """
-    messages: list[Message] = Field(
-        default=[], 
-        description="Message to be processed by the model"
-    )
+    #Required Parameters
     model: str = Field(
         description="The file system path to the model"
     )
+    messages: list[Message] = Field(
+        description="Message to be processed by the model"
+    )
+    #Core Sampling Parameters
     temperature: float | None = Field(
         default=DEFAULT_TEMP, 
         description="Sampling temperature"
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        description="Maximum number of tokens to generate"
+    )
+    max_completion_tokens: int | None = Field(
+        default=None,
+        description="Maximum number of tokens to generate"
+    )
+    stream: bool | None = Field(
+        default=False, 
+        description="Enable streaming of the response"
     )
     stop_strings: list[str] | None = Field(
         default=None, 
@@ -119,10 +135,6 @@ class InferenceParams(BaseModel):
     json_schema: str | None = Field(
         default=None, 
         description="JSON schema for the response"
-    )
-    stream: bool | None = Field(
-        default=False, 
-        description="Enable streaming of the response"
     )
 
 
@@ -178,6 +190,30 @@ async def models():
     models.sort()
     return models
 
+async def generate_stream(generator):
+    for generation_result in generator:
+        #print(generation_result.text, end="", flush=True)
+        yield json.dumps({"content" : generation_result.text, "ID" : "12345"})
+
+async def generate_output(generator):
+    result = ""
+    for generation_result in generator:
+        result += generation_result.text
+    #     stats_collector.add_tokens(generation_result.tokens)
+    #     logprobs_list.extend(generation_result.top_logprobs)
+
+    # if generation_result.stop_condition:
+    #     stats_collector.print_stats()
+    #     print(
+    #         f"\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
+    #     )
+    # if generation_result.stop_condition.stop_string:
+    #     print(f"Stop string: {generation_result.stop_condition.stop_string}")
+
+    # if generate_query.top_logprobs:
+    #     [print(x) for x in logprobs_list] 
+
+    return result
 
 @app.post("/v1/chat/completions")
 async def generate(generate_query: Annotated[InferenceParams, Depends()]):
@@ -205,9 +241,9 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
     tf_tokenizer = AutoProcessor.from_pretrained(generate_query.model)
     images_base64 = []
     for message in generate_query.messages:
-        if message.role == "user":
+        if message.role == "user" and isinstance(message.content, list):
             for content in message.content:
-                if content.type == "image_url" and content.url is not None:
+                if  content.url is not None and content.type == "image_url":
                     images_base64.append(image_to_base64(content.url))
                     #content.url = image_to_base64(content.url)
     # Build conversation with optional system prompt
@@ -236,34 +272,20 @@ async def generate(generate_query: Annotated[InferenceParams, Depends()]):
         num_draft_tokens=generate_query.num_draft_tokens,
         temp=generate_query.temperature 
     )
-    result = ""
-    for generation_result in generator:
-        print(generation_result.text, end="", flush=True)
-        result += generation_result.text
-        stats_collector.add_tokens(generation_result.tokens)
-        logprobs_list.extend(generation_result.top_logprobs)
+    if generate_query.stream:
+        return StreamingResponse(generate_stream(generator))
+    else:
+        return await generate_output(generator)
 
-        if generation_result.stop_condition:
-            stats_collector.print_stats()
-            print(
-                f"\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
-            )
-            if generation_result.stop_condition.stop_string:
-                print(f"Stop string: {generation_result.stop_condition.stop_string}")
-
-    if generate_query.top_logprobs:
-        [print(x) for x in logprobs_list]
-
-    response = {
-            "object": "chat.completion",
-            "model": generate_query.model,
-            "created": int(time.time()),
-            "usage": {
-                "prompt_tokens": stats_collector.total_tokens,
-                "completion_tokens": stats_collector.total_tokens,
-                "total_tokens": stats_collector.total_tokens,
-            },
-            "choices": [Message(content=result, role="assistant")],
-            "response_format": generate_query.json_schema
-        }
-    return response 
+@app.post("/v1/audio")
+async def tts(tts_query : str):
+    model = load_tts_model("mlx-community/Kokoro-82M-bf16")
+    sample_rate = 24000
+    print("Playing audio in real-time...")
+    output = model.generate(tts_query, voice="af_heart")
+    for result in output:
+        # Play this chunk immediately
+        sd.play(result.audio, sample_rate)
+        sd.wait()  # Wait for this chunk to finish playing
+    print("Playback complete!")
+    return output 

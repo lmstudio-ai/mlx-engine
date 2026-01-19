@@ -103,9 +103,7 @@ def load_model(
     model_type = config_json.get("model_type", None)
 
     # only use VisionModelKit if ModelKit doesn't have vision support for this model
-    if "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
-        model_type
-    ):
+    if "vision_config" in config_json and not ModelKit.is_supported_vision_arch(model_type):
         if any([kv_bits, kv_group_size, quantized_kv_start]):
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
