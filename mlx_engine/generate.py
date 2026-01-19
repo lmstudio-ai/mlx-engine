@@ -1,4 +1,4 @@
-from typing import Callable, Iterator, List, Literal, NamedTuple, Optional
+from typing import Iterator, List, Literal, NamedTuple, Optional
 import json
 import logging
 from pathlib import Path
@@ -27,7 +27,11 @@ from mlx_engine.utils.speculative_decoding import (
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
 from mlx_engine.cache_wrapper import StopPromptProcessing, PROMPT_PROCESSING_CHUNK_SIZE
-from mlx_engine.utils.progress_decorators import ratchet, throw_to_stop, token_count
+from mlx_engine.utils.prompt_progress_reporter import (
+    PromptProgressReporter,
+    DefaultPromptProgressReporter,
+    MlxLmReporterAdapter,
+)
 
 MAX_TOP_LOGPROBS = 10
 
@@ -140,7 +144,7 @@ def create_generator(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],
     *,
-    prompt_progress_callback: Optional[Callable[[float], bool]] = None,
+    prompt_progress_reporter: Optional[PromptProgressReporter] = None,
     images_b64: Optional[List[str]] = None,
     max_image_size: Optional[tuple[int, int]] = None,
     stop_strings: Optional[List[str]] = None,
@@ -168,9 +172,9 @@ def create_generator(
     Args:
         model_kit (ModelKit | VisionModelKit): The initialized model to use for generation
         prompt_tokens (List[int]): List of token IDs representing the input prompt
-        prompt_progress_callback (Optional[Callable[[float], bool]]): Callback function that receives
-            generation progress as a float between 0 and 100. Callback should return True to continue
-            prompt processing, or False to stop generation
+        prompt_progress_reporter (Optional[PromptProgressReporter]): Reporter for receiving prompt
+            processing progress updates. Reporter methods should return True to continue processing,
+            or False to stop generation
         images_b64 (Optional[List[str]]): List of base64-encoded images for vision-language models
         max_image_size (Optional[tuple[int, int]]): Maximum dimensions (width, height) for images.
             Images will be resized to fit within these dimensions while maintaining aspect ratio if
@@ -210,13 +214,8 @@ def create_generator(
     set_seed(seed)
 
     generate_args = {}
-    # For each call to create_generator, wrap all prompt progress calls with a ratchet that
-    # ensures reported progress monotonically increases. This is needed because prompt processing
-    # occurs in different places depending on the model type and prompt content. The prompt will only
-    # be processed once, but some contexts are not aware that the prompt is already processed, which
-    # can cause the progress to look like it is being reset when it is actually already complete.
-    # See https://github.com/lmstudio-ai/mlx-engine/issues/226.
-    prompt_progress_callback = ratchet(prompt_progress_callback)
+    if prompt_progress_reporter is None:
+        prompt_progress_reporter = DefaultPromptProgressReporter()
 
     # Set up kv cache
     if type(model_kit) is not VisionModelKit:
@@ -247,7 +246,7 @@ def create_generator(
         input_tokens, input_embeddings = model_kit.process_prompt(
             prompt_tokens,
             images_b64,
-            prompt_progress_callback,
+            prompt_progress_reporter,
             generate_args,
             max_image_size,
             speculative_decoding_toggle,
@@ -382,6 +381,16 @@ def create_generator(
             top_logprobs=top_logprobs_buffer,
         )
 
+    # Determine callback for mlx-lm based on processing mode
+    # When cache is NOT active (vision prompts), stream_generate handles prompt processing
+    # When cache IS active (text-only), cache_wrapper already handled it
+    if not model_kit.is_cross_prompt_cache_active():
+        mlx_lm_callback = MlxLmReporterAdapter(
+            prompt_progress_reporter, emit_begin=True
+        )
+    else:
+        mlx_lm_callback = None
+
     stream = stream_generate(
         model=model_kit.model,
         tokenizer=tokenizer,
@@ -389,7 +398,7 @@ def create_generator(
         prompt=input_tokens,
         max_tokens=max_tokens,
         logits_processors=logits_processors,
-        prompt_progress_callback=token_count(throw_to_stop(prompt_progress_callback)),
+        prompt_progress_callback=mlx_lm_callback,
         prefill_step_size=PROMPT_PROCESSING_CHUNK_SIZE,
         **generate_args,
     )

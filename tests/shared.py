@@ -1,8 +1,90 @@
 from pathlib import Path
 import sys
 import subprocess
+from typing import Optional
 
 from mlx_engine.generate import load_model, load_draft_model, tokenize
+from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
+
+
+class RecordingReporter(PromptProgressReporter):
+    """A reporter that records each event it receives, for testing."""
+
+    def __init__(self):
+        self.events: list[dict] = []
+
+    def begin(
+        self,
+        is_draft: bool,
+        cached_tokens: int,
+        total_prompt_tokens: int,
+        prefill_tokens_processed: int,
+    ) -> bool:
+        event = {
+            "type": "begin",
+            "is_draft": is_draft,
+            "cached_tokens": cached_tokens,
+            "total_prompt_tokens": total_prompt_tokens,
+            "prefill_tokens_processed": prefill_tokens_processed,
+        }
+        self.events.append(event)
+        print(event)
+        return True
+
+    def update(self, is_draft: bool, prefill_tokens_processed: int) -> bool:
+        event = {
+            "type": "update",
+            "is_draft": is_draft,
+            "prefill_tokens_processed": prefill_tokens_processed,
+        }
+        self.events.append(event)
+        print(event)
+        return True
+
+    def finish(
+        self, is_draft: bool, prefill_tokens_processed: Optional[int] = None
+    ) -> bool:
+        event = {
+            "type": "finish",
+            "is_draft": is_draft,
+            "prefill_tokens_processed": prefill_tokens_processed,
+        }
+        self.events.append(event)
+        print(event)
+        return True
+
+
+class CancellingReporter(RecordingReporter):
+    """A reporter that cancels after a specified number of events, for testing."""
+
+    def __init__(self, cancel_after: int):
+        super().__init__()
+        self.cancel_after = cancel_after
+
+    def _should_continue(self) -> bool:
+        return len(self.events) < self.cancel_after
+
+    def begin(
+        self,
+        is_draft: bool,
+        cached_tokens: int,
+        total_prompt_tokens: int,
+        prefill_tokens_processed: int,
+    ) -> bool:
+        super().begin(
+            is_draft, cached_tokens, total_prompt_tokens, prefill_tokens_processed
+        )
+        return self._should_continue()
+
+    def update(self, is_draft: bool, prefill_tokens_processed: int) -> bool:
+        super().update(is_draft, prefill_tokens_processed)
+        return self._should_continue()
+
+    def finish(
+        self, is_draft: bool, prefill_tokens_processed: Optional[int] = None
+    ) -> bool:
+        super().finish(is_draft, prefill_tokens_processed)
+        return self._should_continue()
 
 
 def model_getter(model_name: str):
