@@ -1,6 +1,7 @@
 from threading import Thread
 from dataclasses import dataclass
 import json
+import traceback
 import mlx_lm
 import logging
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
@@ -38,10 +39,12 @@ class BatchedModelKit:
     tokenizer: TokenizerWrapper
     detokenizer: StreamingDetokenizer
     model_type: str | None
-    _shutdown = False
     _generation_thread: Thread
     _requests = Queue()
     _prompt_cache = LRUPromptCache()
+    _batch_results = {}
+    _backend_exception: Exception | None = None
+    _shutdown = False
 
     def __del__(self):
         self.shutdown()
@@ -50,6 +53,8 @@ class BatchedModelKit:
         self._shutdown = True
         if self._generation_thread:
             self._generation_thread.join()
+        for entry in self._batch_results.values():
+            entry["rqueue"].put(Exception("Model shutdown requested"))
 
     def __init__(
         self,
@@ -73,7 +78,7 @@ class BatchedModelKit:
         logger.info("BatchedModelKit loaded successfully")
 
         mx.synchronize()  # Defensively sync before launching a new thread
-        self._generation_thread = Thread(target=self._generate)
+        self._generation_thread = Thread(target=self._generate_with_exception_handling)
         self._generation_thread.start()
 
     def tokenize(self, prompt: str) -> list[int]:
@@ -95,6 +100,12 @@ class BatchedModelKit:
         prompt_progress_callback,
         top_logprobs,
     ):
+        # Do not accept new requests if error or shutdown
+        if self._shutdown:
+            raise RuntimeError("Cannot accept new requests when model is shutdown")
+        if isinstance(self._backend_exception, Exception):
+            raise self._backend_exception
+
         response_queue = Queue()
         self._requests.put(
             (response_queue, prompt_tokens, sampler, logits_processors, top_logprobs)
@@ -115,14 +126,23 @@ class BatchedModelKit:
 
         return _inner()
 
-    def _prompt_processing_callback(self):
-        pass
+    def _generate_with_exception_handling(self):
+        try:
+            self._generate()
+        except Exception:
+            err_string = f"Encountered fatal exception in the backend scheduler: {traceback.format_exc()}"
+            logger.error(err_string)
+            self._backend_exception = Exception(err_string)
+            for entry in self._batch_results.values():
+                entry["rqueue"].put(self._backend_exception)
 
     def _generate(self):
         def progress_callback(info):
             for uid, processed, total in info:
-                if uid in batch_results:
-                    batch_results[uid]["rqueue"].put((min(processed, total), total))
+                if uid in self._batch_results:
+                    self._batch_results[uid]["rqueue"].put(
+                        (min(processed, total), total)
+                    )
 
         batch_generator = BatchGenerator(
             self.model,
@@ -135,8 +155,6 @@ class BatchedModelKit:
         # only using one model, so model key name value does not matter
         current_model_key = "key"
 
-        batch_results = {}
-
         def get_next_request(timeout=None):
             try:
                 if timeout is not None:
@@ -148,7 +166,7 @@ class BatchedModelKit:
 
         while not self._shutdown:
             request = None
-            timeout: None | float = None if (len(batch_results) > 0) else 0.1
+            timeout: None | float = None if (len(self._batch_results) > 0) else 0.1
             request = get_next_request(timeout=timeout)
 
             # We got a request
@@ -168,7 +186,7 @@ class BatchedModelKit:
                     samplers=[samplers],
                     logits_processors=[logits_processors],
                 )
-                batch_results[uid] = {
+                self._batch_results[uid] = {
                     # "ctx": ctx,
                     "cache_key": prompt[:],
                     "rqueue": rqueue,
@@ -179,7 +197,7 @@ class BatchedModelKit:
 
             # No request so serve from the current batch
             elif batch_generator is not None:
-                if len(batch_results) == 0:
+                if len(self._batch_results) == 0:
                     continue
 
                 uids_to_remove = []
@@ -194,7 +212,7 @@ class BatchedModelKit:
                         break
 
                     for r in responses:
-                        result = batch_results[r.uid]
+                        result = self._batch_results[r.uid]
                         result["cache_key"].append(r.token)
                         if r.finish_reason != "stop":
                             result["detokenizer"].add_token(r.token)
@@ -235,7 +253,7 @@ class BatchedModelKit:
                             self._prompt_cache.insert_cache(
                                 current_model_key, result["cache_key"], r.prompt_cache
                             )
-                            del batch_results[r.uid]
+                            del self._batch_results[r.uid]
 
                         # if result["ctx"]._should_stop:
                         #     uids_to_remove.append(r.uid)
