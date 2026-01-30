@@ -1,3 +1,4 @@
+from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 from typing import Iterator, List, Literal, NamedTuple, Optional
 import json
 import logging
@@ -33,6 +34,8 @@ from mlx_engine.utils.prompt_progress_reporter import (
     MlxLmReporterAdapter,
 )
 
+USE_BATCHED_BACKEND = True
+
 MAX_TOP_LOGPROBS = 10
 
 StopReason = Literal["eos_token", "stop_string", "user_cancelled"]
@@ -65,6 +68,59 @@ def construct_user_cancelled_result():
             stop_tokens=[],
         ),
     )
+
+def _handle_stop_string_detected(
+    tokenizer,
+    stop_string_processor_result: StopStringProcessorResult,
+    text: str,
+    token_buffer: List[Token],
+    top_logprobs_buffer: List[List[Token]],
+) -> GenerationResult:
+    """
+    Helper method to Handle completion of text generation when a stop string is
+    encountered.
+
+    Args:
+        tokenizer: The tokenizer instance
+        stop_string_processor_result: Result from stop string processor
+        text: Current generated text
+        token_buffer: Buffer of generated tokens
+        top_logprobs_buffer: Buffer of token probabilities
+
+    Returns:
+        GenerationResult: Final generation result including stop condition
+    """
+    # Finalize detokenizer to get remaining text
+    detokenizer = tokenizer.detokenizer
+    detokenizer.finalize()
+    text += detokenizer.last_segment
+
+    # Process stop string by trimming text segment where it begins
+    stop_string = stop_string_processor_result.stop_string
+    stop_string_start_pos = text.find(stop_string)
+
+    if stop_string_start_pos != -1:
+        text = text[:stop_string_start_pos]
+    else:
+        # this is known to happen when the eos token is a stop string
+        sys.stderr.write(
+            f"[mlx-engine] Stop string '{stop_string}' not found in final text segment, "
+            "even though a full stop was detected. Not trimming final segment."
+        )
+
+    stop_condition = GenerationStopCondition(
+        stop_reason="stop_string",
+        stop_string=stop_string,
+        stop_tokens=stop_string_processor_result.stop_tokens,
+    )
+
+    return GenerationResult(
+        text=text,
+        tokens=token_buffer,
+        stop_condition=stop_condition,
+        top_logprobs=top_logprobs_buffer,
+    )
+
 
 
 def load_model(
@@ -115,14 +171,14 @@ def load_model(
                 "MLX vision models do not currently support KV cache quantization"
             )
         model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
-    else:
-        model_kit = ModelKit(
+    elif USE_BATCHED_BACKEND:
+        model_kit = BatchedModelKit(
             model_path,
-            vocab_only,
-            max_kv_size,
-            kv_bits=kv_bits,
-            kv_group_size=kv_group_size,
-            quantized_kv_start=quantized_kv_start,
+            # vocab_only,
+            # max_kv_size,
+            # kv_bits=kv_bits,
+            # kv_group_size=kv_group_size,
+            # quantized_kv_start=quantized_kv_start,
         )
     sanitize_eos_tokens(model_kit)
     return model_kit
@@ -331,58 +387,6 @@ def create_generator(
         stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
     text = ""
 
-    def _handle_stop_string_detected(
-        tokenizer,
-        stop_string_processor_result: StopStringProcessorResult,
-        text: str,
-        token_buffer: List[Token],
-        top_logprobs_buffer: List[List[Token]],
-    ) -> GenerationResult:
-        """
-        Helper method to Handle completion of text generation when a stop string is
-        encountered.
-
-        Args:
-            tokenizer: The tokenizer instance
-            stop_string_processor_result: Result from stop string processor
-            text: Current generated text
-            token_buffer: Buffer of generated tokens
-            top_logprobs_buffer: Buffer of token probabilities
-
-        Returns:
-            GenerationResult: Final generation result including stop condition
-        """
-        # Finalize detokenizer to get remaining text
-        detokenizer = tokenizer.detokenizer
-        detokenizer.finalize()
-        text += detokenizer.last_segment
-
-        # Process stop string by trimming text segment where it begins
-        stop_string = stop_string_processor_result.stop_string
-        stop_string_start_pos = text.find(stop_string)
-
-        if stop_string_start_pos != -1:
-            text = text[:stop_string_start_pos]
-        else:
-            # this is known to happen when the eos token is a stop string
-            sys.stderr.write(
-                f"[mlx-engine] Stop string '{stop_string}' not found in final text segment, "
-                "even though a full stop was detected. Not trimming final segment."
-            )
-
-        stop_condition = GenerationStopCondition(
-            stop_reason="stop_string",
-            stop_string=stop_string,
-            stop_tokens=stop_string_processor_result.stop_tokens,
-        )
-
-        return GenerationResult(
-            text=text,
-            tokens=token_buffer,
-            stop_condition=stop_condition,
-            top_logprobs=top_logprobs_buffer,
-        )
-
     # Determine callback for mlx-lm based on processing mode
     # When cache is NOT active (vision prompts), stream_generate handles prompt processing
     # When cache IS active (text-only), cache_wrapper already handled it
@@ -492,3 +496,185 @@ def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
             ready for model input
     """
     return model_kit.tokenize(prompt)
+
+
+def create_generator_batched(
+    model_kit: BatchedModelKit,
+    prompt_tokens: list[int],
+    *,
+    prompt_progress_reporter: Optional[PromptProgressReporter] = None,
+    images_b64: Optional[List[str]] = None,
+    max_image_size: Optional[tuple[int, int]] = None,
+    stop_strings: Optional[List[str]] = None,
+    top_logprobs: Optional[int] = None,
+    repetition_penalty: Optional[float] = None,
+    repetition_context_size: Optional[int] = 20,
+    temp: Optional[float] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
+    min_p: Optional[float] = None,
+    min_tokens_to_keep: Optional[int] = None,
+    seed: Optional[int] = None,
+    json_schema: Optional[str] = None,
+    max_tokens: Optional[int] = 10000000,
+    speculative_decoding_toggle: Optional[bool] = None,
+    num_draft_tokens: Optional[int] = None,
+) -> Iterator[GenerationResult]:
+
+    input_tokens = prompt_tokens
+
+    if prompt_progress_reporter is None:
+        prompt_progress_reporter = DefaultPromptProgressReporter()
+
+    # Set up repetition penalty
+    repetition_penalty_kwargs = {}
+    if repetition_penalty is not None:
+        repetition_penalty_kwargs["repetition_penalty"] = repetition_penalty
+        if repetition_context_size is not None:
+            repetition_penalty_kwargs["repetition_context_size"] = (
+                repetition_context_size
+            )
+
+    # Setup logits processors
+    logits_processors = []
+    if repetition_penalty and repetition_penalty != 0.0:
+        cached_tokens = (
+            prompt_tokens[: -len(input_tokens)]
+            if len(input_tokens) > 0
+            else prompt_tokens
+        )
+        logits_processors.append(
+            RepetitionPenaltyProcessor(
+                token_history=cached_tokens, **repetition_penalty_kwargs
+            )
+        )
+
+    # Set up sampler
+    sampler = make_sampler(
+        **{
+            k: v
+            for k, v in {
+                "temp": temp,
+                "top_p": top_p,
+                "min_p": min_p,
+                "min_tokens_to_keep": min_tokens_to_keep,
+                "top_k": top_k,
+            }.items()
+            if v is not None
+        }
+    )
+
+    # Validate top_logprobs
+    if top_logprobs is None:
+        top_logprobs = 0
+    if top_logprobs > MAX_TOP_LOGPROBS:
+        raise ValueError(
+            f"top_logprobs must be less than or equal to {MAX_TOP_LOGPROBS}"
+        )
+
+    # Keep track of tokens buffered by detokenizer to yield accurate generation results
+    token_buffer: List[Token] = []
+    top_logprobs_buffer: List[List[Token]] = []
+
+    tokenizer = model_kit.tokenizer
+
+    # Add outlines logits processor if json_schema is provided
+    is_structured_output_request = json_schema is not None
+    if is_structured_output_request:
+        logits_processors.append(
+            JSONLogitsProcessor(
+                json_schema,
+                OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
+                tensor_library_name="mlx",
+            )
+        )
+
+    # Set up stop string processor if non-empty stop_strings are provided
+    stop_string_processor = None
+    if stop_strings is not None and len(stop_strings) > 0:
+        stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
+    text = ""
+
+    mlx_lm_callback = MlxLmReporterAdapter(
+        prompt_progress_reporter, emit_begin=True
+    )
+
+    stream = model_kit.generate(
+        prompt_tokens=input_tokens,
+        # max_tokens=max_tokens,
+        sampler=sampler,
+        logits_processors=logits_processors,
+        prompt_progress_callback=mlx_lm_callback,
+    )
+
+    while True:
+        try:
+            generation_result = next(stream)
+        except StopIteration:
+            break
+        except StopPromptProcessing:
+            yield construct_user_cancelled_result()
+            return
+
+        # Token processor
+        token = generation_result.token
+        text += generation_result.text
+        # record generated token to cache, if cache is active
+        if model_kit.is_cross_prompt_cache_active():
+            model_kit.record_token_to_cache(token)
+
+        logprobs = generation_result.logprobs
+        token_buffer.append(
+            Token(
+                token,
+                tokenizer.decode(token),
+                float(logprobs[token]),
+                from_draft=generation_result.from_draft,
+            )
+        )
+        if top_logprobs:
+            top_logprobs_buffer.append(
+                summarize_top_logprobs(tokenizer, logprobs, top_logprobs)
+            )
+
+        # Stop processor
+        if stop_string_processor is not None:
+            stop_string_processor_result = stop_string_processor.process_token(token)
+            if stop_string_processor_result.status == "full_stop":
+                yield _handle_stop_string_detected(
+                    tokenizer,
+                    stop_string_processor_result,
+                    text,
+                    token_buffer,
+                    top_logprobs_buffer,
+                )
+                break  # stop generation
+
+            # If we currently have generated a partial match with a stop sequence, or detected an
+            # in-progress multi-byte string, generate new tokens until we know if the stop sequence
+            # is hit or not (i.e., make sure not to yield yet)
+            if (
+                stop_string_processor_result.status == "partial_match"
+                or stop_string_processor_result.status == "multi_byte"
+            ):
+                continue
+
+        # Standard yield - yield when a non-empty text segment is available or eos token is hit
+        if text or token in tokenizer.eos_token_ids:
+            # populate stop_condition if we hit an eos token
+            stop_condition = None
+            if token in tokenizer.eos_token_ids:
+                stop_condition = GenerationStopCondition(
+                    stop_reason="eos_token",
+                    stop_string=tokenizer.decode(token),
+                    stop_tokens=[token],
+                )
+            yield GenerationResult(
+                text=text,
+                tokens=token_buffer,
+                stop_condition=stop_condition,
+                top_logprobs=top_logprobs_buffer,
+            )
+            token_buffer = []
+            top_logprobs_buffer = []
+            text = ""

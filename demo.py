@@ -4,7 +4,7 @@ import time
 import os
 import sys
 
-from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
+from mlx_engine.generate import load_model, load_draft_model, create_generator_batched, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 from mlx_engine.utils.prompt_progress_reporter import LoggerReporter
@@ -245,7 +245,7 @@ if __name__ == "__main__":
     max_img_size = (args.max_img_size, args.max_img_size) if args.max_img_size else None
 
     # Generate the response
-    generator = create_generator(
+    generator = create_generator_batched(
         model_kit,
         prompt_tokens,
         images_b64=images_base64,
