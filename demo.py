@@ -438,3 +438,4 @@ if __name__ == "__main__":
     # Move cursor below the display
     print("\n" * 3)
     print("=== All generation threads completed ===")
+    model_kit.shutdown()

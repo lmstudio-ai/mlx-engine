@@ -680,3 +680,8 @@ def _batched_generation(
             token_buffer = []
             top_logprobs_buffer = []
             text = ""
+
+
+def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit):
+    if isinstance(model_kit, BatchedModelKit):
+        model_kit.shutdown()

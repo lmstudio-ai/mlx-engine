@@ -38,10 +38,18 @@ class BatchedModelKit:
     tokenizer: TokenizerWrapper
     detokenizer: StreamingDetokenizer
     model_type: str | None
+    _shutdown = False
     _generation_thread: Thread
     _requests = Queue()
-    stop = False
     _prompt_cache = LRUPromptCache()
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        self._shutdown = True
+        if self._generation_thread:
+            self._generation_thread.join()
 
     def __init__(
         self,
@@ -64,7 +72,7 @@ class BatchedModelKit:
         self.detokenizer = self.tokenizer.detokenizer
         logger.info("BatchedModelKit loaded successfully")
 
-        mx.synchronize()
+        mx.synchronize()  # Defensively sync before launching a new thread
         self._generation_thread = Thread(target=self._generate)
         self._generation_thread.start()
 
@@ -138,7 +146,7 @@ class BatchedModelKit:
             except QueueEmpty:
                 return None
 
-        while not self.stop:
+        while not self._shutdown:
             request = None
             timeout: None | float = None if (len(batch_results) > 0) else 0.1
             request = get_next_request(timeout=timeout)
@@ -191,9 +199,7 @@ class BatchedModelKit:
                         if r.finish_reason != "stop":
                             result["detokenizer"].add_token(r.token)
 
-                        # Compute all logprobs math in this thread
                         token_logprob = r.logprobs[r.token].item()
-
                         top_logprobs_list = None
                         if result["top_logprobs"] > 0:
                             sorted_indices = mx.argpartition(
