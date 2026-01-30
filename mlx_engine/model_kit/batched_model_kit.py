@@ -1,4 +1,3 @@
-from typing import Callable
 from threading import Thread
 from dataclasses import dataclass
 import json
@@ -13,9 +12,7 @@ from pathlib import Path
 from queue import Queue
 from queue import Empty as QueueEmpty
 from mlx_lm.models.cache import (
-    can_trim_prompt_cache,
     make_prompt_cache,
-    trim_prompt_cache,
 )
 import time
 from mlx_lm.server import LRUPromptCache
@@ -27,13 +24,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GenerationResponse:
     """Response object for batched generation, containing computed logprobs."""
+
     text: str
     token: int
     token_logprob: float
     top_logprobs: list[Token] | None
     finish_reason: str | None
     from_draft: bool = False
-
 
 
 class BatchedModelKit:
@@ -81,16 +78,19 @@ class BatchedModelKit:
         """Batched backend handles caching internally."""
         return False
 
-    def generate(self,
-                *,
-                prompt_tokens,
-                sampler,
-                logits_processors,
-                prompt_progress_callback,
-                top_logprobs,
+    def generate(
+        self,
+        *,
+        prompt_tokens,
+        sampler,
+        logits_processors,
+        prompt_progress_callback,
+        top_logprobs,
     ):
         response_queue = Queue()
-        self._requests.put((response_queue, prompt_tokens, sampler, logits_processors, top_logprobs))
+        self._requests.put(
+            (response_queue, prompt_tokens, sampler, logits_processors, top_logprobs)
+        )
 
         def _inner():
             while True:
@@ -118,15 +118,16 @@ class BatchedModelKit:
 
         batch_generator = BatchGenerator(
             self.model,
-            max_tokens = 10000000,
-            stop_tokens = set(self.tokenizer.eos_token_ids),
-            sampler = None,
-            logits_processors = None,
-            prompt_progress_callback = progress_callback,
+            max_tokens=10000000,
+            stop_tokens=set(self.tokenizer.eos_token_ids),
+            sampler=None,
+            logits_processors=None,
+            prompt_progress_callback=progress_callback,
         )
-        current_model_key = "key" # only using one model, so model key name value does not matter
-        batch_results = {}
+        # only using one model, so model key name value does not matter
+        current_model_key = "key"
 
+        batch_results = {}
 
         def get_next_request(timeout=None):
             try:
@@ -139,11 +140,7 @@ class BatchedModelKit:
 
         while not self.stop:
             request = None
-            timeout: None | float = (
-                None
-                if (len(batch_results) > 0)
-                else 0.1
-            )
+            timeout: None | float = None if (len(batch_results) > 0) else 0.1
             request = get_next_request(timeout=timeout)
 
             # We got a request
@@ -158,7 +155,7 @@ class BatchedModelKit:
 
                 (uid,) = batch_generator.insert(
                     [rest],
-                    [10000000], # max tokens
+                    [10000000],  # max tokens
                     caches=[cache],
                     samplers=[samplers],
                     logits_processors=[logits_processors],
@@ -202,18 +199,17 @@ class BatchedModelKit:
                             sorted_indices = mx.argpartition(
                                 -r.logprobs, kth=result["top_logprobs"] - 1
                             )
-                            top_indices = sorted_indices[:result["top_logprobs"]]
+                            top_indices = sorted_indices[: result["top_logprobs"]]
                             top_logprobs_values = r.logprobs[top_indices]
 
                             top_logprobs_list = [
                                 Token(
                                     id=int(idx),
                                     text=self.tokenizer.decode(idx),
-                                    logprob=float(prob)
+                                    logprob=float(prob),
                                 )
                                 for idx, prob in zip(
-                                    top_indices.tolist(),
-                                    top_logprobs_values.tolist()
+                                    top_indices.tolist(), top_logprobs_values.tolist()
                                 )
                             ]
 

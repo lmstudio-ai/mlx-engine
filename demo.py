@@ -115,7 +115,7 @@ def setup_arg_parser():
         "--parallel",
         type=int,
         default=1,
-        help="Number of concurrent generation threads to run (default: 1)"
+        help="Number of concurrent generation threads to run (default: 1)",
     )
     return parser
 
@@ -200,7 +200,9 @@ class ColumnDisplay:
 
         # Ensure minimum column width
         if self.column_width < 40:
-            print(f"Warning: Terminal width ({self.terminal_width}) is too narrow for {num_columns} columns.")
+            print(
+                f"Warning: Terminal width ({self.terminal_width}) is too narrow for {num_columns} columns."
+            )
             print(f"Each column will be {self.column_width} characters wide.")
 
         self.buffers = {i: "" for i in range(1, num_columns + 1)}
@@ -226,17 +228,17 @@ class ColumnDisplay:
     def _wrap_text(self, text, width):
         """Wrap text to fit within column width, preserving intentional breaks."""
         lines = []
-        for paragraph in text.split('\n'):
+        for paragraph in text.split("\n"):
             if not paragraph:
-                lines.append('')
+                lines.append("")
             else:
                 wrapped = textwrap.fill(
                     paragraph,
                     width=width,
                     break_long_words=True,
-                    break_on_hyphens=False
+                    break_on_hyphens=False,
                 )
-                lines.extend(wrapped.split('\n'))
+                lines.extend(wrapped.split("\n"))
         return lines
 
     def _redraw(self):
@@ -249,7 +251,7 @@ class ColumnDisplay:
         max_lines = 0
 
         for thread_id in range(1, self.num_columns + 1):
-            header = f"{'='*5} Thread {thread_id} {'='*5}"
+            header = f"{'=' * 5} Thread {thread_id} {'=' * 5}"
             content_lines = self._wrap_text(self.buffers[thread_id], self.column_width)
             lines = [header, ""] + content_lines
             wrapped_columns.append(lines)
@@ -263,7 +265,7 @@ class ColumnDisplay:
                 if row_idx < len(lines):
                     text = lines[row_idx]
                     # Truncate and pad to column width
-                    text = text[:self.column_width].ljust(self.column_width)
+                    text = text[: self.column_width].ljust(self.column_width)
                 else:
                     text = " " * self.column_width
                 row_parts.append(text)
@@ -317,13 +319,19 @@ def run_generation_thread(
             # Build stats text
             end_time = time.time()
             total_time = end_time - stats_collector.start_time
-            time_to_first_token = stats_collector.first_token_time - stats_collector.start_time if stats_collector.first_token_time else 0
+            time_to_first_token = (
+                stats_collector.first_token_time - stats_collector.start_time
+                if stats_collector.first_token_time
+                else 0
+            )
             effective_time = total_time - time_to_first_token
             tokens_per_second = (
-                stats_collector.total_tokens / effective_time if effective_time > 0 else float("inf")
+                stats_collector.total_tokens / effective_time
+                if effective_time > 0
+                else float("inf")
             )
 
-            stats_text = f"COMPLETE\n"
+            stats_text = "COMPLETE\n"
             stats_text += f"Tokens/sec: {tokens_per_second:.2f}\n"
             stats_text += f"Total tokens: {stats_collector.total_tokens}\n"
             stats_text += f"Stop: {generation_result.stop_condition.stop_reason}"

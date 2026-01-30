@@ -69,6 +69,7 @@ def construct_user_cancelled_result():
         ),
     )
 
+
 def _handle_stop_string_detected(
     tokenizer,
     stop_string_processor_result: StopStringProcessorResult,
@@ -120,7 +121,6 @@ def _handle_stop_string_detected(
         stop_condition=stop_condition,
         top_logprobs=top_logprobs_buffer,
     )
-
 
 
 def load_model(
@@ -255,6 +255,7 @@ def create_generator(
     if isinstance(model_kit, BatchedModelKit):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
+
 
 def _sequential_generation(
     model_kit: ModelKit | VisionModelKit,
@@ -529,7 +530,6 @@ def _batched_generation(
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
 ) -> Iterator[GenerationResult]:
-
     input_tokens = prompt_tokens
 
     if prompt_progress_reporter is None:
@@ -604,9 +604,7 @@ def _batched_generation(
         stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
     text = ""
 
-    mlx_lm_callback = MlxLmReporterAdapter(
-        prompt_progress_reporter, emit_begin=True
-    )
+    mlx_lm_callback = MlxLmReporterAdapter(prompt_progress_reporter, emit_begin=True)
 
     stream = model_kit.generate(
         prompt_tokens=input_tokens,
