@@ -8,6 +8,7 @@ __all__ = [
     "is_draft_model_compatible",
     "unload_draft_model",
     "create_generator",
+    "create_batch_generator",
     "tokenize",
 ]
 
@@ -27,6 +28,7 @@ from .generate import (
     create_generator,
     tokenize,
 )
+from .batch_generate import create_batch_generator
 
 patch_huggingface_hub()
 register_models()

@@ -35,7 +35,7 @@ from mlx_engine.utils.prompt_progress_reporter import (
 
 MAX_TOP_LOGPROBS = 10
 
-StopReason = Literal["eos_token", "stop_string", "user_cancelled"]
+StopReason = Literal["eos_token", "stop_string", "user_cancelled", "length"]
 
 logger = logging.getLogger(__name__)
 
