@@ -1,5 +1,6 @@
 import argparse
 import base64
+import random
 import time
 import os
 import sys
@@ -296,6 +297,9 @@ def run_generation_thread(
     global display
     stats_collector = GenerationStatsCollector()
     logprobs_list = []
+
+    # Start the generation after a random amount of time
+    time.sleep(random.uniform(0, 5))
 
     generator = create_generator(
         model_kit,
