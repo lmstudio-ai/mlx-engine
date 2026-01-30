@@ -3,6 +3,9 @@ import base64
 import time
 import os
 import sys
+import threading
+import shutil
+import textwrap
 
 from mlx_engine.generate import load_model, load_draft_model, create_generator_batched, tokenize
 from mlx_engine.utils.token import Token
@@ -10,7 +13,7 @@ from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP
 from mlx_engine.utils.prompt_progress_reporter import LoggerReporter
 from transformers import AutoTokenizer, AutoProcessor
 
-DEFAULT_PROMPT = "Explain the rules of chess in one sentence"
+DEFAULT_PROMPT = "Tell me about NYC"
 DEFAULT_TEMP = 0.8
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
@@ -108,6 +111,12 @@ def setup_arg_parser():
     parser.add_argument(
         "--max-img-size", type=int, help="Downscale images to this side length (px)"
     )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="Number of concurrent generation threads to run (default: 1)"
+    )
     return parser
 
 
@@ -174,6 +183,154 @@ def resolve_model_path(model_arg):
     raise ValueError(f"Could not find model '{model_arg}' in local directories")
 
 
+# Global lock for printing to avoid interleaving
+print_lock = threading.Lock()
+
+
+class ColumnDisplay:
+    """Manages side-by-side column display for concurrent generation threads."""
+
+    def __init__(self, num_columns=2):
+        self.num_columns = num_columns
+        self.terminal_width = shutil.get_terminal_size().columns
+
+        # Reserve space for separators between columns
+        separator_space = num_columns - 1
+        self.column_width = (self.terminal_width - separator_space) // num_columns
+
+        # Ensure minimum column width
+        if self.column_width < 40:
+            print(f"Warning: Terminal width ({self.terminal_width}) is too narrow for {num_columns} columns.")
+            print(f"Each column will be {self.column_width} characters wide.")
+
+        self.buffers = {i: "" for i in range(1, num_columns + 1)}
+        self.completed = {i: False for i in range(1, num_columns + 1)}
+        self.lock = threading.Lock()
+
+        # Clear screen and hide cursor
+        print("\033[2J\033[H", end="", flush=True)
+
+    def append_text(self, thread_id, text):
+        """Append text to a thread's buffer and redraw."""
+        with self.lock:
+            self.buffers[thread_id] += text
+            self._redraw()
+
+    def mark_complete(self, thread_id, stats_text):
+        """Mark a thread as complete with stats."""
+        with self.lock:
+            self.completed[thread_id] = True
+            self.buffers[thread_id] += f"\n\n{stats_text}"
+            self._redraw()
+
+    def _wrap_text(self, text, width):
+        """Wrap text to fit within column width, preserving intentional breaks."""
+        lines = []
+        for paragraph in text.split('\n'):
+            if not paragraph:
+                lines.append('')
+            else:
+                wrapped = textwrap.fill(
+                    paragraph,
+                    width=width,
+                    break_long_words=True,
+                    break_on_hyphens=False
+                )
+                lines.extend(wrapped.split('\n'))
+        return lines
+
+    def _redraw(self):
+        """Redraw all columns."""
+        # Move cursor to top
+        print("\033[H", end="", flush=True)
+
+        # Split each buffer into wrapped lines
+        wrapped_columns = []
+        max_lines = 0
+
+        for thread_id in range(1, self.num_columns + 1):
+            header = f"{'='*5} Thread {thread_id} {'='*5}"
+            content_lines = self._wrap_text(self.buffers[thread_id], self.column_width)
+            lines = [header, ""] + content_lines
+            wrapped_columns.append(lines)
+            max_lines = max(max_lines, len(lines))
+
+        # Print rows with columns side by side
+        for row_idx in range(max_lines):
+            row_parts = []
+            for col_idx in range(self.num_columns):
+                lines = wrapped_columns[col_idx]
+                if row_idx < len(lines):
+                    text = lines[row_idx]
+                    # Truncate and pad to column width
+                    text = text[:self.column_width].ljust(self.column_width)
+                else:
+                    text = " " * self.column_width
+                row_parts.append(text)
+
+            print("|".join(row_parts))
+
+        # Clear to end of screen
+        print("\033[J", end="", flush=True)
+
+
+display = None
+
+
+def run_generation_thread(
+    thread_id,
+    model_kit,
+    prompt_tokens,
+    images_b64,
+    max_img_size,
+    stop_strings,
+    max_tokens,
+    top_logprobs,
+    prompt_progress_reporter,
+    num_draft_tokens,
+    temp,
+):
+    """Run a single generation stream in a thread."""
+    global display
+    stats_collector = GenerationStatsCollector()
+    logprobs_list = []
+
+    generator = create_generator_batched(
+        model_kit,
+        prompt_tokens,
+        images_b64=images_b64,
+        max_image_size=max_img_size,
+        stop_strings=stop_strings,
+        max_tokens=max_tokens,
+        top_logprobs=top_logprobs,
+        prompt_progress_reporter=prompt_progress_reporter,
+        num_draft_tokens=num_draft_tokens,
+        temp=temp,
+    )
+
+    for generation_result in generator:
+        display.append_text(thread_id, generation_result.text)
+        stats_collector.add_tokens(generation_result.tokens)
+        logprobs_list.extend(generation_result.top_logprobs)
+
+        if generation_result.stop_condition:
+            # Build stats text
+            end_time = time.time()
+            total_time = end_time - stats_collector.start_time
+            time_to_first_token = stats_collector.first_token_time - stats_collector.start_time if stats_collector.first_token_time else 0
+            effective_time = total_time - time_to_first_token
+            tokens_per_second = (
+                stats_collector.total_tokens / effective_time if effective_time > 0 else float("inf")
+            )
+
+            stats_text = f"COMPLETE\n"
+            stats_text += f"Tokens/sec: {tokens_per_second:.2f}\n"
+            stats_text += f"Total tokens: {stats_collector.total_tokens}\n"
+            stats_text += f"Stop: {generation_result.stop_condition.stop_reason}"
+
+            display.mark_complete(thread_id, stats_text)
+
+
 if __name__ == "__main__":
     # Parse arguments
     parser = setup_arg_parser()
@@ -235,42 +392,41 @@ if __name__ == "__main__":
     )
     prompt_tokens = tokenize(model_kit, prompt)
 
-    # Record top logprobs
-    logprobs_list = []
-
-    # Initialize generation stats collector
-    stats_collector = GenerationStatsCollector()
-
     # Clamp image size
     max_img_size = (args.max_img_size, args.max_img_size) if args.max_img_size else None
 
-    # Generate the response
-    generator = create_generator_batched(
-        model_kit,
-        prompt_tokens,
-        images_b64=images_base64,
-        max_image_size=max_img_size,
-        stop_strings=args.stop_strings,
-        max_tokens=1024,
-        top_logprobs=args.top_logprobs,
-        prompt_progress_reporter=LoggerReporter()
-        if args.print_prompt_progress
-        else None,
-        num_draft_tokens=args.num_draft_tokens,
-        temp=args.temp,
-    )
-    for generation_result in generator:
-        print(generation_result.text, end="", flush=True)
-        stats_collector.add_tokens(generation_result.tokens)
-        logprobs_list.extend(generation_result.top_logprobs)
+    # Prepare prompt progress reporter
+    prompt_progress_reporter = LoggerReporter() if args.print_prompt_progress else None
 
-        if generation_result.stop_condition:
-            stats_collector.print_stats()
-            print(
-                f"\nStopped generation due to: {generation_result.stop_condition.stop_reason}"
-            )
-            if generation_result.stop_condition.stop_string:
-                print(f"Stop string: {generation_result.stop_condition.stop_string}")
+    # Initialize column display
+    display = ColumnDisplay(num_columns=args.parallel)
 
-    if args.top_logprobs:
-        [print(x) for x in logprobs_list]
+    # Create and start all threads
+    threads = []
+    for thread_id in range(1, args.parallel + 1):
+        thread = threading.Thread(
+            target=run_generation_thread,
+            args=(
+                thread_id,
+                model_kit,
+                prompt_tokens,
+                images_base64,
+                max_img_size,
+                args.stop_strings,
+                1024,
+                args.top_logprobs,
+                prompt_progress_reporter,
+                args.num_draft_tokens,
+                args.temp,
+            ),
+        )
+        thread.start()
+        threads.append(thread)
+
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+
+    # Move cursor below the display
+    print("\n" * 3)
+    print("=== Both generation threads completed ===")
