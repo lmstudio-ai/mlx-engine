@@ -529,6 +529,7 @@ def _batched_generation(
     max_tokens: Optional[int] = 10000000,
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
+    request_id: str | None = None,
 ) -> Iterator[GenerationResult]:
     input_tokens = prompt_tokens
 
@@ -608,6 +609,7 @@ def _batched_generation(
 
     stream = model_kit.generate(
         prompt_tokens=input_tokens,
+        request_id=request_id,
         # max_tokens=max_tokens,
         sampler=sampler,
         logits_processors=logits_processors,

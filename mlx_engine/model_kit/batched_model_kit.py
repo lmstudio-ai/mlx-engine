@@ -34,6 +34,21 @@ class GenerationResponse:
     from_draft: bool = False
 
 
+@dataclass
+class GenerationRequest:
+    rqueue: Queue
+    prompt_tokens: list[int]
+    request_id: str
+    samplers: object
+    logits_processors: list
+    top_logprobs: int
+
+
+@dataclass
+class CancelGenerationRequest:
+    request_id: str
+
+
 class BatchedModelKit:
     model: nn.Module
     tokenizer: TokenizerWrapper
@@ -95,6 +110,7 @@ class BatchedModelKit:
         self,
         *,
         prompt_tokens,
+        request_id,
         sampler,
         logits_processors,
         prompt_progress_callback,
@@ -108,7 +124,14 @@ class BatchedModelKit:
 
         response_queue = Queue()
         self._requests.put(
-            (response_queue, prompt_tokens, sampler, logits_processors, top_logprobs)
+            GenerationRequest(
+                response_queue,
+                prompt_tokens,
+                request_id,
+                sampler,
+                logits_processors,
+                top_logprobs,
+            )
         )
 
         def _inner():
@@ -171,10 +194,21 @@ class BatchedModelKit:
 
             # We got a request
             if request is not None:
-                rqueue, prompt, samplers, logits_processors, top_logprobs = request
+                if isinstance(request, CancelGenerationRequest):
+                    found_request_id = False
+                    request_id = request.request_id
+                    for uid, entry in self._batch_results.items():
+                        if entry.get("request_id") == request_id:
+                            found_request_id = True
+                            batch_generator.remove([uid])
+                            del self._batch_results[uid]
+                            break
+                    if not found_request_id:
+                        logger.warning(f"Could not cancel {request_id=} (id not found)")
+                    continue
 
                 cache, rest = self._prompt_cache.fetch_nearest_cache(
-                    current_model_key, prompt
+                    current_model_key, request.prompt_tokens
                 )
                 if cache is None:
                     cache = make_prompt_cache(self.model)
@@ -183,15 +217,16 @@ class BatchedModelKit:
                     [rest],
                     [10000000],  # max tokens
                     caches=[cache],
-                    samplers=[samplers],
-                    logits_processors=[logits_processors],
+                    samplers=[request.samplers],
+                    logits_processors=[request.logits_processors],
                 )
                 self._batch_results[uid] = {
                     # "ctx": ctx,
-                    "cache_key": prompt[:],
-                    "rqueue": rqueue,
+                    "cache_key": request.prompt_tokens[:],
+                    "rqueue": request.rqueue,
                     "detokenizer": self.tokenizer.detokenizer,
-                    "top_logprobs": top_logprobs,
+                    "top_logprobs": request.top_logprobs,
+                    "request_id": request.request_id,
                 }
                 continue
 
