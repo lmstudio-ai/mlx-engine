@@ -1,5 +1,6 @@
 from typing import Callable
 from threading import Thread
+from dataclasses import dataclass
 import json
 import mlx_lm
 import logging
@@ -18,8 +19,20 @@ from mlx_lm.models.cache import (
 )
 import time
 from mlx_lm.server import LRUPromptCache
+from mlx_engine.utils.token import Token
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GenerationResponse:
+    """Response object for batched generation, containing computed logprobs."""
+    text: str
+    token: int
+    token_logprob: float
+    top_logprobs: list[Token] | None
+    finish_reason: str | None
+    from_draft: bool = False
 
 
 
@@ -64,15 +77,20 @@ class BatchedModelKit:
             return [ids]
         return ids
 
+    def is_cross_prompt_cache_active(self) -> bool:
+        """Batched backend handles caching internally."""
+        return False
+
     def generate(self,
                 *,
                 prompt_tokens,
                 sampler,
                 logits_processors,
                 prompt_progress_callback,
+                top_logprobs,
     ):
         response_queue = Queue()
-        self._requests.put((response_queue, prompt_tokens, sampler, logits_processors))
+        self._requests.put((response_queue, prompt_tokens, sampler, logits_processors, top_logprobs))
 
         def _inner():
             while True:
@@ -101,7 +119,7 @@ class BatchedModelKit:
         batch_generator = BatchGenerator(
             self.model,
             max_tokens = 10000000,
-            stop_tokens = None,
+            stop_tokens = set(self.tokenizer.eos_token_ids),
             sampler = None,
             logits_processors = None,
             prompt_progress_callback = progress_callback,
@@ -130,7 +148,7 @@ class BatchedModelKit:
 
             # We got a request
             if request is not None:
-                rqueue, prompt, samplers, logits_processors = request
+                rqueue, prompt, samplers, logits_processors, top_logprobs = request
 
                 cache, rest = self._prompt_cache.fetch_nearest_cache(
                     current_model_key, prompt
@@ -150,6 +168,7 @@ class BatchedModelKit:
                     "cache_key": prompt[:],
                     "rqueue": rqueue,
                     "detokenizer": self.tokenizer.detokenizer,
+                    "top_logprobs": top_logprobs,
                 }
                 continue
 
@@ -175,30 +194,39 @@ class BatchedModelKit:
                         if r.finish_reason != "stop":
                             result["detokenizer"].add_token(r.token)
 
-                        top_tokens = None
-                        # TODO: fix logprobs
-                        # if args.logprobs > 0:
-                        #     sorted_indices = mx.argpartition(
-                        #         -r.logprobs, kth=args.logprobs - 1
-                        #     )
-                        #     top_indices = sorted_indices[: args.logprobs]
-                        #     top_logprobs = r.logprobs[top_indices]
-                        #     top_token_info = zip(
-                        #         top_indices.tolist(), top_logprobs.tolist()
-                        #     )
-                        #     top_tokens = tuple(top_token_info)
+                        # Compute all logprobs math in this thread
+                        token_logprob = r.logprobs[r.token].item()
 
-                        # TODO: fixme
-                        print(result["detokenizer"].last_segment)
-                        # result["rqueue"].put(
-                        #     Response(
-                        #         result["detokenizer"].last_segment,
-                        #         r.token,
-                        #         r.logprobs[r.token].item(),
-                        #         r.finish_reason,
-                        #         top_tokens,
-                        #     )
-                        # )
+                        top_logprobs_list = None
+                        if result["top_logprobs"] > 0:
+                            sorted_indices = mx.argpartition(
+                                -r.logprobs, kth=result["top_logprobs"] - 1
+                            )
+                            top_indices = sorted_indices[:result["top_logprobs"]]
+                            top_logprobs_values = r.logprobs[top_indices]
+
+                            top_logprobs_list = [
+                                Token(
+                                    id=int(idx),
+                                    text=self.tokenizer.decode(idx),
+                                    logprob=float(prob)
+                                )
+                                for idx, prob in zip(
+                                    top_indices.tolist(),
+                                    top_logprobs_values.tolist()
+                                )
+                            ]
+
+                        result["rqueue"].put(
+                            GenerationResponse(
+                                text=result["detokenizer"].last_segment,
+                                token=r.token,
+                                token_logprob=token_logprob,
+                                top_logprobs=top_logprobs_list,
+                                finish_reason=r.finish_reason,
+                                from_draft=False,
+                            )
+                        )
 
                         if r.finish_reason is not None:
                             result["rqueue"].put(None)

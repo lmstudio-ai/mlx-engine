@@ -605,6 +605,7 @@ def create_generator_batched(
         sampler=sampler,
         logits_processors=logits_processors,
         prompt_progress_callback=mlx_lm_callback,
+        top_logprobs=top_logprobs,
     )
 
     while True:
@@ -619,23 +620,17 @@ def create_generator_batched(
         # Token processor
         token = generation_result.token
         text += generation_result.text
-        # record generated token to cache, if cache is active
-        if model_kit.is_cross_prompt_cache_active():
-            model_kit.record_token_to_cache(token)
 
-        logprobs = generation_result.logprobs
         token_buffer.append(
             Token(
                 token,
                 tokenizer.decode(token),
-                float(logprobs[token]),
+                generation_result.token_logprob,
                 from_draft=generation_result.from_draft,
             )
         )
-        if top_logprobs:
-            top_logprobs_buffer.append(
-                summarize_top_logprobs(tokenizer, logprobs, top_logprobs)
-            )
+        if top_logprobs and generation_result.top_logprobs is not None:
+            top_logprobs_buffer.append(generation_result.top_logprobs)
 
         # Stop processor
         if stop_string_processor is not None:
