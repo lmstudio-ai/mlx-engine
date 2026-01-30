@@ -7,7 +7,7 @@ import threading
 import shutil
 import textwrap
 
-from mlx_engine.generate import load_model, load_draft_model, create_generator_batched, tokenize
+from mlx_engine.generate import load_model, load_draft_model, create_generator, tokenize
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.kv_cache_quantization import VALID_KV_BITS, VALID_KV_GROUP_SIZE
 from mlx_engine.utils.prompt_progress_reporter import LoggerReporter
@@ -295,7 +295,7 @@ def run_generation_thread(
     stats_collector = GenerationStatsCollector()
     logprobs_list = []
 
-    generator = create_generator_batched(
+    generator = create_generator(
         model_kit,
         prompt_tokens,
         images_b64=images_b64,
@@ -429,4 +429,4 @@ if __name__ == "__main__":
 
     # Move cursor below the display
     print("\n" * 3)
-    print("=== Both generation threads completed ===")
+    print("=== All generation threads completed ===")

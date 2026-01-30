@@ -199,26 +199,9 @@ def unload_draft_model(model_kit: ModelKit | VisionModelKit) -> None:
 
 
 def create_generator(
-    model_kit: ModelKit | VisionModelKit,
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit,
     prompt_tokens: List[int],
-    *,
-    prompt_progress_reporter: Optional[PromptProgressReporter] = None,
-    images_b64: Optional[List[str]] = None,
-    max_image_size: Optional[tuple[int, int]] = None,
-    stop_strings: Optional[List[str]] = None,
-    top_logprobs: Optional[int] = None,
-    repetition_penalty: Optional[float] = None,
-    repetition_context_size: Optional[int] = 20,
-    temp: Optional[float] = None,
-    top_p: Optional[float] = None,
-    top_k: Optional[int] = None,
-    min_p: Optional[float] = None,
-    min_tokens_to_keep: Optional[int] = None,
-    seed: Optional[int] = None,
-    json_schema: Optional[str] = None,
-    max_tokens: Optional[int] = 10000000,
-    speculative_decoding_toggle: Optional[bool] = None,
-    num_draft_tokens: Optional[int] = None,
+    **kwargs,
 ) -> Iterator[GenerationResult]:
     """
     Create a generator that streams text generation results from the model.
@@ -269,6 +252,32 @@ def create_generator(
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
+    if isinstance(model_kit, BatchedModelKit):
+        return _batched_generation(model_kit, prompt_tokens, **kwargs)
+    return _sequential_generation(model_kit, prompt_tokens, **kwargs)
+
+def _sequential_generation(
+    model_kit: ModelKit | VisionModelKit,
+    prompt_tokens: List[int],
+    *,
+    prompt_progress_reporter: Optional[PromptProgressReporter] = None,
+    images_b64: Optional[List[str]] = None,
+    max_image_size: Optional[tuple[int, int]] = None,
+    stop_strings: Optional[List[str]] = None,
+    top_logprobs: Optional[int] = None,
+    repetition_penalty: Optional[float] = None,
+    repetition_context_size: Optional[int] = 20,
+    temp: Optional[float] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
+    min_p: Optional[float] = None,
+    min_tokens_to_keep: Optional[int] = None,
+    seed: Optional[int] = None,
+    json_schema: Optional[str] = None,
+    max_tokens: Optional[int] = 10000000,
+    speculative_decoding_toggle: Optional[bool] = None,
+    num_draft_tokens: Optional[int] = None,
+):
     set_seed(seed)
 
     generate_args = {}
@@ -498,9 +507,9 @@ def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
     return model_kit.tokenize(prompt)
 
 
-def create_generator_batched(
-    model_kit: BatchedModelKit,
-    prompt_tokens: list[int],
+def _batched_generation(
+    model_kit: ModelKit | VisionModelKit,
+    prompt_tokens: List[int],
     *,
     prompt_progress_reporter: Optional[PromptProgressReporter] = None,
     images_b64: Optional[List[str]] = None,
