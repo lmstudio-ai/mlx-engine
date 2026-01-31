@@ -610,7 +610,7 @@ def _batched_generation(
     stream = model_kit.generate(
         prompt_tokens=input_tokens,
         request_id=request_id,
-        # max_tokens=max_tokens,
+        max_tokens=max_tokens,
         sampler=sampler,
         logits_processors=logits_processors,
         prompt_progress_callback=mlx_lm_callback,

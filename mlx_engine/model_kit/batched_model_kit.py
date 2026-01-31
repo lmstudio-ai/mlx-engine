@@ -43,6 +43,7 @@ class GenerationRequest:
     samplers: object
     logits_processors: list
     top_logprobs: int
+    max_tokens: int
 
 
 @dataclass
@@ -134,6 +135,7 @@ class BatchedModelKit:
         logits_processors,
         prompt_progress_callback,
         top_logprobs,
+        max_tokens,
     ):
         # Do not accept new requests if error or shutdown
         if self._shutdown:
@@ -150,6 +152,7 @@ class BatchedModelKit:
                 sampler,
                 logits_processors,
                 top_logprobs,
+                max_tokens,
             )
         )
 
@@ -234,7 +237,7 @@ class BatchedModelKit:
 
                 (uid,) = batch_generator.insert(
                     [rest],
-                    [10000000],  # max tokens
+                    [request.max_tokens],  # max tokens
                     caches=[cache],
                     samplers=[request.samplers],
                     logits_processors=[request.logits_processors],
