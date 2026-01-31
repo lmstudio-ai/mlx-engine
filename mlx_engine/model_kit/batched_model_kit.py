@@ -17,6 +17,7 @@ from mlx_lm.models.cache import (
 )
 import time
 from mlx_lm.server import LRUPromptCache
+from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.token import Token
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,10 @@ class BatchedModelKit:
     tokenizer: TokenizerWrapper
     detokenizer: StreamingDetokenizer
     model_type: str | None
+    max_kv_size: int | None
+    kv_bits: int | None
+    kv_group_size: int | None
+    quantized_kv_start: int | None
     _generation_thread: Thread
     _requests = Queue()
     _prompt_cache = LRUPromptCache()
@@ -75,11 +80,21 @@ class BatchedModelKit:
         self,
         model_path: Path,
         # vocab_only: bool = False,
-        # max_kv_size: Optional[int] = None,
-        # kv_bits: Optional[int] = None,
-        # kv_group_size: Optional[int] = None,
-        # quantized_kv_start: Optional[int] = None,
+        max_kv_size: int | None = None,
+        kv_bits: int | None = None,
+        kv_group_size: int | None = None,
+        quantized_kv_start: int | None = None,
     ):
+        kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
+            kv_bits,
+            kv_group_size,
+            quantized_kv_start,
+        )
+        if kv_bits and max_kv_size is not None:
+            # Quantized KV cache is only supported for non-rotating KV cache
+            logger.warning("max_kv_size is ignored when using KV cache quantization")
+            max_kv_size = None
+
         self.model_path = model_path
         logger.info(f"Loading model from {model_path}...")
         config_json = json.loads((model_path / "config.json").read_text())
@@ -90,6 +105,10 @@ class BatchedModelKit:
             tokenizer=self.tokenizer, model_path=model_path, model_type=self.model_type
         )
         self.detokenizer = self.tokenizer.detokenizer
+        self.kv_bits = kv_bits
+        self.kv_group_size = kv_group_size
+        self.quantized_kv_start = quantized_kv_start
+        self.max_kv_size = max_kv_size
         logger.info("BatchedModelKit loaded successfully")
 
         mx.synchronize()  # Defensively sync before launching a new thread
@@ -211,7 +230,7 @@ class BatchedModelKit:
                     current_model_key, request.prompt_tokens
                 )
                 if cache is None:
-                    cache = make_prompt_cache(self.model)
+                    cache = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
 
                 (uid,) = batch_generator.insert(
                     [rest],

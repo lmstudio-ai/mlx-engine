@@ -175,10 +175,10 @@ def load_model(
         model_kit = BatchedModelKit(
             model_path,
             # vocab_only,
-            # max_kv_size,
-            # kv_bits=kv_bits,
-            # kv_group_size=kv_group_size,
-            # quantized_kv_start=quantized_kv_start,
+            max_kv_size=max_kv_size,
+            kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
         )
     sanitize_eos_tokens(model_kit)
     return model_kit
