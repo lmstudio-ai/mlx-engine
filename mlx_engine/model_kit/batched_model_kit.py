@@ -67,16 +67,6 @@ class BatchedModelKit:
     _backend_exception: Exception | None = None
     _shutdown = False
 
-    def __del__(self):
-        self.shutdown()
-
-    def shutdown(self):
-        self._shutdown = True
-        if self._generation_thread:
-            self._generation_thread.join()
-        for entry in self._batch_results.values():
-            entry["rqueue"].put(Exception("Model shutdown requested"))
-
     def __init__(
         self,
         model_path: Path,
@@ -171,6 +161,16 @@ class BatchedModelKit:
 
         return _inner()
 
+    def remove(self, request_id: str):
+        self._requests.put(CancelGenerationRequest(request_id))
+
+    def shutdown(self):
+        self._shutdown = True
+        if self._generation_thread:
+            self._generation_thread.join()
+        for entry in self._batch_results.values():
+            entry["rqueue"].put(Exception("Model shutdown requested"))
+
     def _generate_with_exception_handling(self):
         try:
             self._generate()
@@ -239,7 +239,7 @@ class BatchedModelKit:
 
                 (uid,) = batch_generator.insert(
                     [rest],
-                    [request.max_tokens],  # max tokens
+                    [request.max_tokens],
                     caches=[cache],
                     samplers=[request.samplers],
                     logits_processors=[request.logits_processors],
@@ -319,3 +319,6 @@ class BatchedModelKit:
 
                     if uids_to_remove:
                         batch_generator.remove(uids_to_remove)
+
+    def __del__(self):
+        self.shutdown()

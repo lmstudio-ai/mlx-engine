@@ -9,18 +9,15 @@ from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
-from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
+from mlx_engine.utils.prompt_progress_reporter import (
+    PromptProgressReporter,
+    StopPromptProcessing,
+)
 
 
 PROMPT_PROCESSING_CHUNK_SIZE = 512
 
 logger = logging.getLogger(__name__)
-
-
-class StopPromptProcessing(Exception):
-    """
-    Exception to signal that the user aborted generation during prompt processing.
-    """
 
 
 class CacheWrapper:

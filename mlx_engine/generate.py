@@ -27,11 +27,14 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.cache_wrapper import StopPromptProcessing, PROMPT_PROCESSING_CHUNK_SIZE
+from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE
 from mlx_engine.utils.prompt_progress_reporter import (
+    BatchedMlxLmReporterAdapter,
+    LoggerReporter,
     PromptProgressReporter,
     DefaultPromptProgressReporter,
     MlxLmReporterAdapter,
+    StopPromptProcessing,
 )
 
 USE_BATCHED_BACKEND = True
@@ -291,7 +294,7 @@ def _sequential_generation(
 
     generate_args = {}
     if prompt_progress_reporter is None:
-        prompt_progress_reporter = DefaultPromptProgressReporter()
+        prompt_progress_reporter = LoggerReporter()
 
     # Set up kv cache
     if type(model_kit) is not VisionModelKit:
@@ -613,7 +616,9 @@ def _batched_generation(
         stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
     text = ""
 
-    mlx_lm_callback = MlxLmReporterAdapter(prompt_progress_reporter, emit_begin=True)
+    mlx_lm_callback = BatchedMlxLmReporterAdapter(
+        prompt_progress_reporter, emit_begin=True
+    )
 
     stream = model_kit.generate(
         prompt_tokens=input_tokens,
@@ -630,9 +635,10 @@ def _batched_generation(
             generation_result = next(stream)
         except StopIteration:
             break
-        except StopPromptProcessing:
-            yield construct_user_cancelled_result()
-            return
+        # TODO: implement this
+        # except StopPromptProcessing:
+        #     yield construct_user_cancelled_result()
+        #     return
 
         # Token processor
         token = generation_result.token
@@ -690,6 +696,20 @@ def _batched_generation(
             token_buffer = []
             top_logprobs_buffer = []
             text = ""
+
+
+def stop_generation(model_kit: BatchedModelKit, request_id: str):
+    """
+    Register stop request based off of request_id. For now, this is only supported for `BatchedModelKit`, but this may be extended in the future
+    """
+    if not isinstance(model_kit, BatchedModelKit):
+        logger.error(
+            f"cannot cancel {request_id=}, this API is only available during batched generation"
+        )
+        return
+    if request_id is None or request_id == "":
+        logger.error("request_id cannot be empty in stop request")
+    model_kit.remove(request_id)
 
 
 def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit):
