@@ -183,7 +183,7 @@ class MlxLmReporterAdapter:
     Converts (processed_tokens, total_tokens) -> None to reporter method calls.
     Automatically calls finish() when processed_tokens >= total_tokens.
 
-    Wraps the reporter with ThrowToStopReporter to convert cancellation (returning False)
+    Wraps the reporter with ForwardingReporter to convert cancellation (returning False)
     into a StopPromptProcessing exception, since mlx-lm's callback signature doesn't
     support return-value-based cancellation.
     """

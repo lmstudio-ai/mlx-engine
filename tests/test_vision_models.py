@@ -510,6 +510,7 @@ You are a helpful assistant.<|im_end|>
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("mlx-community/gemma-3-4b-it-4bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
+        print(type(model_kit))
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
@@ -547,7 +548,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 5  # begin, update, update, update, finish
+        assert len(reporter.events) == 16  # begin, update x14, finish
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -679,7 +680,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 5  # begin, update, update, update, finish
+        assert len(reporter.events) == 16  # begin, update x14, finish
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0

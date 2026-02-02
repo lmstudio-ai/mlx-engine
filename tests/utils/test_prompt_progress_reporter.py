@@ -1,7 +1,7 @@
 import unittest
 from typing import Optional
 from mlx_engine.utils.prompt_progress_reporter import (
-    ThrowToStopReporter,
+    ForwardingReporter,
     MlxLmReporterAdapter,
 )
 from mlx_engine.cache_wrapper import StopPromptProcessing
@@ -38,11 +38,11 @@ class MockReporter(RecordingReporter):
         return self.return_value
 
 
-class TestThrowToStopReporter(unittest.TestCase):
+class TestForwardingReporter(unittest.TestCase):
     def test_continues_when_inner_returns_true(self):
-        """Test that ThrowToStopReporter continues when inner returns True."""
+        """Test that ForwardingReporter continues when inner returns True."""
         inner = MockReporter(return_value=True)
-        reporter = ThrowToStopReporter(inner)
+        reporter = ForwardingReporter(inner, raise_error_when_stopped=True)
 
         # These should not raise
         reporter.begin(
@@ -58,9 +58,9 @@ class TestThrowToStopReporter(unittest.TestCase):
         self.assertEqual(len(inner.events), 4)
 
     def test_raises_on_begin_false(self):
-        """Test that ThrowToStopReporter raises when begin returns False."""
+        """Test that ForwardingReporter raises when begin returns False."""
         inner = MockReporter(return_value=False)
-        reporter = ThrowToStopReporter(inner)
+        reporter = ForwardingReporter(inner, raise_error_when_stopped=True)
 
         with self.assertRaises(StopPromptProcessing):
             reporter.begin(
@@ -71,9 +71,9 @@ class TestThrowToStopReporter(unittest.TestCase):
             )
 
     def test_raises_on_update_false(self):
-        """Test that ThrowToStopReporter raises when update returns False."""
+        """Test that ForwardingReporter raises when update returns False."""
         inner = MockReporter(return_value=False)
-        reporter = ThrowToStopReporter(inner)
+        reporter = ForwardingReporter(inner, raise_error_when_stopped=True)
 
         with self.assertRaises(StopPromptProcessing):
             reporter.update(is_draft=False, prefill_tokens_processed=25)
@@ -82,9 +82,9 @@ class TestThrowToStopReporter(unittest.TestCase):
         self.assertEqual(inner.events[0]["prefill_tokens_processed"], 25)
 
     def test_raises_on_finish_false(self):
-        """Test that ThrowToStopReporter raises when finish returns False."""
+        """Test that ForwardingReporter raises when finish returns False."""
         inner = MockReporter(return_value=False)
-        reporter = ThrowToStopReporter(inner)
+        reporter = ForwardingReporter(inner, raise_error_when_stopped=True)
 
         with self.assertRaises(StopPromptProcessing):
             reporter.finish(is_draft=False)
