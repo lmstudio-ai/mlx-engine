@@ -268,6 +268,7 @@ def create_generator(
             if a draft model is loaded. If set to true, draft model must be loaded or else error.
             If set to false, speculative decoding is disabled even if a draft model is loaded.
         num_draft_tokens (Optional[int]): Number of tokens to draft when using speculative decoding
+        request_id (Optional[int]): Id associated with the request
 
     Yields:
         GenerationResult: A named tuple containing:
@@ -281,6 +282,7 @@ def create_generator(
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
     if isinstance(model_kit, BatchedModelKit):
+        kwargs.pop("request_id", None)
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
