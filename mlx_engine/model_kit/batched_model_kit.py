@@ -17,7 +17,6 @@ from mlx_lm.models.cache import (
 )
 import time
 from mlx_lm.server import LRUPromptCache
-from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.token import Token
 
 logger = logging.getLogger(__name__)
@@ -57,6 +56,7 @@ class BatchedModelKit:
     detokenizer: StreamingDetokenizer
     model_type: str | None
     max_kv_size: int | None
+    max_seq_nums: int
     kv_bits: int | None
     kv_group_size: int | None
     quantized_kv_start: int | None
@@ -72,19 +72,20 @@ class BatchedModelKit:
         model_path: Path,
         # vocab_only: bool = False,
         max_kv_size: int | None = None,
+        max_seq_nums: int | None = None,
         kv_bits: int | None = None,
         kv_group_size: int | None = None,
         quantized_kv_start: int | None = None,
     ):
-        kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
-            kv_bits,
-            kv_group_size,
-            quantized_kv_start,
-        )
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
             logger.warning("max_kv_size is ignored when using KV cache quantization")
             max_kv_size = None
+
+        if max_seq_nums is None or max_seq_nums < 1:
+            max_seq_nums = 1
+            logger.info(f"Setting concurrent request limit to {max_seq_nums}")
+        self.max_seq_nums = max_seq_nums
 
         self.model_path = model_path
         logger.info(f"Loading model from {model_path}...")
@@ -102,6 +103,7 @@ class BatchedModelKit:
         self.max_kv_size = max_kv_size
         logger.info("BatchedModelKit loaded successfully")
 
+    def start(self):
         mx.synchronize()  # Defensively sync before launching a new thread
         self._generation_thread = Thread(target=self._generate_with_exception_handling)
         self._generation_thread.start()
@@ -192,6 +194,10 @@ class BatchedModelKit:
         batch_generator = BatchGenerator(
             self.model,
             max_tokens=10000000,
+            completion_batch_size=self.max_seq_nums,
+            # As soon as we receive any prompt, stop decoding, prefill the new prompt, and add it to the decoding batch
+            # We probably want to make this behavior configurable, so that new prompts do not pause existing decodes
+            prefill_batch_size=1,
             stop_tokens=set(self.tokenizer.eos_token_ids),
             sampler=None,
             logits_processors=None,

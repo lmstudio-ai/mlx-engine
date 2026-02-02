@@ -5,8 +5,11 @@ import logging
 from pathlib import Path
 import sys
 
+from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_lm.generate import stream_generate
 from mlx_lm.sample_utils import make_sampler
+from mlx_lm.utils import load as mlx_lm_load
+from mlx_lm.models.cache import make_prompt_cache
 
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
@@ -36,8 +39,6 @@ from mlx_engine.utils.prompt_progress_reporter import (
     MlxLmReporterAdapter,
     StopPromptProcessing,
 )
-
-USE_BATCHED_BACKEND = True
 
 MAX_TOP_LOGPROBS = 10
 
@@ -130,7 +131,8 @@ def load_model(
     model_path: str | Path,
     *,
     vocab_only: bool = False,
-    max_kv_size: Optional[int] = 4096,
+    max_kv_size: int | None = 4096,
+    max_seq_nums: int | None = 4,
     trust_remote_code: bool = False,
     kv_bits: Optional[int] = None,
     kv_group_size: Optional[int] = None,
@@ -146,6 +148,7 @@ def load_model(
         model_path (str | Path): Path to the model directory containing model files and config.json.
         vocab_only (bool): Only load vocabulary/tokenizer, not the full model.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
+        max_seq_nums (int): The maximum number of parallel generation requests that can be worked on
         trust_remote_code (bool): Whether to allow loading of remote code during model initialization.
         kv_bits (Optional[int]): Number of bits for KV cache quantization.
         kv_group_size (Optional[int]): Group size for KV cache quantization.
@@ -174,24 +177,39 @@ def load_model(
                 "MLX vision models do not currently support KV cache quantization"
             )
         model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
-    elif USE_BATCHED_BACKEND:
-        model_kit = BatchedModelKit(
-            model_path,
-            max_kv_size=max_kv_size,
-            kv_bits=kv_bits,
-            kv_group_size=kv_group_size,
-            quantized_kv_start=quantized_kv_start,
-        )
     else:
-        model_kit = ModelKit(
-            model_path,
-            vocab_only,
-            max_kv_size=max_kv_size,
-            kv_bits=kv_bits,
-            kv_group_size=kv_group_size,
-            quantized_kv_start=quantized_kv_start,
+        kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
+            kv_bits,
+            kv_group_size,
+            quantized_kv_start,
         )
+        is_batchable = True
+        model, _ = mlx_lm_load(model_path, lazy=True)
+        is_batchable &= all(hasattr(c, "merge") for c in make_prompt_cache(model))
+        del model
+        is_batchable &= kv_bits is None
+        is_batchable &= "vision_config" not in config_json
+        if is_batchable:
+            model_kit = BatchedModelKit(
+                model_path,
+                max_kv_size=max_kv_size,
+                max_seq_nums=max_seq_nums,
+                kv_bits=kv_bits,
+                kv_group_size=kv_group_size,
+                quantized_kv_start=quantized_kv_start,
+            )
+        else:
+            model_kit = ModelKit(
+                model_path,
+                vocab_only,
+                max_kv_size=max_kv_size,
+                kv_bits=kv_bits,
+                kv_group_size=kv_group_size,
+                quantized_kv_start=quantized_kv_start,
+            )
     sanitize_eos_tokens(model_kit)
+    if isinstance(model_kit, BatchedModelKit):
+        model_kit.start()
     return model_kit
 
 
