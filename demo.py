@@ -118,6 +118,23 @@ def setup_arg_parser():
         default=1,
         help="Number of concurrent generation threads to run (default: 1)",
     )
+    parser.add_argument(
+        "--benchmark",
+        type=int,
+        default=1,
+        help="Number of benchmark iterations to run and average (default: 1)",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=1024,
+        help="Maximum number of tokens to generate (default: 1024)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress generation output (useful for benchmarking)",
+    )
     return parser
 
 
@@ -145,24 +162,39 @@ class GenerationStatsCollector:
 
         self.total_tokens += len(tokens)
 
-    def print_stats(self):
-        """Print generation statistics."""
+    def get_stats(self):
+        """Calculate and return generation statistics."""
         end_time = time.time()
         total_time = end_time - self.start_time
-        time_to_first_token = self.first_token_time - self.start_time
+        time_to_first_token = (
+            self.first_token_time - self.start_time
+            if self.first_token_time
+            else 0
+        )
         effective_time = total_time - time_to_first_token
         tokens_per_second = (
-            self.total_tokens / effective_time if effective_time > 0 else float("inf")
+            self.total_tokens / effective_time if effective_time > 0 else 0
         )
+        return {
+            "tokens_per_second": tokens_per_second,
+            "time_to_first_token": time_to_first_token,
+            "total_tokens": self.total_tokens,
+            "total_time": total_time,
+            "num_accepted_draft_tokens": self.num_accepted_draft_tokens,
+        }
+
+    def print_stats(self):
+        """Print generation statistics."""
+        stats = self.get_stats()
         print("\n\nGeneration stats:")
-        print(f" - Tokens per second: {tokens_per_second:.2f}")
-        if self.num_accepted_draft_tokens is not None:
+        print(f" - Tokens per second: {stats['tokens_per_second']:.2f}")
+        if stats["num_accepted_draft_tokens"] is not None:
             print(
-                f" - Number of accepted draft tokens: {self.num_accepted_draft_tokens}"
+                f" - Number of accepted draft tokens: {stats['num_accepted_draft_tokens']}"
             )
-        print(f" - Time to first token: {time_to_first_token:.2f}s")
-        print(f" - Total tokens generated: {self.total_tokens}")
-        print(f" - Total time: {total_time:.2f}s")
+        print(f" - Time to first token: {stats['time_to_first_token']:.2f}s")
+        print(f" - Total tokens generated: {stats['total_tokens']}")
+        print(f" - Total time: {stats['total_time']:.2f}s")
 
 
 def resolve_model_path(model_arg):
@@ -191,8 +223,9 @@ print_lock = threading.Lock()
 class ColumnDisplay:
     """Manages side-by-side column display for concurrent generation threads."""
 
-    def __init__(self, num_columns=2):
+    def __init__(self, num_columns=2, quiet=False):
         self.num_columns = num_columns
+        self.quiet = quiet
         self.terminal_width = shutil.get_terminal_size().columns
 
         # Reserve space for separators between columns
@@ -200,7 +233,7 @@ class ColumnDisplay:
         self.column_width = (self.terminal_width - separator_space) // num_columns
 
         # Ensure minimum column width
-        if self.column_width < 40:
+        if self.column_width < 40 and not quiet:
             print(
                 f"Warning: Terminal width ({self.terminal_width}) is too narrow for {num_columns} columns."
             )
@@ -210,21 +243,32 @@ class ColumnDisplay:
         self.completed = {i: False for i in range(1, num_columns + 1)}
         self.lock = threading.Lock()
 
-        # Clear screen and hide cursor
-        print("\033[2J\033[H", end="", flush=True)
+        if not quiet:
+            # Clear screen and hide cursor
+            print("\033[2J\033[H", end="", flush=True)
 
     def append_text(self, thread_id, text):
         """Append text to a thread's buffer and redraw."""
         with self.lock:
             self.buffers[thread_id] += text
-            self._redraw()
+            if not self.quiet:
+                self._redraw()
 
     def mark_complete(self, thread_id, stats_text):
         """Mark a thread as complete with stats."""
         with self.lock:
             self.completed[thread_id] = True
             self.buffers[thread_id] += f"\n\n{stats_text}"
-            self._redraw()
+            if not self.quiet:
+                self._redraw()
+
+    def reset(self):
+        """Reset the display for a new iteration."""
+        with self.lock:
+            self.buffers = {i: "" for i in range(1, self.num_columns + 1)}
+            self.completed = {i: False for i in range(1, self.num_columns + 1)}
+            if not self.quiet:
+                print("\033[2J\033[H", end="", flush=True)
 
     def _wrap_text(self, text, width):
         """Wrap text to fit within column width, preserving intentional breaks."""
@@ -277,9 +321,6 @@ class ColumnDisplay:
         print("\033[J", end="", flush=True)
 
 
-display = None
-
-
 def run_generation_thread(
     thread_id,
     model_kit,
@@ -292,14 +333,15 @@ def run_generation_thread(
     prompt_progress_reporter,
     num_draft_tokens,
     temp,
+    display,
+    results_dict,
 ):
     """Run a single generation stream in a thread."""
-    global display
     stats_collector = GenerationStatsCollector()
     logprobs_list = []
 
     # Start the generation after a random amount of time
-    time.sleep(random.uniform(0, 5))
+    time.sleep(random.uniform(0, 0.5))
 
     generator = create_generator(
         model_kit,
@@ -314,33 +356,118 @@ def run_generation_thread(
         temp=temp,
     )
 
+    stop_reason = None
     for generation_result in generator:
         display.append_text(thread_id, generation_result.text)
         stats_collector.add_tokens(generation_result.tokens)
         logprobs_list.extend(generation_result.top_logprobs)
 
         if generation_result.stop_condition:
-            # Build stats text
-            end_time = time.time()
-            total_time = end_time - stats_collector.start_time
-            time_to_first_token = (
-                stats_collector.first_token_time - stats_collector.start_time
-                if stats_collector.first_token_time
-                else 0
-            )
-            effective_time = total_time - time_to_first_token
-            tokens_per_second = (
-                stats_collector.total_tokens / effective_time
-                if effective_time > 0
-                else float("inf")
-            )
+            stop_reason = generation_result.stop_condition.stop_reason
 
-            stats_text = "COMPLETE\n"
-            stats_text += f"Tokens/sec: {tokens_per_second:.2f}\n"
-            stats_text += f"Total tokens: {stats_collector.total_tokens}\n"
-            stats_text += f"Stop: {generation_result.stop_condition.stop_reason}"
+    # Calculate stats after generation completes (regardless of stop_condition)
+    stats = stats_collector.get_stats()
 
-            display.mark_complete(thread_id, stats_text)
+    stats_text = "COMPLETE\n"
+    stats_text += f"Tokens/sec: {stats['tokens_per_second']:.2f}\n"
+    stats_text += f"Total tokens: {stats['total_tokens']}\n"
+    stats_text += f"Stop: {stop_reason}"
+
+    display.mark_complete(thread_id, stats_text)
+
+    # Store results for aggregation
+    results_dict[thread_id] = stats
+
+
+def run_benchmark_iteration(
+    iteration,
+    total_iterations,
+    model_kit,
+    prompt_tokens,
+    images_base64,
+    max_img_size,
+    stop_strings,
+    max_tokens,
+    top_logprobs,
+    prompt_progress_reporter,
+    num_draft_tokens,
+    temp,
+    parallel,
+    quiet,
+):
+    """Run a single benchmark iteration and return stats from all threads."""
+    display = ColumnDisplay(num_columns=parallel, quiet=quiet)
+
+    if not quiet and total_iterations > 1:
+        print(f"\n=== Iteration {iteration}/{total_iterations} ===\n")
+
+    # Dictionary to collect results from threads
+    results_dict = {}
+
+    # Create and start all threads
+    threads = []
+    for thread_id in range(1, parallel + 1):
+        thread = threading.Thread(
+            target=run_generation_thread,
+            args=(
+                thread_id,
+                model_kit,
+                prompt_tokens,
+                images_base64,
+                max_img_size,
+                stop_strings,
+                max_tokens,
+                top_logprobs,
+                prompt_progress_reporter,
+                num_draft_tokens,
+                temp,
+                display,
+                results_dict,
+            ),
+        )
+        thread.start()
+        threads.append(thread)
+
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+
+    return results_dict
+
+
+def print_benchmark_summary(all_iteration_results):
+    """Print summary statistics for all benchmark iterations."""
+    all_tps = []
+    all_ttft = []
+    all_tokens = []
+
+    for iteration_results in all_iteration_results:
+        for thread_id, stats in iteration_results.items():
+            all_tps.append(stats["tokens_per_second"])
+            all_ttft.append(stats["time_to_first_token"])
+            all_tokens.append(stats["total_tokens"])
+
+    num_samples = len(all_tps)
+    avg_tps = sum(all_tps) / num_samples if num_samples > 0 else 0
+    min_tps = min(all_tps) if all_tps else 0
+    max_tps = max(all_tps) if all_tps else 0
+    avg_ttft = sum(all_ttft) / num_samples if num_samples > 0 else 0
+    avg_tokens = sum(all_tokens) / num_samples if num_samples > 0 else 0
+
+    print("\n" + "=" * 50)
+    print("BENCHMARK RESULTS")
+    print("=" * 50)
+    print(f"Iterations: {len(all_iteration_results)}")
+    print(f"Total samples: {num_samples}")
+    print(f"")
+    print(f"Tokens/second:")
+    print(f"  Average: {avg_tps:.2f}")
+    print(f"  Min:     {min_tps:.2f}")
+    print(f"  Max:     {max_tps:.2f}")
+    print(f"")
+    print(f"Time to first token (avg): {avg_ttft:.3f}s")
+    print(f"Tokens generated (avg):    {avg_tokens:.1f}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
@@ -410,36 +537,34 @@ if __name__ == "__main__":
     # Prepare prompt progress reporter
     prompt_progress_reporter = LoggerReporter() if args.print_prompt_progress else None
 
-    # Initialize column display
-    display = ColumnDisplay(num_columns=args.parallel)
-
-    # Create and start all threads
-    threads = []
-    for thread_id in range(1, args.parallel + 1):
-        thread = threading.Thread(
-            target=run_generation_thread,
-            args=(
-                thread_id,
-                model_kit,
-                prompt_tokens,
-                images_base64,
-                max_img_size,
-                args.stop_strings,
-                1024,
-                args.top_logprobs,
-                prompt_progress_reporter,
-                args.num_draft_tokens,
-                args.temp,
-            ),
+    # Run benchmark iterations
+    all_iteration_results = []
+    for iteration in range(1, args.benchmark + 1):
+        iteration_results = run_benchmark_iteration(
+            iteration=iteration,
+            total_iterations=args.benchmark,
+            model_kit=model_kit,
+            prompt_tokens=prompt_tokens,
+            images_base64=images_base64,
+            max_img_size=max_img_size,
+            stop_strings=args.stop_strings,
+            max_tokens=args.max_tokens,
+            top_logprobs=args.top_logprobs,
+            prompt_progress_reporter=prompt_progress_reporter,
+            num_draft_tokens=args.num_draft_tokens,
+            temp=args.temp,
+            parallel=args.parallel,
+            quiet=args.quiet,
         )
-        thread.start()
-        threads.append(thread)
+        all_iteration_results.append(iteration_results)
 
-    # Wait for all threads to complete
-    for thread in threads:
-        thread.join()
+    # Print summary
+    if not args.quiet:
+        print("\n" * 3)
 
-    # Move cursor below the display
-    print("\n" * 3)
-    print("=== All generation threads completed ===")
+    if args.benchmark > 1:
+        print_benchmark_summary(all_iteration_results)
+    else:
+        print("=== Generation complete ===")
+
     model_kit.shutdown()
