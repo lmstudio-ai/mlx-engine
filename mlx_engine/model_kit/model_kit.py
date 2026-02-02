@@ -16,6 +16,7 @@ from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class ModelKit:
     quantized_kv_start: Optional[int] = None
     draft_model: Optional[nn.Module] = None
     model_type: Optional[str] = None
+    generation_lock = threading.Lock()
 
     # multi-modal add-ons
     vision_add_on: Optional[BaseVisionAddOn] = None
@@ -127,6 +129,9 @@ class ModelKit:
                 kv_group_size,
                 quantized_kv_start,
             )
+
+    def start(self):
+        mx.synchronize()
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
