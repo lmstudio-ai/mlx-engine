@@ -196,6 +196,8 @@ class BatchedModelKit:
             sampler=None,
             logits_processors=None,
             prompt_progress_callback=progress_callback,
+            # TODO(christian): uncomment after merge of https://github.com/ml-explore/mlx-lm/pull/834
+            # max_kv_size=self.max_kv_size,
         )
         # only using one model, so model key name value does not matter
         current_model_key = "key"
@@ -233,7 +235,7 @@ class BatchedModelKit:
                     current_model_key, request.prompt_tokens
                 )
                 if cache is None:
-                    cache = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
+                    cache = make_prompt_cache(self.model)
 
                 (uid,) = batch_generator.insert(
                     [rest],
