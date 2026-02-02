@@ -167,11 +167,12 @@ class BatchedModelKit:
         self._requests.put(CancelGenerationRequest(request_id))
 
     def shutdown(self):
-        self._shutdown.set()
-        if self._generation_thread:
-            self._generation_thread.join()
-        for entry in self._batch_results.values():
-            entry["rqueue"].put(Exception("Model shutdown requested"))
+        if not self._shutdown.is_set():
+            self._shutdown.set()
+            if self._generation_thread:
+                self._generation_thread.join()
+            for entry in self._batch_results.values():
+                entry["rqueue"].put(Exception("Model shutdown requested"))
 
     def _generate_with_exception_handling(self):
         try:
