@@ -1,4 +1,4 @@
-from threading import Thread
+from threading import Thread, Event
 from dataclasses import dataclass
 import json
 import traceback
@@ -65,7 +65,7 @@ class BatchedModelKit:
     _prompt_cache = LRUPromptCache()
     _batch_results = {}
     _backend_exception: Exception | None = None
-    _shutdown = False
+    _shutdown = Event()
 
     def __init__(
         self,
@@ -130,7 +130,7 @@ class BatchedModelKit:
         max_tokens,
     ):
         # Do not accept new requests if error or shutdown
-        if self._shutdown:
+        if self._shutdown.is_set():
             raise RuntimeError("Cannot accept new requests when model is shutdown")
         if isinstance(self._backend_exception, Exception):
             raise self._backend_exception
@@ -167,7 +167,7 @@ class BatchedModelKit:
         self._requests.put(CancelGenerationRequest(request_id))
 
     def shutdown(self):
-        self._shutdown = True
+        self._shutdown.set()
         if self._generation_thread:
             self._generation_thread.join()
         for entry in self._batch_results.values():
@@ -217,7 +217,7 @@ class BatchedModelKit:
             except QueueEmpty:
                 return None
 
-        while not self._shutdown:
+        while not self._shutdown.is_set():
             request = None
             timeout: None | float = None if (len(self._batch_results) > 0) else 0.1
             request = get_next_request(timeout=timeout)
