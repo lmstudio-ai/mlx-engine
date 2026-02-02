@@ -27,6 +27,7 @@ from .generate import (
     unload_draft_model,
     create_generator,
     tokenize,
+    unload,
 )
 
 patch_huggingface_hub()
