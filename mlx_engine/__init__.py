@@ -9,6 +9,7 @@ __all__ = [
     "unload_draft_model",
     "create_generator",
     "tokenize",
+    "unload",
 ]
 
 from pathlib import Path
