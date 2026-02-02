@@ -174,7 +174,15 @@ def load_model(
     elif USE_BATCHED_BACKEND:
         model_kit = BatchedModelKit(
             model_path,
-            # vocab_only,
+            max_kv_size=max_kv_size,
+            kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+        )
+    else:
+        model_kit = ModelKit(
+            model_path,
+            vocab_only,
             max_kv_size=max_kv_size,
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
