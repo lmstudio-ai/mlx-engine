@@ -284,8 +284,8 @@ def create_generator(
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
     if isinstance(model_kit, BatchedModelKit):
-        kwargs.pop("request_id", None)
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
+    kwargs.pop("request_id", None)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
 
