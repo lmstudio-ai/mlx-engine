@@ -105,6 +105,8 @@ Who is this passage about? Only say the name, and nothing else<|im_end|>
         # First generation should have no cached tokens
         begin_event = reporter.events[0]
         self.assertEqual(begin_event["type"], "begin")
+        # TODO: Implement proper cached_tokens tracking in batched model kit
+        # Currently hardcoded to 0 in BatchedMlxLmReporterAdapter
         # self.assertEqual(begin_event["cached_tokens"], 0)
         self.assertGreater(len(generated_text), 0, "Model failed to generate any text")
         ben_franklin_in_response = "Benjamin Franklin" in generated_text
@@ -181,6 +183,8 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         # First generation should have no cached tokens
         begin_event = reporter.events[0]
         self.assertEqual(begin_event["type"], "begin")
+        # TODO: Implement proper cached_tokens tracking in batched model kit
+        # Currently hardcoded to 0 in BatchedMlxLmReporterAdapter
         # self.assertEqual(begin_event["cached_tokens"], 0)
         self.assertGreater(
             len(generated_text_1), 0, "Model failed to generate any text"

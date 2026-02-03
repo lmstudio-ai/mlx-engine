@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from mlx_engine.model_kit.batched_model_kit import BatchedModelKit, RequestCancelled
+from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
+from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
 from typing import Iterator, List, Optional
 import json
 import logging
@@ -9,20 +10,15 @@ import threading
 
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_lm.generate import stream_generate
-from mlx_lm.sample_utils import make_sampler
 from mlx_lm.utils import load as mlx_lm_load
 from mlx_lm.models.cache import make_prompt_cache
 
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
-from mlx_engine.processors.repetition_penalty_processor import (
-    RepetitionPenaltyProcessor,
-)
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
 from mlx_engine.stop_string_processor import (
-    StopStringProcessor,
     StopStringProcessorResult,
 )
 from mlx_engine.utils.generation_result import (
@@ -45,6 +41,15 @@ from mlx_engine.utils.prompt_progress_reporter import (
     DefaultPromptProgressReporter,
     MlxLmReporterAdapter,
     StopPromptProcessing,
+)
+from mlx_engine.utils.generation_helpers import (
+    setup_repetition_penalty,
+    setup_logits_processors,
+    create_sampler,
+    validate_top_logprobs,
+    create_stop_string_processor,
+    process_stop_string_check,
+    should_yield_token,
 )
 
 MAX_TOP_LOGPROBS = 10
@@ -129,6 +134,8 @@ def load_model(
         vocab_only (bool): Only load vocabulary/tokenizer, not the full model.
         max_kv_size (int): Maximum size of the key-value cache used during model inference.
         max_seq_nums (int): The maximum number of parallel generation requests that can be worked on
+        seed (Optional[int]): Random seed for reproducible generation. If provided, sets the
+            random seed for all subsequent generation operations with this model.
         trust_remote_code (bool): Whether to allow loading of remote code during model initialization.
         kv_bits (Optional[int]): Number of bits for KV cache quantization.
         kv_group_size (Optional[int]): Group size for KV cache quantization.
@@ -149,37 +156,52 @@ def load_model(
     config_json = json.loads((model_path / "config.json").read_text())
     model_type = config_json.get("model_type", None)
 
-    # only use VisionModelKit if ModelKit doesn't have vision support for this model
+    # Determine which model kit to use based on model capabilities and configuration.
+    # The decision tree is:
+    # 1. VisionModelKit: for vision models not yet supported by ModelKit's vision implementation
+    # 2. BatchedModelKit: for models that support continuous batching (can process multiple requests concurrently)
+    # 3. ModelKit: fallback for all other cases (sequential processing)
+
+    # Check if this is a vision model that needs the legacy VisionModelKit
+    # (ModelKit now supports some vision architectures directly)
     if "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
         model_type
     ):
+        # VisionModelKit doesn't support KV cache quantization
         if any([kv_bits, kv_group_size, quantized_kv_start]):
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
             )
         model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
     else:
+        # For non-vision models or ModelKit-supported vision models, choose between
+        # BatchedModelKit (continuous batching) and ModelKit (sequential)
         kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
             kv_bits,
             kv_group_size,
             quantized_kv_start,
         )
+
+        # Determine if the model can use BatchedModelKit by checking requirements:
         is_batchable = True
         model, _ = mlx_lm_load(model_path, lazy=True)
+        # 1. All cache layers must support merging (required for continuous batching)
         is_batchable &= all(hasattr(c, "merge") for c in make_prompt_cache(model))
         del model
+        # 2. KV cache quantization is not compatible with batching yet
         is_batchable &= kv_bits is None
+        # 3. Vision models are not compatible with batching yet
         is_batchable &= "vision_config" not in config_json
+
         if is_batchable:
+            # Use BatchedModelKit for continuous batching (multiple concurrent requests)
             model_kit = BatchedModelKit(
                 model_path,
                 max_kv_size=max_kv_size,
                 max_seq_nums=max_seq_nums,
-                kv_bits=kv_bits,
-                kv_group_size=kv_group_size,
-                quantized_kv_start=quantized_kv_start,
             )
         else:
+            # Use ModelKit for sequential processing (one request at a time)
             model_kit = ModelKit(
                 model_path,
                 vocab_only,
@@ -322,7 +344,7 @@ def _sequential_generation(
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
     request_id: Optional[str] = None,
-):
+) -> Iterator[GenerationResult]:
     with _sequential_gen_abort_handler(model_kit, request_id) as cancel_event:
         if cancel_event.is_set() or model_kit.is_shutdown():
             yield construct_user_cancelled_result()
@@ -347,13 +369,9 @@ def _sequential_generation(
                     generate_args[attr] = value
 
         # Set up repetition penalty
-        repetition_penalty_kwargs = {}
-        if repetition_penalty is not None:
-            repetition_penalty_kwargs["repetition_penalty"] = repetition_penalty
-            if repetition_context_size is not None:
-                repetition_penalty_kwargs["repetition_context_size"] = (
-                    repetition_context_size
-                )
+        repetition_penalty_kwargs = setup_repetition_penalty(
+            repetition_penalty, repetition_context_size
+        )
 
         # Set up speculative decoding
         draft_model = determine_draft_model_for_generation(
@@ -380,33 +398,19 @@ def _sequential_generation(
             # input embeddings not yet supported for speculative decoding in mlx-lm
             generate_args["input_embeddings"] = input_embeddings
 
-        # Setup logits processors
-        logits_processors = []
-        if repetition_penalty and repetition_penalty != 0.0:
-            cached_tokens = (
-                prompt_tokens[: -len(input_tokens)]
-                if len(input_tokens) > 0
-                else prompt_tokens
-            )
-            logits_processors.append(
-                RepetitionPenaltyProcessor(
-                    token_history=cached_tokens, **repetition_penalty_kwargs
-                )
-            )
+        # Setup logits processors (will add JSON schema processor later if needed)
+        logits_processors = setup_logits_processors(
+            repetition_penalty,
+            repetition_penalty_kwargs,
+            prompt_tokens,
+            input_tokens,
+            None,  # json_schema added separately below
+            model_kit.tokenizer,
+        )
 
         # Set up sampler
-        generate_args["sampler"] = make_sampler(
-            **{
-                k: v
-                for k, v in {
-                    "temp": temp,
-                    "top_p": top_p,
-                    "min_p": min_p,
-                    "min_tokens_to_keep": min_tokens_to_keep,
-                    "top_k": top_k,
-                }.items()
-                if v is not None
-            }
+        generate_args["sampler"] = create_sampler(
+            temp, top_p, min_p, min_tokens_to_keep, top_k
         )
 
         # If using VisionModelKit, immediately record the token once it's sampled
@@ -421,12 +425,7 @@ def _sequential_generation(
             generate_args["sampler"] = sampler_func_wrapper
 
         # Validate top_logprobs
-        if top_logprobs is None:
-            top_logprobs = 0
-        if top_logprobs > MAX_TOP_LOGPROBS:
-            raise ValueError(
-                f"top_logprobs must be less than or equal to {MAX_TOP_LOGPROBS}"
-            )
+        top_logprobs = validate_top_logprobs(top_logprobs)
 
         # Keep track of tokens buffered by detokenizer to yield accurate generation results
         token_buffer: List[Token] = []
@@ -435,8 +434,7 @@ def _sequential_generation(
         tokenizer = model_kit.tokenizer
 
         # Add outlines logits processor if json_schema is provided
-        is_structured_output_request = json_schema is not None
-        if is_structured_output_request:
+        if json_schema is not None:
             logits_processors.append(
                 JSONLogitsProcessor(
                     json_schema,
@@ -446,9 +444,7 @@ def _sequential_generation(
             )
 
         # Set up stop string processor if non-empty stop_strings are provided
-        stop_string_processor = None
-        if stop_strings is not None and len(stop_strings) > 0:
-            stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
+        stop_string_processor = create_stop_string_processor(stop_strings, tokenizer)
         text = ""
 
         # Determine callback for mlx-lm based on processing mode
@@ -504,39 +500,28 @@ def _sequential_generation(
                 )
 
             # Stop processor
-            if stop_string_processor is not None:
-                stop_string_processor_result = stop_string_processor.process_token(
-                    token
+            should_stop, should_buffer, stop_result = process_stop_string_check(
+                stop_string_processor, token
+            )
+            if should_stop:
+                yield _handle_stop_string_detected(
+                    tokenizer,
+                    stop_result,
+                    text,
+                    token_buffer,
+                    top_logprobs_buffer,
                 )
-                if stop_string_processor_result.status == "full_stop":
-                    yield _handle_stop_string_detected(
-                        tokenizer,
-                        stop_string_processor_result,
-                        text,
-                        token_buffer,
-                        top_logprobs_buffer,
-                    )
-                    break  # stop generation
+                break  # stop generation
 
-                # If we currently have generated a partial match with a stop sequence, or detected an
-                # in-progress multi-byte string, generate new tokens until we know if the stop sequence
-                # is hit or not (i.e., make sure not to yield yet)
-                if (
-                    stop_string_processor_result.status == "partial_match"
-                    or stop_string_processor_result.status == "multi_byte"
-                ):
-                    continue
+            # If we currently have generated a partial match with a stop sequence, or detected an
+            # in-progress multi-byte string, generate new tokens until we know if the stop sequence
+            # is hit or not (i.e., make sure not to yield yet)
+            if should_buffer:
+                continue
 
             # Standard yield - yield when a non-empty text segment is available or eos token is hit
-            if text or token in tokenizer.eos_token_ids:
-                # populate stop_condition if we hit an eos token
-                stop_condition = None
-                if token in tokenizer.eos_token_ids:
-                    stop_condition = GenerationStopCondition(
-                        stop_reason="eos_token",
-                        stop_string=tokenizer.decode(token),
-                        stop_tokens=[token],
-                    )
+            should_yield, stop_condition = should_yield_token(text, token, tokenizer)
+            if should_yield:
                 yield GenerationResult(
                     text=text,
                     tokens=token_buffer,
@@ -548,22 +533,6 @@ def _sequential_generation(
                 text = ""
         yield construct_user_cancelled_result()
         return
-
-
-def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
-    """
-    Convert a text prompt into a list of token IDs using the model's tokenizer.
-
-    Args:
-        model_kit (ModelKit | VisionModelKit): The model kit instance containing the tokenizer
-            to use for tokenization
-        prompt (str): The raw text prompt to be tokenized
-
-    Returns:
-        List[int]: A list of integer token IDs representing the tokenized prompt,
-            ready for model input
-    """
-    return model_kit.tokenize(prompt)
 
 
 def _batched_generation(
@@ -595,60 +564,33 @@ def _batched_generation(
         prompt_progress_reporter = DefaultPromptProgressReporter()
 
     # Set up repetition penalty
-    repetition_penalty_kwargs = {}
-    if repetition_penalty is not None:
-        repetition_penalty_kwargs["repetition_penalty"] = repetition_penalty
-        if repetition_context_size is not None:
-            repetition_penalty_kwargs["repetition_context_size"] = (
-                repetition_context_size
-            )
-
-    # Setup logits processors
-    logits_processors = []
-    if repetition_penalty and repetition_penalty != 0.0:
-        cached_tokens = (
-            prompt_tokens[: -len(input_tokens)]
-            if len(input_tokens) > 0
-            else prompt_tokens
-        )
-        logits_processors.append(
-            RepetitionPenaltyProcessor(
-                token_history=cached_tokens, **repetition_penalty_kwargs
-            )
-        )
-
-    # Set up sampler
-    sampler = make_sampler(
-        **{
-            k: v
-            for k, v in {
-                "temp": temp,
-                "top_p": top_p,
-                "min_p": min_p,
-                "min_tokens_to_keep": min_tokens_to_keep,
-                "top_k": top_k,
-            }.items()
-            if v is not None
-        }
+    repetition_penalty_kwargs = setup_repetition_penalty(
+        repetition_penalty, repetition_context_size
     )
 
+    # Setup logits processors (will add JSON schema processor later if needed)
+    tokenizer = model_kit.tokenizer
+    logits_processors = setup_logits_processors(
+        repetition_penalty,
+        repetition_penalty_kwargs,
+        prompt_tokens,
+        input_tokens,
+        None,  # json_schema added separately below
+        tokenizer,
+    )
+
+    # Set up sampler
+    sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
+
     # Validate top_logprobs
-    if top_logprobs is None:
-        top_logprobs = 0
-    if top_logprobs > MAX_TOP_LOGPROBS:
-        raise ValueError(
-            f"top_logprobs must be less than or equal to {MAX_TOP_LOGPROBS}"
-        )
+    top_logprobs = validate_top_logprobs(top_logprobs)
 
     # Keep track of tokens buffered by detokenizer to yield accurate generation results
     token_buffer: List[Token] = []
     top_logprobs_buffer: List[List[Token]] = []
 
-    tokenizer = model_kit.tokenizer
-
     # Add outlines logits processor if json_schema is provided
-    is_structured_output_request = json_schema is not None
-    if is_structured_output_request:
+    if json_schema is not None:
         logits_processors.append(
             JSONLogitsProcessor(
                 json_schema,
@@ -658,9 +600,7 @@ def _batched_generation(
         )
 
     # Set up stop string processor if non-empty stop_strings are provided
-    stop_string_processor = None
-    if stop_strings is not None and len(stop_strings) > 0:
-        stop_string_processor = StopStringProcessor(stop_strings, tokenizer)
+    stop_string_processor = create_stop_string_processor(stop_strings, tokenizer)
     text = ""
 
     mlx_lm_callback = BatchedMlxLmReporterAdapter(
@@ -685,7 +625,8 @@ def _batched_generation(
         except RequestCancelled:
             yield construct_user_cancelled_result()
             return
-        # TODO: implement this
+        # TODO: implement this - MLX doesn't yet support cancelling during prompt processing
+        # for batched generation (only during token generation via RequestCancelled)
         # except StopPromptProcessing:
         #     yield construct_user_cancelled_result()
         #     return
@@ -706,37 +647,28 @@ def _batched_generation(
             top_logprobs_buffer.append(generation_result.top_logprobs)
 
         # Stop processor
-        if stop_string_processor is not None:
-            stop_string_processor_result = stop_string_processor.process_token(token)
-            if stop_string_processor_result.status == "full_stop":
-                yield _handle_stop_string_detected(
-                    tokenizer,
-                    stop_string_processor_result,
-                    text,
-                    token_buffer,
-                    top_logprobs_buffer,
-                )
-                break  # stop generation
+        should_stop, should_buffer, stop_result = process_stop_string_check(
+            stop_string_processor, token
+        )
+        if should_stop:
+            yield _handle_stop_string_detected(
+                tokenizer,
+                stop_result,
+                text,
+                token_buffer,
+                top_logprobs_buffer,
+            )
+            break  # stop generation
 
-            # If we currently have generated a partial match with a stop sequence, or detected an
-            # in-progress multi-byte string, generate new tokens until we know if the stop sequence
-            # is hit or not (i.e., make sure not to yield yet)
-            if (
-                stop_string_processor_result.status == "partial_match"
-                or stop_string_processor_result.status == "multi_byte"
-            ):
-                continue
+        # If we currently have generated a partial match with a stop sequence, or detected an
+        # in-progress multi-byte string, generate new tokens until we know if the stop sequence
+        # is hit or not (i.e., make sure not to yield yet)
+        if should_buffer:
+            continue
 
         # Standard yield - yield when a non-empty text segment is available or eos token is hit
-        if text or token in tokenizer.eos_token_ids:
-            # populate stop_condition if we hit an eos token
-            stop_condition = None
-            if token in tokenizer.eos_token_ids:
-                stop_condition = GenerationStopCondition(
-                    stop_reason="eos_token",
-                    stop_string=tokenizer.decode(token),
-                    stop_tokens=[token],
-                )
+        should_yield, stop_condition = should_yield_token(text, token, tokenizer)
+        if should_yield:
             yield GenerationResult(
                 text=text,
                 tokens=token_buffer,
@@ -768,3 +700,19 @@ def stop_generation(
 
 def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit):
     model_kit.shutdown()
+
+
+def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
+    """
+    Convert a text prompt into a list of token IDs using the model's tokenizer.
+
+    Args:
+        model_kit (ModelKit | VisionModelKit): The model kit instance containing the tokenizer
+            to use for tokenization
+        prompt (str): The raw text prompt to be tokenized
+
+    Returns:
+        List[int]: A list of integer token IDs representing the tokenized prompt,
+            ready for model input
+    """
+    return model_kit.tokenize(prompt)

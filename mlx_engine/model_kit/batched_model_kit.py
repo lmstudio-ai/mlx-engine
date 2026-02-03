@@ -1,6 +1,6 @@
 from threading import Thread, Event
-from dataclasses import dataclass
 import json
+import sys
 import traceback
 import mlx_lm
 import logging
@@ -19,51 +19,44 @@ import time
 from mlx_lm.server import LRUPromptCache
 from mlx_engine.utils.token import Token
 
+from mlx_engine.model_kit.batched_model_kit_types import (
+    BatchedGenerationResponse,
+    RequestCancelled,
+    GenerationRequest,
+    CancelGenerationRequest,
+)
+
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class BatchedGenerationResponse:
-    """Response object for batched generation, containing computed logprobs."""
-
-    text: str
-    token: int
-    token_logprob: float
-    top_logprobs: list[Token] | None
-    finish_reason: str | None
-    from_draft: bool = False
-
-
-class RequestCancelled(Exception):
-    """Signals successfully cancelled generation"""
-
-
-@dataclass
-class GenerationRequest:
-    rqueue: Queue
-    prompt_tokens: list[int]
-    request_id: str
-    samplers: object
-    logits_processors: list
-    top_logprobs: int
-    max_tokens: int
-
-
-@dataclass
-class CancelGenerationRequest:
-    request_id: str
-
-
 class BatchedModelKit:
+    """
+    Batched model kit for continuous batching of multiple concurrent generation requests.
+
+    This model kit enables efficient processing of multiple generation requests in parallel
+    by using MLX's BatchGenerator. Requests are processed in a background thread that
+    continuously batches and generates tokens for all active requests.
+
+    Note: KV cache quantization is not compatible with batched generation. Models requiring
+    quantization will use the sequential ModelKit instead.
+
+    Args:
+        model_path (Path): Path to the model directory containing model files.
+        max_kv_size (Optional[int]): Maximum size of the key-value cache.
+        max_seq_nums (Optional[int]): Maximum number of concurrent generation requests
+            that can be processed simultaneously. Defaults to 1.
+    """
+
+    # Public attributes
     model: nn.Module
     tokenizer: TokenizerWrapper
-    detokenizer: StreamingDetokenizer
     model_type: str | None
-    max_kv_size: int | None
-    max_seq_nums: int
-    kv_bits: int | None
-    kv_group_size: int | None
-    quantized_kv_start: int | None
+
+    # Private attributes
+    _detokenizer: StreamingDetokenizer
+    _model_path: Path
+    _max_kv_size: int | None
+    _max_seq_nums: int
     _generation_thread: Thread
     _requests = Queue()
     _prompt_cache = LRUPromptCache()
@@ -77,49 +70,58 @@ class BatchedModelKit:
         # vocab_only: bool = False,
         max_kv_size: int | None = None,
         max_seq_nums: int | None = None,
-        kv_bits: int | None = None,
-        kv_group_size: int | None = None,
-        quantized_kv_start: int | None = None,
     ):
-        if kv_bits and max_kv_size is not None:
-            # Quantized KV cache is only supported for non-rotating KV cache
-            logger.warning("max_kv_size is ignored when using KV cache quantization")
-            max_kv_size = None
-
         if max_seq_nums is None or max_seq_nums < 1:
             max_seq_nums = 1
             logger.info(f"Setting concurrent request limit to {max_seq_nums}")
-        self.max_seq_nums = max_seq_nums
+        self._max_seq_nums = max_seq_nums
 
-        self.model_path = model_path
+        self._model_path = model_path
         logger.info(f"Loading model from {model_path}...")
         config_json = json.loads((model_path / "config.json").read_text())
         self.model_type = config_json.get("model_type", None)
 
-        self.model, self.tokenizer = mlx_lm.utils.load(self.model_path, lazy=False)
+        self.model, self.tokenizer = mlx_lm.utils.load(self._model_path, lazy=False)
         fix_mistral_pre_tokenizer(
             tokenizer=self.tokenizer, model_path=model_path, model_type=self.model_type
         )
-        self.detokenizer = self.tokenizer.detokenizer
-        self.kv_bits = kv_bits
-        self.kv_group_size = kv_group_size
-        self.quantized_kv_start = quantized_kv_start
-        self.max_kv_size = max_kv_size
+        self._detokenizer = self.tokenizer.detokenizer
+        self._max_kv_size = max_kv_size
         logger.info("BatchedModelKit loaded successfully")
 
     def start(self):
+        """
+        Start the background generation thread.
+
+        Synchronizes MLX operations and launches a background thread that continuously
+        processes generation requests from the queue.
+        """
         mx.synchronize()  # Defensively sync before launching a new thread
         self._generation_thread = Thread(target=self._generate_with_exception_handling)
         self._generation_thread.start()
 
     def tokenize(self, prompt: str) -> list[int]:
+        """
+        Convert a text prompt into a list of token IDs.
+
+        Args:
+            prompt (str): The text prompt to tokenize
+
+        Returns:
+            list[int]: List of token IDs
+        """
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
         if isinstance(ids, int):
             return [ids]
         return ids
 
     def is_cross_prompt_cache_active(self) -> bool:
-        """Batched backend handles caching internally."""
+        """
+        Check if cross-prompt caching is enabled.
+
+        Returns:
+            bool: Always False for BatchedModelKit as it handles caching internally
+        """
         return False
 
     def generate(
@@ -133,6 +135,27 @@ class BatchedModelKit:
         top_logprobs,
         max_tokens,
     ):
+        """
+        Submit a generation request and return an iterator of generation results.
+
+        This method queues a generation request to the background thread and returns
+        an iterator that yields BatchedGenerationResponse objects as tokens are generated.
+
+        Args:
+            prompt_tokens: List of token IDs representing the input prompt
+            request_id: Unique identifier for this generation request
+            sampler: Sampling function for token selection
+            logits_processors: List of logits processors to apply
+            prompt_progress_callback: Callback for reporting prompt processing progress
+            top_logprobs: Number of top token probabilities to return
+            max_tokens: Maximum number of tokens to generate
+
+        Yields:
+            BatchedGenerationResponse: Generated tokens with their probabilities
+
+        Raises:
+            RuntimeError: If model is shutdown or an exception occurred in the backend
+        """
         # Do not accept new requests if error or shutdown
         if self._shutdown.is_set():
             raise RuntimeError("Cannot accept new requests when model is shutdown")
@@ -153,6 +176,15 @@ class BatchedModelKit:
         )
 
         def _inner():
+            """
+            Generator that pulls responses from the queue and yields them to the caller.
+
+            Handles three types of responses from the background thread:
+            1. None: Signals generation completion
+            2. Exception: Re-raises exceptions from the background thread
+            3. Tuple: Prompt progress updates (processed, total)
+            4. BatchedGenerationResponse: Generated tokens to yield
+            """
             while True:
                 response = response_queue.get()
                 if response is None:
@@ -168,15 +200,38 @@ class BatchedModelKit:
         return _inner()
 
     def remove(self, request_id: str):
+        """
+        Cancel a generation request by its request ID.
+
+        Queues a cancellation request to the background thread. The request will be
+        removed from the batch and its response queue will receive a RequestCancelled
+        exception.
+
+        Args:
+            request_id (str): Unique identifier of the request to cancel
+        """
         self._requests.put(CancelGenerationRequest(request_id))
 
     def shutdown(self):
+        """
+        Shutdown the background generation thread and clean up resources.
+
+        Sets the shutdown flag and waits for the generation thread to complete.
+        All pending requests will receive a RequestCancelled exception.
+        """
         if not self._shutdown.is_set():
             self._shutdown.set()
             if self._generation_thread:
                 self._generation_thread.join()
 
     def _generate_with_exception_handling(self):
+        """
+        Wrapper around _generate that catches and handles fatal exceptions.
+
+        If an exception occurs during generation, it logs the error, stores it
+        in _backend_exception, sends it to all active request queues, and exits
+        the process after a brief delay.
+        """
         try:
             self._generate()
         except Exception:
@@ -186,7 +241,28 @@ class BatchedModelKit:
             for entry in self._batch_results.values():
                 entry["rqueue"].put(self._backend_exception)
 
+            # Sleep to allow error messages to be logged and propagated to clients
+            time.sleep(3)
+
+            # Exit with non-zero code because the backend scheduler is dead and cannot recover.
+            # Continuing would leave the process in a broken state where new requests hang indefinitely.
+            sys.exit(1)
+
     def _generate(self):
+        """
+        Main generation loop running in the background thread.
+
+        This method continuously processes requests from the queue:
+        1. Accepts new generation requests and adds them to the batch
+        2. Handles cancellation requests by removing requests from the batch
+        3. Generates tokens for all active requests in the batch
+        4. Sends generated tokens back through each request's response queue
+        5. Manages prompt caching for efficient reuse of common prefixes
+
+        The loop runs until shutdown is requested, at which point all active
+        requests receive a RequestCancelled exception.
+        """
+
         def progress_callback(info):
             for uid, processed, total in info:
                 if uid in self._batch_results:
@@ -197,7 +273,7 @@ class BatchedModelKit:
         batch_generator = BatchGenerator(
             self.model,
             max_tokens=10000000,
-            completion_batch_size=self.max_seq_nums,
+            completion_batch_size=self._max_seq_nums,
             # As soon as we receive any prompt, stop decoding, prefill the new prompt, and add it to the decoding batch
             # We probably want to make this behavior configurable, so that new prompts do not pause existing decodes
             prefill_batch_size=1,
@@ -205,8 +281,7 @@ class BatchedModelKit:
             sampler=None,
             logits_processors=None,
             prompt_progress_callback=progress_callback,
-            # TODO(christian): uncomment after merge of https://github.com/ml-explore/mlx-lm/pull/834
-            # max_kv_size=self.max_kv_size,
+            max_kv_size=self._max_kv_size,
         )
         # only using one model, so model key name value does not matter
         current_model_key = "key"
@@ -255,7 +330,6 @@ class BatchedModelKit:
                     logits_processors=[request.logits_processors],
                 )
                 self._batch_results[uid] = {
-                    # "ctx": ctx,
                     "cache_key": request.prompt_tokens[:],
                     "rqueue": request.rqueue,
                     "detokenizer": self.tokenizer.detokenizer,
@@ -323,9 +397,6 @@ class BatchedModelKit:
                                 current_model_key, result["cache_key"], r.prompt_cache
                             )
                             del self._batch_results[r.uid]
-
-                        # if result["ctx"]._should_stop:
-                        #     uids_to_remove.append(r.uid)
 
                     if uids_to_remove:
                         batch_generator.remove(uids_to_remove)
