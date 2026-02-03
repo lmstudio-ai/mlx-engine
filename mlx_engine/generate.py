@@ -1,5 +1,6 @@
-from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
-from typing import Iterator, List, Literal, NamedTuple, Optional
+from contextlib import contextmanager
+from mlx_engine.model_kit.batched_model_kit import BatchedModelKit, RequestCancelled
+from typing import Iterator, List, Optional
 import json
 import logging
 from pathlib import Path
@@ -23,6 +24,11 @@ from mlx_engine.stop_string_processor import (
     StopStringProcessor,
     StopStringProcessorResult,
 )
+from mlx_engine.utils.generation_result import (
+    GenerationStopCondition,
+    GenerationResult,
+    construct_user_cancelled_result,
+)
 from mlx_engine.utils.set_seed import set_seed
 from mlx_engine.utils.speculative_decoding import (
     determine_draft_model_for_generation,
@@ -42,36 +48,8 @@ from mlx_engine.utils.prompt_progress_reporter import (
 
 MAX_TOP_LOGPROBS = 10
 
-StopReason = Literal["eos_token", "stop_string", "user_cancelled"]
 
 logger = logging.getLogger(__name__)
-
-
-class GenerationStopCondition(NamedTuple):
-    stop_reason: StopReason
-    stop_string: str
-    # sequence of token ids that the stop string was found in
-    stop_tokens: List[int]
-
-
-class GenerationResult(NamedTuple):
-    text: str
-    tokens: List[Token]
-    top_logprobs: List[List[Token]]
-    stop_condition: Optional[GenerationStopCondition]
-
-
-def construct_user_cancelled_result():
-    return GenerationResult(
-        text="",
-        tokens=[],
-        top_logprobs=[],
-        stop_condition=GenerationStopCondition(
-            stop_reason="user_cancelled",
-            stop_string="",
-            stop_tokens=[],
-        ),
-    )
 
 
 def _handle_stop_string_detected(
@@ -289,6 +267,16 @@ def create_generator(
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
 
+@contextmanager
+def _sequential_generation_lock(model_kit: ModelKit | VisionModelKit):
+    with model_kit.generation_lock:
+        model_kit.stop_generation.clear()
+        try:
+            yield
+        finally:
+            model_kit.stop_generation.clear()
+
+
 def _sequential_generation(
     model_kit: ModelKit | VisionModelKit,
     prompt_tokens: List[int],
@@ -311,7 +299,11 @@ def _sequential_generation(
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
 ):
-    with model_kit.generation_lock:
+    with _sequential_generation_lock(model_kit):
+        if model_kit.is_shutdown():
+            yield construct_user_cancelled_result()
+            return
+
         set_seed(seed)
 
         generate_args = {}
@@ -457,7 +449,7 @@ def _sequential_generation(
             **generate_args,
         )
 
-        while True:
+        while not model_kit.is_shutdown() and not model_kit.stop_generation.is_set():
             try:
                 generation_result = next(stream)
             except StopIteration:
@@ -530,6 +522,8 @@ def _sequential_generation(
                 token_buffer = []
                 top_logprobs_buffer = []
                 text = ""
+        yield construct_user_cancelled_result()
+        return
 
 
 def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
@@ -664,6 +658,9 @@ def _batched_generation(
             generation_result = next(stream)
         except StopIteration:
             break
+        except RequestCancelled:
+            yield construct_user_cancelled_result()
+            return
         # TODO: implement this
         # except StopPromptProcessing:
         #     yield construct_user_cancelled_result()
@@ -727,20 +724,22 @@ def _batched_generation(
             text = ""
 
 
-def stop_generation(model_kit: BatchedModelKit, request_id: str):
+def stop_generation(
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit, request_id: str
+):
     """
-    Register stop request based off of request_id. For now, this is only supported for `BatchedModelKit`, but this may be extended in the future
+    Register stop request based off of request_id
     """
-    if not isinstance(model_kit, BatchedModelKit):
-        logger.error(
-            f"cannot cancel {request_id=}, this API is only available during batched generation"
-        )
+    logger.error(f"registering stop request for {request_id=}")
+    if isinstance(model_kit, BatchedModelKit):
+        if request_id is None or request_id == "":
+            logger.error("request_id cannot be empty in stop request")
+            return
+        model_kit.remove(request_id)
         return
-    if request_id is None or request_id == "":
-        logger.error("request_id cannot be empty in stop request")
-    model_kit.remove(request_id)
+
+    model_kit.stop_generation.set()
 
 
 def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit):
-    if isinstance(model_kit, BatchedModelKit):
-        model_kit.shutdown()
+    model_kit.shutdown()

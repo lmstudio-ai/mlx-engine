@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class GenerationResponse:
+class BatchedGenerationResponse:
     """Response object for batched generation, containing computed logprobs."""
 
     text: str
@@ -32,6 +32,10 @@ class GenerationResponse:
     top_logprobs: list[Token] | None
     finish_reason: str | None
     from_draft: bool = False
+
+
+class RequestCancelled(Exception):
+    """Signals successfully cancelled generation"""
 
 
 @dataclass
@@ -171,8 +175,6 @@ class BatchedModelKit:
             self._shutdown.set()
             if self._generation_thread:
                 self._generation_thread.join()
-            for entry in self._batch_results.values():
-                entry["rqueue"].put(Exception("Model shutdown requested"))
 
     def _generate_with_exception_handling(self):
         try:
@@ -232,6 +234,7 @@ class BatchedModelKit:
                         if entry.get("request_id") == request_id:
                             found_request_id = True
                             batch_generator.remove([uid])
+                            self._batch_results[uid]["rqueue"].put(RequestCancelled())
                             del self._batch_results[uid]
                             break
                     if not found_request_id:
@@ -304,7 +307,7 @@ class BatchedModelKit:
                             ]
 
                         result["rqueue"].put(
-                            GenerationResponse(
+                            BatchedGenerationResponse(
                                 text=result["detokenizer"].last_segment,
                                 token=r.token,
                                 token_logprob=token_logprob,
@@ -326,6 +329,9 @@ class BatchedModelKit:
 
                     if uids_to_remove:
                         batch_generator.remove(uids_to_remove)
+
+        for entry in self._batch_results.values():
+            entry["rqueue"].put(RequestCancelled("Model shutdown requested"))
 
     def __del__(self):
         self.shutdown()

@@ -60,6 +60,8 @@ class ModelKit:
     draft_model: Optional[nn.Module] = None
     model_type: Optional[str] = None
     generation_lock = threading.Lock()
+    stop_generation = threading.Event()
+    _shutdown = threading.Event()
 
     # multi-modal add-ons
     vision_add_on: Optional[BaseVisionAddOn] = None
@@ -234,3 +236,10 @@ class ModelKit:
             self.cache_wrapper.unset_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
         mx.clear_cache()
+
+    def shutdown(self) -> None:
+        self.stop_generation.set()
+        self._shutdown.set()
+
+    def is_shutdown(self) -> None:
+        return self._shutdown.is_set()
