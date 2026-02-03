@@ -60,7 +60,7 @@ class ModelKit:
     draft_model: Optional[nn.Module] = None
     model_type: Optional[str] = None
     generation_lock = threading.Lock()
-    stop_generation = threading.Event()
+    pending_requests: dict[str, threading.Event] = {}
     _shutdown = threading.Event()
 
     # multi-modal add-ons
@@ -237,8 +237,14 @@ class ModelKit:
         # Noticed that draft model memory would not be released without clearing metal cache
         mx.clear_cache()
 
+    def cancel_request(self, request_id: str) -> bool:
+        """Cancel a pending or active request by ID. Returns True if request was found."""
+        if request_id in self.pending_requests:
+            self.pending_requests[request_id].set()
+            return True
+        return False
+
     def shutdown(self) -> None:
-        self.stop_generation.set()
         self._shutdown.set()
 
     def is_shutdown(self) -> None:

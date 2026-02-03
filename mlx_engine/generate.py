@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 import sys
+import threading
 
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_lm.generate import stream_generate
@@ -263,18 +264,40 @@ def create_generator(
     """
     if isinstance(model_kit, BatchedModelKit):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
-    kwargs.pop("request_id", None)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
 
 @contextmanager
-def _sequential_generation_lock(model_kit: ModelKit | VisionModelKit):
-    with model_kit.generation_lock:
-        model_kit.stop_generation.clear()
+def _sequential_gen_abort_handler(
+    model_kit: ModelKit | VisionModelKit, request_id: str
+):
+    """
+    Acquires the generation lock for sequential generation, with support for cancellation.
+
+    Creates a per-request cancellation event that can be signaled while waiting for the lock
+    or during generation.
+    """
+
+    cancel_event = threading.Event()
+    model_kit.pending_requests[request_id] = cancel_event
+
+    try:
+        # Try to acquire lock, checking for cancellation while waiting
+        while True:
+            if cancel_event.is_set() or model_kit.is_shutdown():
+                # The request is cancelled. Bypass acquiring the lock and let the generator yield a "user cancelled" result
+                yield cancel_event
+                return
+
+            if model_kit.generation_lock.acquire(timeout=0.1):
+                break
+
         try:
-            yield
+            yield cancel_event
         finally:
-            model_kit.stop_generation.clear()
+            model_kit.generation_lock.release()
+    finally:
+        del model_kit.pending_requests[request_id]
 
 
 def _sequential_generation(
@@ -298,9 +321,10 @@ def _sequential_generation(
     max_tokens: Optional[int] = 10000000,
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
+    request_id: Optional[str] = None,
 ):
-    with _sequential_generation_lock(model_kit):
-        if model_kit.is_shutdown():
+    with _sequential_gen_abort_handler(model_kit, request_id) as cancel_event:
+        if cancel_event.is_set() or model_kit.is_shutdown():
             yield construct_user_cancelled_result()
             return
 
@@ -449,7 +473,7 @@ def _sequential_generation(
             **generate_args,
         )
 
-        while not model_kit.is_shutdown() and not model_kit.stop_generation.is_set():
+        while not model_kit.is_shutdown() and not cancel_event.is_set():
             try:
                 generation_result = next(stream)
             except StopIteration:
@@ -730,15 +754,16 @@ def stop_generation(
     """
     Register stop request based off of request_id
     """
-    logger.error(f"registering stop request for {request_id=}")
+    if request_id is None or request_id == "":
+        logger.error("request_id cannot be empty in stop request")
+        return
+
     if isinstance(model_kit, BatchedModelKit):
-        if request_id is None or request_id == "":
-            logger.error("request_id cannot be empty in stop request")
-            return
         model_kit.remove(request_id)
         return
 
-    model_kit.stop_generation.set()
+    if not model_kit.cancel_request(request_id):
+        logger.warning(f"Could not cancel {request_id=} (request not found)")
 
 
 def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit):
