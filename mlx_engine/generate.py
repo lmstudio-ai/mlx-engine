@@ -133,6 +133,7 @@ def load_model(
     vocab_only: bool = False,
     max_kv_size: int | None = 4096,
     max_seq_nums: int | None = 4,
+    seed: int | None = None,
     trust_remote_code: bool = False,
     kv_bits: Optional[int] = None,
     kv_group_size: Optional[int] = None,
@@ -164,6 +165,7 @@ def load_model(
         json.JSONDecodeError: If config.json exists but contains invalid JSON
         ValueError: If the model configuration is invalid or unsupported
     """
+    set_seed(seed)
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
     model_type = config_json.get("model_type", None)
