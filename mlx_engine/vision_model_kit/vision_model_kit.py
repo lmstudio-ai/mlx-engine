@@ -13,6 +13,7 @@ import mlx_lm
 from pathlib import Path
 import mlx.core as mx
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ class VisionModelKit(ModelKit):
         vocab_only: bool,
         trust_remote_code: bool,
     ):
+        self.generation_lock = threading.Lock()
+        self.pending_requests = {}
+        self._shutdown = threading.Event()
+
         fix_qwen2_5_vl_image_processor(model_path)
         fix_qwen2_vl_preprocessor(model_path)
         self.config = mlx_vlm.utils.load_config(
