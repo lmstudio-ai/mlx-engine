@@ -30,6 +30,8 @@ from mlx_engine.utils.set_seed import set_seed
 from mlx_engine.utils.speculative_decoding import (
     determine_draft_model_for_generation,
     configure_num_draft_tokens_in_generate_args,
+    is_speculative_decoding_supported,
+    SpeculativeDecodingNotSupportedError,
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
@@ -211,17 +213,29 @@ def load_model(
     return model_kit
 
 
-def load_draft_model(model_kit: ModelKit | VisionModelKit, path: str | Path) -> None:
+def load_draft_model(
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit, path: str | Path
+) -> None:
+    if not is_speculative_decoding_supported(model_kit):
+        raise SpeculativeDecodingNotSupportedError(
+            "Speculative decoding is not supported for batched MLX models."
+        )
     model_kit.load_draft_model(path)
 
 
 def is_draft_model_compatible(
-    model_kit: ModelKit | VisionModelKit, path: str | Path
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit, path: str | Path
 ) -> bool:
+    if not is_speculative_decoding_supported(model_kit):
+        return False
     return model_kit.is_draft_model_compatible(path)
 
 
-def unload_draft_model(model_kit: ModelKit | VisionModelKit) -> None:
+def unload_draft_model(
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit,
+) -> None:
+    if not is_speculative_decoding_supported(model_kit):
+        return
     model_kit.unload_draft_model()
 
 
