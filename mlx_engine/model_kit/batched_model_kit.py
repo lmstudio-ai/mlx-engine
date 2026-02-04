@@ -49,11 +49,11 @@ class BatchedModelKit:
     _max_kv_size: int | None
     _max_seq_nums: int
     _generation_thread: Thread
-    _requests = Queue()
-    _prompt_cache = LRUPromptCache()
-    _batch_results = {}
-    _backend_exception: Exception | None = None
-    _shutdown = Event()
+    _requests: Queue
+    _prompt_cache: LRUPromptCache
+    _batch_results: dict
+    _backend_exception: Exception | None
+    _shutdown: Event
 
     def __init__(
         self,
@@ -61,6 +61,11 @@ class BatchedModelKit:
         max_kv_size: int | None = None,
         max_seq_nums: int | None = None,
     ):
+        self._requests = Queue()
+        self._prompt_cache = LRUPromptCache()
+        self._batch_results = {}
+        self._backend_exception = None
+        self._shutdown = Event()
         if max_seq_nums is None or max_seq_nums < 1:
             max_seq_nums = 1
             logger.info(f"Setting concurrent request limit to {max_seq_nums}")

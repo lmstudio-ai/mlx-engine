@@ -181,6 +181,8 @@ def load_model(
         # Determine if the model can use BatchedModelKit by checking requirements:
         is_batchable = True
         model, _ = mlx_lm_load(model_path, lazy=True)
+        # 0. Vocab-only mode should not use BatchedModelKit
+        is_batchable &= not vocab_only
         # 1. All cache layers must support merging (required for continuous batching)
         is_batchable &= all(hasattr(c, "merge") for c in make_prompt_cache(model))
         del model
@@ -285,7 +287,7 @@ def create_generator(
 
 @contextmanager
 def _sequential_gen_abort_handler(
-    model_kit: ModelKit | VisionModelKit, request_id: str
+    model_kit: ModelKit | VisionModelKit, request_id: Optional[str]
 ):
     """
     Acquires the generation lock for sequential generation, with support for cancellation.
@@ -295,7 +297,14 @@ def _sequential_gen_abort_handler(
     """
 
     cancel_event = threading.Event()
-    model_kit.pending_requests[request_id] = cancel_event
+    should_track_request = True
+    if request_id is None or request_id == "":
+        logger.warning(
+            "request_id missing for sequential generation; cancellation by id is disabled"
+        )
+        should_track_request = False
+    else:
+        model_kit.pending_requests[request_id] = cancel_event
 
     try:
         # Try to acquire lock, checking for cancellation while waiting
@@ -313,7 +322,8 @@ def _sequential_gen_abort_handler(
         finally:
             model_kit.generation_lock.release()
     finally:
-        del model_kit.pending_requests[request_id]
+        if should_track_request:
+            model_kit.pending_requests.pop(request_id, None)
 
 
 def _sequential_generation(
@@ -525,7 +535,8 @@ def _sequential_generation(
                 token_buffer = []
                 top_logprobs_buffer = []
                 text = ""
-        yield construct_user_cancelled_result()
+        if cancel_event.is_set() or model_kit.is_shutdown():
+            yield construct_user_cancelled_result()
         return
 
 

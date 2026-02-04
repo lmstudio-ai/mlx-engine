@@ -59,9 +59,9 @@ class ModelKit:
     quantized_kv_start: Optional[int] = None
     draft_model: Optional[nn.Module] = None
     model_type: Optional[str] = None
-    generation_lock = threading.Lock()
-    pending_requests: dict[str, threading.Event] = {}
-    _shutdown = threading.Event()
+    generation_lock: threading.Lock
+    pending_requests: dict[str, threading.Event]
+    _shutdown: threading.Event
 
     # multi-modal add-ons
     vision_add_on: Optional[BaseVisionAddOn] = None
@@ -121,6 +121,9 @@ class ModelKit:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
     ):
+        self.generation_lock = threading.Lock()
+        self.pending_requests = {}
+        self._shutdown = threading.Event()
         if vocab_only:
             self._vocab_only_init(model_path)
         else:
