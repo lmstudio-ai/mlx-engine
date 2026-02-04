@@ -12,9 +12,6 @@ import mlx.core as mx
 from pathlib import Path
 from queue import Queue
 from queue import Empty as QueueEmpty
-from mlx_lm.models.cache import (
-    make_prompt_cache,
-)
 import time
 from mlx_lm.server import LRUPromptCache
 from mlx_engine.utils.token import Token
@@ -306,8 +303,6 @@ class BatchedModelKit:
                 cache, rest = self._prompt_cache.fetch_nearest_cache(
                     current_model_key, request.prompt_tokens
                 )
-                if cache is None:
-                    cache = make_prompt_cache(self.model)
 
                 # Add to batch
                 (uid,) = batch_generator.insert(
