@@ -556,7 +556,7 @@ def _batched_generation(
     top_k: Optional[int] = None,
     min_p: Optional[float] = None,
     min_tokens_to_keep: Optional[int] = None,
-    seed: Optional[int] = None,
+    seed: Optional[int] = None,  # Seed arg is ignored for batched gen
     json_schema: Optional[str] = None,
     max_tokens: Optional[int] = 10000000,
     speculative_decoding_toggle: Optional[bool] = None,

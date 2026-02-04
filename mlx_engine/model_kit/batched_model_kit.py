@@ -65,6 +65,7 @@ class BatchedModelKit:
         self._prompt_cache = LRUPromptCache()
         self._batch_results = {}
         self._backend_exception = None
+        self._generation_thread = None
         self._shutdown = Event()
         if max_seq_nums is None or max_seq_nums < 1:
             max_seq_nums = 1
@@ -89,7 +90,10 @@ class BatchedModelKit:
         Start the background generation thread.
         """
         mx.synchronize()  # Defensively sync before launching a new thread
-        self._generation_thread = Thread(target=self._generate_with_exception_handling)
+        # Set daemon flag, which tells python it's okay to exit if this is the only alive thread at exit.
+        self._generation_thread = Thread(
+            target=self._generate_with_exception_handling, daemon=True
+        )
         self._generation_thread.start()
 
     def tokenize(self, prompt: str) -> list[int]:
