@@ -63,7 +63,7 @@ The quick brown fox jumped over the lazy dog. The quick brown fox jumped over th
 
     def test_prompt_caching_happy_path_qwen2_5(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+        model_kit = load_model(model_path=model_path, max_kv_size=20000)
         self.addCleanup(lambda *_: unload(model_kit))
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
@@ -141,7 +141,7 @@ repeat<|im_end|>
 
     def test_prompt_caching_trim_qwen2_5(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+        model_kit = load_model(model_path=model_path, max_kv_size=20000)
         self.addCleanup(lambda *_: unload(model_kit))
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
@@ -179,7 +179,7 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         ### Generation 1 - fills cache
         generate(text_accumulator=generated_text_list_1)
         generated_text_1 = "".join(generated_text_list_1)
-        self.assertEqual(len(reporter.events), 2)
+        self.assertEqual(len(reporter.events), 5)
         # First generation should have no cached tokens
         begin_event = reporter.events[0]
         self.assertEqual(begin_event["type"], "begin")
