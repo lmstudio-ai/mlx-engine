@@ -31,28 +31,19 @@ logger = logging.getLogger(__name__)
 
 class BatchedModelKit:
     """
-    Batched model kit for continuous batching of multiple concurrent generation requests.
-
-    This model kit enables efficient processing of multiple generation requests in parallel
-    by using MLX's BatchGenerator. Requests are processed in a background thread that
-    continuously batches and generates tokens for all active requests.
-
-    Note: KV cache quantization is not compatible with batched generation. Models requiring
-    quantization will use the sequential ModelKit instead.
+    This model kit enables continuous batching by running `mlx_lm.BatchGenerator` in a worker thread
 
     Args:
         model_path (Path): Path to the model directory containing model files.
         max_kv_size (Optional[int]): Maximum size of the key-value cache.
         max_seq_nums (Optional[int]): Maximum number of concurrent generation requests
-            that can be processed simultaneously. Defaults to 1.
+            that can be processed simultaneously.
     """
 
-    # Public attributes
     model: nn.Module
     tokenizer: TokenizerWrapper
     model_type: str | None
 
-    # Private attributes
     _detokenizer: StreamingDetokenizer
     _model_path: Path
     _max_kv_size: int | None
@@ -67,7 +58,6 @@ class BatchedModelKit:
     def __init__(
         self,
         model_path: Path,
-        # vocab_only: bool = False,
         max_kv_size: int | None = None,
         max_seq_nums: int | None = None,
     ):
@@ -92,24 +82,12 @@ class BatchedModelKit:
     def start(self):
         """
         Start the background generation thread.
-
-        Synchronizes MLX operations and launches a background thread that continuously
-        processes generation requests from the queue.
         """
         mx.synchronize()  # Defensively sync before launching a new thread
         self._generation_thread = Thread(target=self._generate_with_exception_handling)
         self._generation_thread.start()
 
     def tokenize(self, prompt: str) -> list[int]:
-        """
-        Convert a text prompt into a list of token IDs.
-
-        Args:
-            prompt (str): The text prompt to tokenize
-
-        Returns:
-            list[int]: List of token IDs
-        """
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
         if isinstance(ids, int):
             return [ids]
@@ -136,8 +114,6 @@ class BatchedModelKit:
         max_tokens,
     ):
         """
-        Submit a generation request and return an iterator of generation results.
-
         This method queues a generation request to the background thread and returns
         an iterator that yields BatchedGenerationResponse objects as tokens are generated.
 
@@ -152,6 +128,7 @@ class BatchedModelKit:
 
         Yields:
             BatchedGenerationResponse: Generated tokens with their probabilities
+            Raises Exceptions when generation needs to be stopped
 
         Raises:
             RuntimeError: If model is shutdown or an exception occurred in the backend
@@ -206,9 +183,6 @@ class BatchedModelKit:
         Queues a cancellation request to the background thread. The request will be
         removed from the batch and its response queue will receive a RequestCancelled
         exception.
-
-        Args:
-            request_id (str): Unique identifier of the request to cancel
         """
         self._requests.put(CancelGenerationRequest(request_id))
 
@@ -237,6 +211,7 @@ class BatchedModelKit:
         except Exception:
             err_string = f"Encountered fatal exception in the backend scheduler: {traceback.format_exc()}"
             logger.error(err_string)
+            # Cancel ongoing prediction threads
             self._backend_exception = Exception(err_string)
             for entry in self._batch_results.values():
                 entry["rqueue"].put(self._backend_exception)
@@ -278,13 +253,14 @@ class BatchedModelKit:
             # We probably want to make this behavior configurable, so that new prompts do not pause existing decodes
             prefill_batch_size=1,
             stop_tokens=set(self.tokenizer.eos_token_ids),
+            # Do not set any global post-processors, sampler and logits_processor are set per-request
             sampler=None,
             logits_processors=None,
             prompt_progress_callback=progress_callback,
             max_kv_size=self._max_kv_size,
         )
         # only using one model, so model key name value does not matter
-        current_model_key = "key"
+        current_model_key = "lmstudio"
 
         def get_next_request(timeout=None):
             try:
@@ -303,6 +279,7 @@ class BatchedModelKit:
             # We got a request
             if request is not None:
                 if isinstance(request, CancelGenerationRequest):
+                    # Handle cancel request
                     found_request_id = False
                     request_id = request.request_id
                     for uid, entry in self._batch_results.items():
@@ -316,12 +293,14 @@ class BatchedModelKit:
                         logger.warning(f"Could not cancel {request_id=} (id not found)")
                     continue
 
+                # Get cache
                 cache, rest = self._prompt_cache.fetch_nearest_cache(
                     current_model_key, request.prompt_tokens
                 )
                 if cache is None:
                     cache = make_prompt_cache(self.model)
 
+                # Add to batch
                 (uid,) = batch_generator.insert(
                     [rest],
                     [request.max_tokens],
@@ -329,6 +308,8 @@ class BatchedModelKit:
                     samplers=[request.samplers],
                     logits_processors=[request.logits_processors],
                 )
+
+                # Track this request
                 self._batch_results[uid] = {
                     "cache_key": request.prompt_tokens[:],
                     "rqueue": request.rqueue,
@@ -336,70 +317,71 @@ class BatchedModelKit:
                     "top_logprobs": request.top_logprobs,
                     "request_id": request.request_id,
                 }
+
+                # Check for new requests
                 continue
 
             # No request so serve from the current batch
-            elif batch_generator is not None:
-                if len(self._batch_results) == 0:
-                    continue
+            if len(self._batch_results) == 0:
+                continue
 
-                uids_to_remove = []
-                time_budget = 0.5
-                start = time.time()
-                while True:
-                    if time.time() - start > time_budget:
-                        break
+            time_budget = 0.5
+            start = time.time()
+            while True:
+                if time.time() - start > time_budget:
+                    break
 
-                    responses = batch_generator.next()
-                    if not responses:
-                        break
+                responses = batch_generator.next()
+                if not responses:
+                    break
 
-                    for r in responses:
-                        result = self._batch_results[r.uid]
-                        result["cache_key"].append(r.token)
-                        if r.finish_reason != "stop":
-                            result["detokenizer"].add_token(r.token)
+                for r in responses:
+                    # Create response object
+                    result = self._batch_results[r.uid]
+                    result["cache_key"].append(r.token)
+                    if r.finish_reason != "stop":
+                        result["detokenizer"].add_token(r.token)
+                    token_logprob = r.logprobs[r.token].item()
+                    top_logprobs_list = None
 
-                        token_logprob = r.logprobs[r.token].item()
-                        top_logprobs_list = None
-                        if result["top_logprobs"] > 0:
-                            sorted_indices = mx.argpartition(
-                                -r.logprobs, kth=result["top_logprobs"] - 1
-                            )
-                            top_indices = sorted_indices[: result["top_logprobs"]]
-                            top_logprobs_values = r.logprobs[top_indices]
-
-                            top_logprobs_list = [
-                                Token(
-                                    id=int(idx),
-                                    text=self.tokenizer.decode(idx),
-                                    logprob=float(prob),
-                                )
-                                for idx, prob in zip(
-                                    top_indices.tolist(), top_logprobs_values.tolist()
-                                )
-                            ]
-
-                        result["rqueue"].put(
-                            BatchedGenerationResponse(
-                                text=result["detokenizer"].last_segment,
-                                token=r.token,
-                                token_logprob=token_logprob,
-                                top_logprobs=top_logprobs_list,
-                                finish_reason=r.finish_reason,
-                                from_draft=False,
-                            )
+                    # Ensure MLX-based logprob processing happens in this MLX worker thread
+                    if result["top_logprobs"] > 0:
+                        sorted_indices = mx.argpartition(
+                            -r.logprobs, kth=result["top_logprobs"] - 1
                         )
+                        top_indices = sorted_indices[: result["top_logprobs"]]
+                        top_logprobs_values = r.logprobs[top_indices]
 
-                        if r.finish_reason is not None:
-                            result["rqueue"].put(None)
-                            self._prompt_cache.insert_cache(
-                                current_model_key, result["cache_key"], r.prompt_cache
+                        top_logprobs_list = [
+                            Token(
+                                id=int(idx),
+                                text=self.tokenizer.decode(idx),
+                                logprob=float(prob),
                             )
-                            del self._batch_results[r.uid]
+                            for idx, prob in zip(
+                                top_indices.tolist(), top_logprobs_values.tolist()
+                            )
+                        ]
 
-                    if uids_to_remove:
-                        batch_generator.remove(uids_to_remove)
+                    # Send the result
+                    result["rqueue"].put(
+                        BatchedGenerationResponse(
+                            text=result["detokenizer"].last_segment,
+                            token=r.token,
+                            token_logprob=token_logprob,
+                            top_logprobs=top_logprobs_list,
+                            finish_reason=r.finish_reason,
+                            from_draft=False,
+                        )
+                    )
+
+                    # Clean up if necessary
+                    if r.finish_reason is not None:
+                        result["rqueue"].put(None)
+                        self._prompt_cache.insert_cache(
+                            current_model_key, result["cache_key"], r.prompt_cache
+                        )
+                        del self._batch_results[r.uid]
 
         for entry in self._batch_results.values():
             entry["rqueue"].put(RequestCancelled("Model shutdown requested"))

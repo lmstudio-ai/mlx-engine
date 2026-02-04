@@ -14,14 +14,6 @@ from mlx_engine.utils.token import Token
 class BatchedGenerationResponse:
     """
     Response object for batched generation containing a single generated token.
-
-    Attributes:
-        text (str): The decoded text segment for this token
-        token (int): The generated token ID
-        token_logprob (float): Log probability of the generated token
-        top_logprobs (list[Token] | None): Top token probabilities if requested
-        finish_reason (str | None): Reason for completion (e.g., "stop", "length") if finished
-        from_draft (bool): Whether this token came from draft model (currently always False)
     """
 
     text: str
@@ -45,15 +37,6 @@ class RequestCancelled(Exception):
 class GenerationRequest:
     """
     Internal request object for queuing generation requests.
-
-    Attributes:
-        rqueue (Queue): Response queue for streaming results back to the caller
-        prompt_tokens (list[int]): Token IDs for the input prompt
-        request_id (str): Unique identifier for this request
-        samplers (object): Sampling function for token selection
-        logits_processors (list): List of logits processors to apply
-        top_logprobs (int): Number of top token probabilities to return
-        max_tokens (int): Maximum number of tokens to generate
     """
 
     rqueue: Queue
@@ -69,9 +52,6 @@ class GenerationRequest:
 class CancelGenerationRequest:
     """
     Internal request object for cancelling a generation request.
-
-    Attributes:
-        request_id (str): Unique identifier of the request to cancel
     """
 
     request_id: str

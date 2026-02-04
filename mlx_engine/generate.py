@@ -161,13 +161,9 @@ def load_model(
     # 1. VisionModelKit: for vision models not yet supported by ModelKit's vision implementation
     # 2. BatchedModelKit: for models that support continuous batching (can process multiple requests concurrently)
     # 3. ModelKit: fallback for all other cases (sequential processing)
-
-    # Check if this is a vision model that needs the legacy VisionModelKit
-    # (ModelKit now supports some vision architectures directly)
     if "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
         model_type
     ):
-        # VisionModelKit doesn't support KV cache quantization
         if any([kv_bits, kv_group_size, quantized_kv_start]):
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
@@ -194,14 +190,12 @@ def load_model(
         is_batchable &= "vision_config" not in config_json
 
         if is_batchable:
-            # Use BatchedModelKit for continuous batching (multiple concurrent requests)
             model_kit = BatchedModelKit(
                 model_path,
                 max_kv_size=max_kv_size,
                 max_seq_nums=max_seq_nums,
             )
         else:
-            # Use ModelKit for sequential processing (one request at a time)
             model_kit = ModelKit(
                 model_path,
                 vocab_only,
@@ -398,13 +392,13 @@ def _sequential_generation(
             # input embeddings not yet supported for speculative decoding in mlx-lm
             generate_args["input_embeddings"] = input_embeddings
 
-        # Setup logits processors (will add JSON schema processor later if needed)
+        # Setup logits processors
         logits_processors = setup_logits_processors(
             repetition_penalty,
             repetition_penalty_kwargs,
             prompt_tokens,
             input_tokens,
-            None,  # json_schema added separately below
+            None,
             model_kit.tokenizer,
         )
 
@@ -568,14 +562,14 @@ def _batched_generation(
         repetition_penalty, repetition_context_size
     )
 
-    # Setup logits processors (will add JSON schema processor later if needed)
+    # Setup logits processors
     tokenizer = model_kit.tokenizer
     logits_processors = setup_logits_processors(
         repetition_penalty,
         repetition_penalty_kwargs,
         prompt_tokens,
         input_tokens,
-        None,  # json_schema added separately below
+        None,
         tokenizer,
     )
 
@@ -626,7 +620,7 @@ def _batched_generation(
             yield construct_user_cancelled_result()
             return
         # TODO: implement this - MLX doesn't yet support cancelling during prompt processing
-        # for batched generation (only during token generation via RequestCancelled)
+        # for batched generation
         # except StopPromptProcessing:
         #     yield construct_user_cancelled_result()
         #     return

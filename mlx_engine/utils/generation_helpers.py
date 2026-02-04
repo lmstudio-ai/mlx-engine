@@ -25,16 +25,6 @@ MAX_TOP_LOGPROBS = 10
 def setup_repetition_penalty(
     repetition_penalty: Optional[float], repetition_context_size: Optional[int]
 ) -> dict:
-    """
-    Setup repetition penalty parameters.
-
-    Args:
-        repetition_penalty: Penalty factor for repeated tokens
-        repetition_context_size: Number of previous tokens to consider
-
-    Returns:
-        dict: Dictionary of repetition penalty kwargs
-    """
     repetition_penalty_kwargs = {}
     if repetition_penalty is not None:
         repetition_penalty_kwargs["repetition_penalty"] = repetition_penalty
@@ -53,20 +43,6 @@ def setup_logits_processors(
     json_schema: Optional[str],
     tokenizer: TokenizerWrapper,
 ) -> List:
-    """
-    Setup logits processors for repetition penalty and JSON schema.
-
-    Args:
-        repetition_penalty: Penalty factor for repeated tokens
-        repetition_penalty_kwargs: Dictionary of repetition penalty parameters
-        prompt_tokens: Full prompt token list
-        input_tokens: Input tokens to process
-        json_schema: Optional JSON schema for structured output
-        tokenizer: The tokenizer instance
-
-    Returns:
-        List: List of configured logits processors
-    """
     logits_processors = []
 
     if repetition_penalty and repetition_penalty != 0.0:
@@ -100,19 +76,6 @@ def create_sampler(
     min_tokens_to_keep: Optional[int],
     top_k: Optional[int],
 ):
-    """
-    Create sampler with filtering non-None parameters.
-
-    Args:
-        temp: Temperature for sampling
-        top_p: Top-p (nucleus) sampling parameter
-        min_p: Minimum probability threshold
-        min_tokens_to_keep: Minimum number of tokens to keep
-        top_k: Top-k sampling parameter
-
-    Returns:
-        Sampler function configured with the provided parameters
-    """
     return make_sampler(
         **{
             k: v
@@ -129,18 +92,6 @@ def create_sampler(
 
 
 def validate_top_logprobs(top_logprobs: Optional[int]) -> int:
-    """
-    Validate and normalize top_logprobs parameter.
-
-    Args:
-        top_logprobs: Number of top token probabilities to return
-
-    Returns:
-        int: Normalized top_logprobs value (0 if None)
-
-    Raises:
-        ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS
-    """
     if top_logprobs is None:
         top_logprobs = 0
     if top_logprobs > MAX_TOP_LOGPROBS:
@@ -153,16 +104,6 @@ def validate_top_logprobs(top_logprobs: Optional[int]) -> int:
 def create_stop_string_processor(
     stop_strings: Optional[List[str]], tokenizer: TokenizerWrapper
 ) -> Optional[StopStringProcessor]:
-    """
-    Create stop string processor if stop_strings are provided.
-
-    Args:
-        stop_strings: List of strings that trigger generation to stop
-        tokenizer: The tokenizer instance
-
-    Returns:
-        Optional[StopStringProcessor]: Processor instance or None if no stop strings
-    """
     if stop_strings is not None and len(stop_strings) > 0:
         return StopStringProcessor(stop_strings, tokenizer)
     return None
@@ -171,19 +112,6 @@ def create_stop_string_processor(
 def process_stop_string_check(
     stop_string_processor: Optional[StopStringProcessor], token: int
 ) -> Tuple[bool, bool, Optional[StopStringProcessorResult]]:
-    """
-    Process token with stop string processor.
-
-    Args:
-        stop_string_processor: The stop string processor instance or None
-        token: Token ID to process
-
-    Returns:
-        tuple: (should_stop, should_buffer, processor_result)
-            - should_stop: True if generation should stop
-            - should_buffer: True if we should buffer without yielding
-            - processor_result: The processor result if should_stop is True
-    """
     if stop_string_processor is None:
         return False, False, None
 
@@ -201,19 +129,6 @@ def process_stop_string_check(
 def should_yield_token(
     text: str, token: int, tokenizer: TokenizerWrapper
 ) -> Tuple[bool, Optional[GenerationStopCondition]]:
-    """
-    Determine if token should be yielded and create stop condition if EOS.
-
-    Args:
-        text: Current generated text segment
-        token: Token ID to check
-        tokenizer: The tokenizer instance
-
-    Returns:
-        tuple: (should_yield, stop_condition)
-            - should_yield: True if the token should be yielded
-            - stop_condition: GenerationStopCondition if EOS token, None otherwise
-    """
     if text or token in tokenizer.eos_token_ids:
         stop_condition = None
         if token in tokenizer.eos_token_ids:
