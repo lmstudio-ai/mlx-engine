@@ -180,7 +180,10 @@ def load_model(
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
             )
-        warn_if_parallel("vision models do not support continuous batching yet")
+        if parallel_requested:
+            raise ValueError(
+                "numParallelSessions must be 1 for vision models as they do not currently support continuous batching"
+            )
         model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
     else:
         # For non-vision models or ModelKit-supported vision models, choose between
@@ -214,9 +217,10 @@ def load_model(
                 return False
             # 3. Vision models are not compatible with batching yet
             if "vision_config" in config_json:
-                warn_if_parallel(
-                    "concurrency is not supported with image models right now"
-                )
+                if parallel_requested:
+                    raise ValueError(
+                        "numParallelSessions must be 1 for vision models as they do not currently support continuous batching"
+                    )
                 return False
             return True
 
