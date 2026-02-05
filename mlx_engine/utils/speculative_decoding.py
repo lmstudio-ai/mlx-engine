@@ -3,8 +3,19 @@ import mlx.nn as nn
 import logging
 
 from mlx_engine.model_kit.model_kit import ModelKit
+from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 
 logger = logging.getLogger(__name__)
+
+
+class SpeculativeDecodingNotSupportedError(RuntimeError):
+    pass
+
+
+def is_speculative_decoding_supported(
+    model_kit: ModelKit | BatchedModelKit,
+) -> bool:
+    return not isinstance(model_kit, BatchedModelKit)
 
 
 def determine_draft_model_for_generation(

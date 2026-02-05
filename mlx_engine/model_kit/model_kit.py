@@ -13,10 +13,10 @@ from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
-from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,9 @@ class ModelKit:
     quantized_kv_start: Optional[int] = None
     draft_model: Optional[nn.Module] = None
     model_type: Optional[str] = None
+    generation_lock: threading.Lock
+    pending_requests: dict[str, threading.Event]
+    _shutdown: threading.Event
 
     # multi-modal add-ons
     vision_add_on: Optional[BaseVisionAddOn] = None
@@ -77,11 +80,6 @@ class ModelKit:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
     ):
-        kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
-            kv_bits,
-            kv_group_size,
-            quantized_kv_start,
-        )
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
             logger.warning("max_kv_size is ignored when using KV cache quantization")
@@ -123,6 +121,9 @@ class ModelKit:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
     ):
+        self.generation_lock = threading.Lock()
+        self.pending_requests = {}
+        self._shutdown = threading.Event()
         if vocab_only:
             self._vocab_only_init(model_path)
         else:
@@ -133,6 +134,9 @@ class ModelKit:
                 kv_group_size,
                 quantized_kv_start,
             )
+
+    def start(self):
+        mx.synchronize()
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
@@ -235,3 +239,16 @@ class ModelKit:
             self.cache_wrapper.unset_draft_model()
         # Noticed that draft model memory would not be released without clearing metal cache
         mx.clear_cache()
+
+    def cancel_request(self, request_id: str) -> bool:
+        """Cancel a pending or active request by ID. Returns True if request was found."""
+        if request_id in self.pending_requests:
+            self.pending_requests[request_id].set()
+            return True
+        return False
+
+    def shutdown(self) -> None:
+        self._shutdown.set()
+
+    def is_shutdown(self) -> None:
+        return self._shutdown.is_set()

@@ -1,4 +1,5 @@
 from typing import Optional
+from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
 
@@ -47,7 +48,7 @@ def _get_eot_token_ids(tokenizer, model_type: Optional[str] = None) -> set[int]:
     return set(single_int + single_element_list)
 
 
-def sanitize_eos_tokens(model_kit: ModelKit | VisionModelKit) -> None:
+def sanitize_eos_tokens(model_kit: ModelKit | VisionModelKit | BatchedModelKit) -> None:
     # Remove (probably) incorrect EOS tokens
     tokenizer = model_kit.tokenizer
     temp_tokens = set()

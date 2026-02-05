@@ -8,7 +8,9 @@ __all__ = [
     "is_draft_model_compatible",
     "unload_draft_model",
     "create_generator",
+    "stop_generation",
     "tokenize",
+    "unload",
 ]
 
 from pathlib import Path
@@ -26,6 +28,8 @@ from .generate import (
     unload_draft_model,
     create_generator,
     tokenize,
+    unload,
+    stop_generation,
 )
 
 patch_huggingface_hub()
