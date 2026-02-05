@@ -157,6 +157,15 @@ def load_model(
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
     model_type = config_json.get("model_type", None)
+    parallel_requested = max_seq_nums is not None and max_seq_nums > 1
+
+    def warn_if_parallel(reason: str) -> None:
+        """Helper to warn about batching not being supported, only if parallel was requested."""
+        if parallel_requested:
+            logger.warning(
+                f"max_concurrent_predictions={max_seq_nums} was specified, but {reason}. "
+                f"The model will process requests sequentially."
+            )
 
     # Determine which model kit to use based on model capabilities and configuration.
     # The decision tree is:
@@ -170,6 +179,7 @@ def load_model(
             raise ValueError(
                 "MLX vision models do not currently support KV cache quantization"
             )
+        warn_if_parallel("vision models do not support continuous batching yet")
         model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
     else:
         # For non-vision models or ModelKit-supported vision models, choose between
@@ -180,20 +190,38 @@ def load_model(
             quantized_kv_start,
         )
 
-        # Determine if the model can use BatchedModelKit by checking requirements:
-        is_batchable = True
-        model, _ = mlx_lm_load(model_path, lazy=True)
-        # 0. Vocab-only mode should not use BatchedModelKit
-        is_batchable &= not vocab_only
-        # 1. All cache layers must support merging (required for continuous batching)
-        is_batchable &= all(hasattr(c, "merge") for c in make_prompt_cache(model))
-        del model
-        # 2. KV cache quantization is not compatible with batching yet
-        is_batchable &= kv_bits is None
-        # 3. Vision models are not compatible with batching yet
-        is_batchable &= "vision_config" not in config_json
+        def is_batchable() -> bool:
+            # 0. Ensure the load isn't vocab only
+            if vocab_only:
+                return False
+            # 1. All cache layers must support merge
+            model, _ = mlx_lm_load(model_path, lazy=True)
+            cache_has_merge_attr = all(
+                hasattr(c, "merge") for c in make_prompt_cache(model)
+            )
+            del model
+            if not cache_has_merge_attr:
+                warn_if_parallel(
+                    "this model architecture does not support continuous batching"
+                )
+                return False
+            # 2. KV cache quantization is not compatible with batching yet
+            if kv_bits is not None:
+                warn_if_parallel(
+                    "concurrency is not supported with KV Cache Quantization"
+                )
+                return False
+            # 3. Vision models are not compatible with batching yet
+            if "vision_config" in config_json:
+                warn_if_parallel(
+                    "concurrency is not supported with image models right now"
+                )
+                return False
+            return True
 
-        if is_batchable:
+        batchable = is_batchable()
+
+        if batchable:
             model_kit = BatchedModelKit(
                 model_path,
                 max_kv_size=max_kv_size,
@@ -555,7 +583,7 @@ def _sequential_generation(
 
 
 def _batched_generation(
-    model_kit: ModelKit | VisionModelKit,
+    model_kit: BatchedModelKit,
     prompt_tokens: List[int],
     *,
     prompt_progress_reporter: Optional[PromptProgressReporter] = None,
@@ -677,6 +705,7 @@ def _batched_generation(
                 token_buffer,
                 top_logprobs_buffer,
             )
+            model_kit.remove(request_id)
             break  # stop generation
 
         # If we currently have generated a partial match with a stop sequence, or detected an
