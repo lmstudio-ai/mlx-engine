@@ -2,6 +2,7 @@ import pytest
 import threading
 import time
 
+from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 from tests.shared import model_getter
 from mlx_engine.generate import load_model, create_generator, tokenize, unload
 
@@ -17,6 +18,8 @@ def model_kit():
 
 def test_batched_generation_two_threads(model_kit):
     """Test batched generation with two concurrent threads."""
+
+    assert isinstance(model_kit, BatchedModelKit)
 
     # Define two different prompts with different topics
     prompts = [
