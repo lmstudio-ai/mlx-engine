@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import uuid
 from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
 from typing import Iterator, List, Optional
@@ -605,8 +606,14 @@ def _batched_generation(
     num_draft_tokens: Optional[int] = None,
     request_id: str | None = None,
 ) -> Iterator[GenerationResult]:
-    input_tokens = prompt_tokens
+    # We need a request_id so that we can communicate with the batched backend
+    if request_id is None or request_id == "":
+        logger.warning(
+            "Received a generation request without a request_id! Please send a request_id"
+        )
+        request_id = uuid.uuid4()
 
+    input_tokens = prompt_tokens
     if prompt_progress_reporter is None:
         prompt_progress_reporter = DefaultPromptProgressReporter()
 
