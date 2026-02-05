@@ -178,6 +178,10 @@ if __name__ == "__main__":
     # Parse arguments
     parser = setup_arg_parser()
     args = parser.parse_args()
+    max_seq_nums = 4
+    if args.images is not None:
+        max_seq_nums = 1
+
     if isinstance(args.images, str):
         args.images = [args.images]
 
@@ -191,6 +195,7 @@ if __name__ == "__main__":
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
         quantized_kv_start=args.quantized_kv_start,
+        max_seq_nums=max_seq_nums,
     )
     print("\rModel load complete ✓", end="\n", flush=True)
 

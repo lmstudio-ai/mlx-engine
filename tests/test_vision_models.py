@@ -50,7 +50,10 @@ class TestVisionModels:
 
         # Load the model
         model_kit = load_model(
-            model_path=model_path, max_kv_size=2048, trust_remote_code=True
+            model_path=model_path,
+            max_kv_size=2048,
+            max_seq_nums=1,
+            trust_remote_code=True,
         )
 
         # Tokenize the prompt
@@ -187,7 +190,11 @@ class TestVisionModels:
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter(model)
 
-        model_kit = load_model(model_path=model_path, max_kv_size=MAX_KV_CACHE_SIZE)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+        )
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
@@ -292,7 +299,11 @@ class TestVisionModels:
 
     def test_qwen2_5_images_across_messages(self):
         model_path = model_getter("mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=MAX_KV_CACHE_SIZE)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+        )
 
         def generate_text(prompt, images_b64):
             prompt_tokens = tokenize(model_kit, prompt)
@@ -455,7 +466,11 @@ You are a helpful assistant.<|im_end|>
     def test_gemma3_text_only_generation_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("mlx-community/gemma-3-4b-it-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=MAX_KV_CACHE_SIZE)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+        )
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
@@ -511,7 +526,11 @@ You are a helpful assistant.<|im_end|>
     def test_gemma3_text_only_long_original_prompt_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("mlx-community/gemma-3-4b-it-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=MAX_KV_CACHE_SIZE)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+        )
         print(type(model_kit))
 
         def generate_text(prompt):
@@ -587,7 +606,11 @@ Summarize this in one sentence<end_of_turn>
     def test_gemma3n_text_only_generation_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=MAX_KV_CACHE_SIZE)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+        )
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
@@ -644,7 +667,11 @@ Summarize this in one sentence<end_of_turn>
     def test_gemma3n_text_only_long_original_prompt_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=MAX_KV_CACHE_SIZE)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+        )
 
         def generate_text(prompt):
             prompt_tokens = tokenize(model_kit, prompt)
@@ -706,7 +733,11 @@ Summarize this in one sentence<end_of_turn>
     def test_gemma3n_vision_long_prompt_progress_reported(self):
         """Ensure progress is reported during prompt processing with a vision prompt"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=MAX_KV_CACHE_SIZE)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+        )
 
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
@@ -758,7 +789,7 @@ Summarize this in one sentence<end_of_turn>
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
-        model_kit = load_model(model_path=model_path)
+        model_kit = load_model(model_path=model_path, max_seq_nums=1)
         assert not is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
 
     @pytest.mark.heavy
