@@ -9,6 +9,7 @@ from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
+from mlx_engine.recurrent_checkpoint_store import RecurrentCheckpointStore
 from mlx_engine.utils.prompt_progress_reporter import (
     PromptProgressReporter,
     StopPromptProcessing,
@@ -56,6 +57,12 @@ class CacheWrapper:
             quantized_kv_start=quantized_kv_start,
         )
         self.chunk_size = chunk_size
+        self._needs_checkpointing = not can_trim_prompt_cache(self.cache)
+        self._checkpoint_store: Optional[RecurrentCheckpointStore] = (
+            RecurrentCheckpointStore(max_checkpoints=8)
+            if self._needs_checkpointing
+            else None
+        )
 
     def _get_num_tokens_in_cache(self) -> int | None:
         """
@@ -131,6 +138,19 @@ class CacheWrapper:
         # Trim the cache if the common prefix is shorter than the current cache
         num_tokens_in_cache = self._get_num_tokens_in_cache()
         if num_tokens_in_cache is None:
+            # For purely recurrent models (no offset attribute), try checkpoint restore
+            if self._checkpoint_store is not None:
+                # Limit search so at least num_tokens_to_exclude tokens remain after restore
+                # (recurrent state can't be trimmed, so we must exclude too-long checkpoints)
+                max_prefix = len(prompt_tokens) - num_tokens_to_exclude
+                result = self._checkpoint_store.find_longest_prefix(prompt_tokens[:max_prefix])
+                if result is not None:
+                    prefix_len, restored_cache = result
+                    self.cache = restored_cache
+                    if self.draft_model is not None:
+                        self.cache += make_prompt_cache(self.draft_model)
+                    self.tokens = prompt_tokens
+                    return prompt_tokens[prefix_len:]
             logger.warning(
                 "Could not determine the number of tokens in the cache, clearing the cache."
             )
@@ -140,6 +160,18 @@ class CacheWrapper:
         num_tokens_to_trim = num_tokens_in_cache - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
+                # Try checkpoint-based restore for non-trimmable (hybrid/recurrent) caches
+                if self._checkpoint_store is not None:
+                    # Limit search so at least num_tokens_to_exclude tokens remain after restore
+                    max_prefix = len(prompt_tokens) - num_tokens_to_exclude
+                    result = self._checkpoint_store.find_longest_prefix(prompt_tokens[:max_prefix])
+                    if result is not None:
+                        prefix_len, restored_cache = result
+                        self.cache = restored_cache
+                        if self.draft_model is not None:
+                            self.cache += make_prompt_cache(self.draft_model)
+                        self.tokens = prompt_tokens
+                        return prompt_tokens[prefix_len:]
                 logger.warning(
                     f"Tried to trim '{num_tokens_to_trim}' tokens from the prompt cache, but could not: Cache is not trimmable. Clearing the cache instead."
                 )
@@ -174,6 +206,8 @@ class CacheWrapper:
         tokens,
         reporter: PromptProgressReporter,
         is_draft: bool,
+        save_checkpoints: bool = False,
+        cached_tokens_before: int = 0,
     ):
         """
         Fill a KV cache for a specific model
@@ -184,6 +218,9 @@ class CacheWrapper:
             tokens: Tokens to process
             reporter: Reporter for reporting progress
             is_draft: Whether this is draft model prefill (True) or main model (False)
+            save_checkpoints: Whether to save cache checkpoints after each chunk (for hybrid/recurrent models)
+            cached_tokens_before: Number of tokens already in the cache before this prefill starts.
+                Used to compute correct checkpoint keys.
         """
         remaining_tokens = tokens
         num_processed = 0
@@ -200,6 +237,11 @@ class CacheWrapper:
             num_processed += current_chunk_size
 
             mx.clear_cache()
+
+            # Save checkpoint after each chunk (when more chunks remain)
+            if save_checkpoints and remaining_tokens.size > 0 and self._checkpoint_store is not None:
+                tokens_in_cache = cached_tokens_before + num_processed
+                self._checkpoint_store.save(self.tokens[:tokens_in_cache], cache)
 
             # Report progress
             should_continue = reporter.update(is_draft, num_processed)
@@ -252,6 +294,8 @@ class CacheWrapper:
         if draft_model is not None:
             self.cache += make_prompt_cache(draft_model)
         self.draft_model = draft_model
+        if self._checkpoint_store is not None:
+            self._checkpoint_store.clear()
 
     def unset_draft_model(self):
         """Removes the draft model from the cache if one exists."""
@@ -259,6 +303,8 @@ class CacheWrapper:
             return
         self.draft_model = None
         self.cache = self.cache[: len(self.model.layers)]
+        if self._checkpoint_store is not None:
+            self._checkpoint_store.clear()
 
     def update_cache(
         self,
@@ -317,7 +363,16 @@ class CacheWrapper:
                 tokens=prefill_tokens,
                 reporter=reporter,
                 is_draft=False,
+                save_checkpoints=self._needs_checkpointing and self.draft_model is None,
+                cached_tokens_before=cached_tokens,
             )
+
+        # Save final checkpoint after prefill completes (skip when draft model is active
+        # to avoid cache desync — draft model would only see suffix on checkpoint restore)
+        if self._checkpoint_store is not None and len(prefill_tokens) > 0 and self.draft_model is None:
+            tokens_in_cache = len(self.tokens) - num_tokens_to_exclude
+            main_cache = self.cache[: len(self.model.layers)]
+            self._checkpoint_store.save(self.tokens[:tokens_in_cache], main_cache)
 
         # Report finish
         reporter.finish(is_draft=False)
