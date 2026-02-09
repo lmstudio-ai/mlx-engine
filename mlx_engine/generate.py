@@ -225,8 +225,12 @@ def load_model(
             return True
 
         batchable = is_batchable()
+        # If max_seq_nums is set to 1, use ModelKit instead of BatchedModelKit. This gives users an escape hatch,
+        # which they could use to enable spec decoding. We can remove this additional restriction once we add
+        # spec decoding support to the batched backend
+        use_batched_kit = batchable and max_seq_nums != 1
 
-        if batchable:
+        if use_batched_kit:
             model_kit = BatchedModelKit(
                 model_path,
                 max_kv_size=max_kv_size,
