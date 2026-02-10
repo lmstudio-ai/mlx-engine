@@ -1,7 +1,7 @@
 import mlx.core as mx
 import logging
 
-from mlx_vlm.models.cache import KVCache
+from mlx_vlm.models.cache import make_prompt_cache
 from mlx_vlm.models.base import InputEmbeddingsFeatures
 from typing import List, Optional
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
@@ -69,20 +69,8 @@ class VisionModelWrapper:
         if self.pixel_values is not None and not self.first_call:
             self.first_call = True
 
-            # Create a cache for the underlying language model. We do this explicitly
-            # because `mlx_lm` creates caches based on the wrapper object, but mlx-vlm
-            # language models often need custom cache types/layers.
-            if hasattr(self.language_model, "make_cache"):
-                cache = self.language_model.make_cache()
-            else:
-                kv_heads = (
-                    [self.language_model.n_kv_heads] * len(self.language_model.layers)
-                    if isinstance(self.language_model.n_kv_heads, int)
-                    else self.language_model.n_kv_heads
-                )
-                cache = [KVCache() for _ in kv_heads]
-
-            # Replace the mlx_lm cache with the one we created
+            # Replace the mlx-lm specific prompt cache with the mlx-vlm prompt cache
+            cache = make_prompt_cache(self.language_model)
             kwargs["cache"] = cache
 
             embedding_output = self.vision_model.get_input_embeddings(
