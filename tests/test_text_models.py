@@ -321,7 +321,7 @@ class TestStructuredGen(unittest.TestCase):
             self.model_name,
             self.prompt,
             draft_model_name=self.model_name,
-            max_num_seqs=1,
+            max_seq_nums=1,
         )
 
         generator = create_generator(
@@ -391,7 +391,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
-        model_kit = load_model(model_path=model_path, vocab_only=True, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, vocab_only=True, max_seq_nums=1)
         self.assertTrue(
             is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
         )
@@ -401,7 +401,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
-        model_kit = load_model(model_path=model_path, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, max_seq_nums=1)
         self.assertTrue(
             is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
         )
@@ -409,7 +409,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
     def test_is_draft_model_compatible_false_vocab_only_load(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         draft_model_path = model_getter("mlx-community/Llama-3.2-1B-Instruct-4bit")
-        model_kit = load_model(model_path=model_path, vocab_only=True, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, vocab_only=True, max_seq_nums=1)
         self.assertFalse(
             is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
         )
@@ -417,7 +417,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
     def test_is_draft_model_compatible_false_full_model_load(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         draft_model_path = model_getter("mlx-community/Llama-3.2-1B-Instruct-4bit")
-        model_kit = load_model(model_path=model_path, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, max_seq_nums=1)
         self.assertFalse(
             is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
         )
@@ -427,20 +427,20 @@ class TestSpeculativeDecoding(unittest.TestCase):
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
-        model_kit = load_model(model_path=model_path, max_kv_size=None, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, max_kv_size=None, max_seq_nums=1)
         load_draft_model(model_kit=model_kit, path=draft_model_path)
         self.assertIsNotNone(model_kit.draft_model)
 
     def test_load_draft_model_invalid_model(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
         draft_model_path = model_getter("mlx-community/Llama-3.2-1B-Instruct-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=None, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, max_kv_size=None, max_seq_nums=1)
         with self.assertRaises(ValueError):
             load_draft_model(model_kit=model_kit, path=draft_model_path)
 
     def test_unload_draft_model_idempotent_none_loaded(self):
         model_path = model_getter("mlx-community/Qwen2.5-3B-Instruct-4bit")
-        model_kit = load_model(model_path=model_path, max_kv_size=None, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, max_kv_size=None, max_seq_nums=1)
         unload_draft_model(model_kit=model_kit)
 
     def test_unload_draft_model_success(self):
@@ -448,7 +448,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
-        model_kit = load_model(model_path=model_path, max_kv_size=None, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, max_kv_size=None, max_seq_nums=1)
         model_kit.load_draft_model(path=draft_model_path)
         unload_draft_model(model_kit=model_kit)
         self.assertIsNone(model_kit.draft_model)
@@ -458,7 +458,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
-        model_kit = load_model(model_path=model_path, max_kv_size=None, max_num_seqs=1)
+        model_kit = load_model(model_path=model_path, max_kv_size=None, max_seq_nums=1)
         load_draft_model(model_kit=model_kit, path=draft_model_path)
         prompt = "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
         prompt_tokens = tokenize(model_kit, prompt)

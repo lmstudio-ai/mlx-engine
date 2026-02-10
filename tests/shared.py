@@ -120,7 +120,7 @@ def model_load_and_tokenize_prompt(
     max_kv_size=4096,
     trust_remote_code=False,
     draft_model_name=None,
-    max_num_seqs=None,
+    max_seq_nums=None,
 ):
     """Helper method to test a model"""
     print(f"Testing model {model_name}")
@@ -132,7 +132,7 @@ def model_load_and_tokenize_prompt(
     model_kit = load_model(
         model_path=model_path,
         max_kv_size=max_kv_size,
-        max_num_seqs=max_num_seqs,
+        max_seq_nums=max_seq_nums,
         trust_remote_code=trust_remote_code,
     )
 
