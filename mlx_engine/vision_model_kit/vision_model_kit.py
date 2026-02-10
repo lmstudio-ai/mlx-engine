@@ -145,7 +145,7 @@ class VisionModelKit(ModelKit):
     def record_token_to_cache(self, token: int) -> None:
         pass
 
-    def record_sampled_token(self, token: int) -> None:
+    def record_sampled_token(self, token: mx.array) -> None:
         self.model.record_sampled_token(token)
 
     def is_draft_model_compatible(self, path: str | Path) -> bool:

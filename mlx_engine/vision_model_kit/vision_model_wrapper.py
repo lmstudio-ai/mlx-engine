@@ -1,7 +1,8 @@
 import mlx.core as mx
 import logging
 
-from mlx_vlm.models.cache import KVCache, SimpleKVCache
+from mlx_vlm.models.cache import make_prompt_cache
+from mlx_vlm.models.base import InputEmbeddingsFeatures
 from typing import List, Optional
 from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
     common_process_prompt_with_images,
@@ -60,81 +61,97 @@ class VisionModelWrapper:
 
     def __call__(self, *args, input_embeddings=None, **kwargs):
         """
-        See this reference implementation
-        https://github.com/Blaizzy/mlx-vlm/blob/6c98971/mlx_vlm/utils.py#L783-L810
-
-        In the reference implementation, the vision model is called once at the beginning,
-        then all subsequent calls are forwarded to the language model. Mirror that behavior here.
+        This mirrors mlx-vlm's native generation loop (`mlx_vlm.generate.generate_step`):
+        do one multimodal prompt/prefill step (via `get_input_embeddings`) and then
+        forward all subsequent single-token decoding calls directly to the language model.
+        ref: https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L229
         """
         if self.pixel_values is not None and not self.first_call:
             self.first_call = True
 
-            # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L987
-            if hasattr(self.language_model, "make_cache"):
-                cache = self.language_model.make_cache()
-            else:
-                kv_heads = (
-                    [self.language_model.n_kv_heads] * len(self.language_model.layers)
-                    if isinstance(self.language_model.n_kv_heads, int)
-                    else self.language_model.n_kv_heads
-                )
-                if self.vision_model.config.model_type == "florence2":
-                    cache = [
-                        (SimpleKVCache(), SimpleKVCache())
-                        for n in self.language_model.layers
-                    ]
-                else:
-                    cache = [KVCache() for n in kv_heads]
-
-            # Replace the mlx_lm cache with the one we created
+            # Replace the mlx-lm specific prompt cache with the mlx-vlm prompt cache
+            cache = make_prompt_cache(self.language_model)
             kwargs["cache"] = cache
 
-            outputs = self.vision_model(
-                self.input_ids,
-                self.pixel_values,
+            embedding_output = self.vision_model.get_input_embeddings(
+                input_ids=self.input_ids,
+                pixel_values=self.pixel_values,
                 mask=self.mask,
                 **self.model_inputs,
-                **kwargs,
             )
 
-            # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1045-L1056
-            if outputs.cross_attention_states is not None:
-                self.language_model_kwargs = {
-                    k: v
-                    for k, v in zip(
-                        ["cross_attention_states"], [outputs.cross_attention_states]
-                    )
-                }
-            elif outputs.encoder_outputs is not None:
-                self.decoder_input_ids = self.input_ids
-                self.language_model_kwargs = {
-                    "decoder_input_ids": self.decoder_input_ids,
-                    "encoder_outputs": outputs.encoder_outputs,
-                }
+            # Expect InputEmbeddingsFeatures here to match mlx-vlm's `generate_step` flow
+            # https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L383-L396
+            if not isinstance(embedding_output, InputEmbeddingsFeatures):
+                raise TypeError(
+                    "vision_model.get_input_embeddings(...) must return InputEmbeddingsFeatures. "
+                    f"Got {type(embedding_output)}."
+                )
 
-            # Add the cache we created here to the language model kwargs
-            self.language_model_kwargs["cache"] = cache
+            inputs_embeds = embedding_output.inputs_embeds
+            if inputs_embeds is None:
+                raise ValueError(
+                    "vision_model.get_input_embeddings(...) returned InputEmbeddingsFeatures "
+                    "without `inputs_embeds`."
+                )
+
+            lm_call_kwargs = {
+                k: v
+                for k, v in embedding_output.to_dict().items()
+                if k != "inputs_embeds" and v is not None
+            }
+
+            # Mirror model.__call__ behavior for models that produce a 4D attention mask.
+            # ref: https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/models/gemma3/gemma3.py#L186-L192
+            attention_mask_4d = lm_call_kwargs.pop("attention_mask_4d", None)
+            if attention_mask_4d is not None:
+                lm_call_kwargs["mask"] = attention_mask_4d
+
+            outputs = self.language_model(
+                self.input_ids,
+                inputs_embeds=inputs_embeds,
+                cache=cache,
+                **lm_call_kwargs,
+            )
+
+            # Persist only decode type kwargs + cache to mirror mlx-vlm's native generation loop
+            # ref: https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L369-L377
+            persisted_kwargs = {"cache": cache}
+            if outputs.cross_attention_states is not None:
+                persisted_kwargs["cross_attention_states"] = (
+                    outputs.cross_attention_states
+                )
+            elif outputs.encoder_outputs is not None:
+                # `decoder_input_ids` is updated each step via `record_sampled_token`.
+                self.decoder_input_ids = self.input_ids
+                persisted_kwargs["decoder_input_ids"] = self.decoder_input_ids
+                persisted_kwargs["encoder_outputs"] = outputs.encoder_outputs
+
+            self.language_model_kwargs = persisted_kwargs
         else:
             try:
-                if (
-                    "cache" in self.language_model_kwargs
-                ):  # This is only missing if self.pixel_values is None
-                    del kwargs["cache"]  # Use the cache from self.language_model_kwargs
+                # This is only missing if self.pixel_values is None
+                if "cache" in self.language_model_kwargs:
+                    # Use the cache from self.language_model_kwargs
+                    kwargs.pop("cache", None)
 
-                # taken from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1009
-                if "decoder_input_ids" in self.language_model_kwargs:
-                    self.language_model_kwargs["decoder_input_ids"] = (
-                        self.decoder_input_ids
-                    )
+                lm_call_kwargs = dict(self.language_model_kwargs)
+
+                # Mirrors mlx-vlm's `generate_step` continuation path for encoder-decoder models:
+                # https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L332-L336
+                if "decoder_input_ids" in lm_call_kwargs:
+                    # Avoid passing decoder_inputs_embeds alongside decoder_input_ids.
+                    lm_call_kwargs.pop("decoder_inputs_embeds", None)
+                    lm_call_kwargs["decoder_input_ids"] = self.decoder_input_ids
                     outputs = self.language_model(
                         **kwargs,
-                        **self.language_model_kwargs,
+                        **lm_call_kwargs,
                     )
                 else:
                     outputs = self.language_model(
                         *args,
                         **kwargs,
-                        **self.language_model_kwargs,
+                        **lm_call_kwargs,
                     )
 
             except ValueError as e:
@@ -147,9 +164,24 @@ class VisionModelWrapper:
 
         return outputs.logits
 
-    def record_sampled_token(self, token: int) -> None:
-        # Adapted from here https://github.com/Blaizzy/mlx-vlm/blob/2974401/mlx_vlm/utils.py#L1064
-        self.decoder_input_ids = mx.array([token])
+    def record_sampled_token(self, token: mx.array) -> None:
+        """
+        Record the most recently sampled token for the next decode step.
+
+        In mlx-lm, samplers return an `mx.array` (typically shape (1,) for batch=1).
+        For encoder-decoder models, the decoder expects `decoder_input_ids` shaped
+        as (batch, seq), so normalize to mirror mlx-vlm's `y[None]` flow.
+
+        ref: https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L372-L375
+        """
+        # defensive safety checks
+        if not isinstance(token, mx.array):
+            raise TypeError(f"Expected token to be an mx.array, got {type(token)}.")
+        if token.shape != (1,):
+            raise ValueError(
+                f"Expected a single sampled token, got shape {token.shape}."
+            )
+        self.decoder_input_ids = token[None]
 
     def process_prompt_with_images(
         self,
