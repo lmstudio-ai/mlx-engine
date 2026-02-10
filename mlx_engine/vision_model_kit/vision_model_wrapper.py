@@ -102,11 +102,9 @@ class VisionModelWrapper:
 
     def __call__(self, *args, input_embeddings=None, **kwargs):
         """
-        See this reference implementation
-        https://github.com/Blaizzy/mlx-vlm/blob/6c98971/mlx_vlm/utils.py#L783-L810
-
-        In the reference implementation, the vision model is called once at the beginning,
-        then all subsequent calls are forwarded to the language model. Mirror that behavior here.
+        This mirrors mlx-vlm's native generation loop (`mlx_vlm.generate.generate_step`):
+        do one multimodal prompt/prefill step (via `get_input_embeddings`) and then
+        forward all subsequent single-token decoding calls directly to the language model.
         """
         if self.pixel_values is not None and not self.first_call:
             self.first_call = True
@@ -151,13 +149,16 @@ class VisionModelWrapper:
                 **lm_call_kwargs,
             )
 
-            # Persist extra embedding-time fields so subsequent LM-only steps have
-            # the same auxiliary inputs available (e.g. cross-attention masks).
-            persisted_kwargs = dict(embed_kwargs)
-            # Avoid conflicts for encoder-decoder models once we start using decoder_input_ids.
-            persisted_kwargs.pop("decoder_inputs_embeds", None)
-            persisted_kwargs = self._slice_for_single_token_decoding(persisted_kwargs)
-
+            # Persist only decode-time kwargs (plus cache), mirroring mlx-vlm's
+            # native generation loop: embedding-time features (e.g. deepstack
+            # tensors / prompt-length masks) are used for the prompt prefill, but
+            # must not be replayed during single-token decoding steps.
+            #
+            # Native pattern (mlx_vlm.generate.generate_step):
+            #   - if cross-attention: kwargs -> {"cross_attention_states": ...}
+            #   - elif encoder-decoder: kwargs -> {"decoder_input_ids": ..., "encoder_outputs": ...}
+            #   - else: kwargs -> {}
+            persisted_kwargs = {"cache": cache}
             if outputs.cross_attention_states is not None:
                 persisted_kwargs["cross_attention_states"] = (
                     outputs.cross_attention_states
@@ -168,14 +169,13 @@ class VisionModelWrapper:
                 persisted_kwargs["decoder_input_ids"] = self.decoder_input_ids
                 persisted_kwargs["encoder_outputs"] = outputs.encoder_outputs
 
-            persisted_kwargs["cache"] = cache
             self.language_model_kwargs = persisted_kwargs
         else:
             try:
                 # This is only missing if self.pixel_values is None
                 if "cache" in self.language_model_kwargs:
                     # Use the cache from self.language_model_kwargs
-                    del kwargs["cache"]
+                    kwargs.pop("cache", None)
 
                 lm_call_kwargs = dict(self.language_model_kwargs)
 
