@@ -182,16 +182,18 @@ class VisionModelWrapper:
 
         In mlx-lm, samplers return an `mx.array` (typically shape (1,) for batch=1).
         For encoder-decoder models, the decoder expects `decoder_input_ids` shaped
-        as (batch, seq), so normalize to (1, 1) to mirror mlx-vlm's `y[None]` flow.
+        as (batch, seq), so normalize to mirror mlx-vlm's `y[None]` flow.
 
         ref: https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L372-L375
         """
-        token_array = mx.array(token)
-        if token_array.size != 1:
+        # defensive safety checks
+        if not isinstance(token, mx.array):
+            raise TypeError(f"Expected token to be an mx.array, got {type(token)}.")
+        if token.shape != (1,):
             raise ValueError(
-                f"Expected a single sampled token, got shape {token_array.shape}."
+                f"Expected a single sampled token, got shape {token.shape}."
             )
-        self.decoder_input_ids = token_array.reshape(1, 1)
+        self.decoder_input_ids = token[None]
 
     def process_prompt_with_images(
         self,
