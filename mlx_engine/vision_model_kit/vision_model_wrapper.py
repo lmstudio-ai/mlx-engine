@@ -176,11 +176,22 @@ class VisionModelWrapper:
 
         return outputs.logits
 
-    def record_sampled_token(self, token: int) -> None:
-        # use record_sampled_token as the mechanism to update decoder_input_ids
-        # properly for each step of generation.
-        # Native mlx-vlm does this here: https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L372-L375
-        self.decoder_input_ids = mx.array([[token]])
+    def record_sampled_token(self, token: mx.array) -> None:
+        """
+        Record the most recently sampled token for the next decode step.
+
+        In mlx-lm, samplers return an `mx.array` (typically shape (1,) for batch=1).
+        For encoder-decoder models, the decoder expects `decoder_input_ids` shaped
+        as (batch, seq), so normalize to (1, 1) to mirror mlx-vlm's `y[None]` flow.
+
+        ref: https://github.com/Blaizzy/mlx-vlm/blob/1028599/mlx_vlm/generate.py#L372-L375
+        """
+        token_array = mx.array(token)
+        if token_array.size != 1:
+            raise ValueError(
+                f"Expected a single sampled token, got shape {token_array.shape}."
+            )
+        self.decoder_input_ids = token_array.reshape(1, 1)
 
     def process_prompt_with_images(
         self,
