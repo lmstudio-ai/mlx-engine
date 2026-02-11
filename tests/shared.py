@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 import sys
 import subprocess
@@ -5,6 +6,13 @@ from typing import Optional
 
 from mlx_engine.generate import load_model, load_draft_model, tokenize
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
+
+
+def read_image_b64(path: Path | str) -> str:
+    """Read an image file and return a base64-encoded UTF-8 string."""
+    resolved_path = Path(path).expanduser().resolve()
+    with open(resolved_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
 
 
 class RecordingReporter(PromptProgressReporter):

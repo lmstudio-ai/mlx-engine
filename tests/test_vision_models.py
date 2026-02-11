@@ -1,4 +1,3 @@
-import base64
 from pathlib import Path
 import pytest
 from mlx_engine.generate import (
@@ -7,7 +6,12 @@ from mlx_engine.generate import (
     create_generator,
     is_draft_model_compatible,
 )
-from tests.shared import model_getter, RecordingReporter
+from tests.shared import (
+    model_getter,
+    RecordingReporter,
+    read_image_b64,
+    model_load_and_tokenize_prompt,
+)
 from textwrap import dedent
 
 
@@ -27,15 +31,11 @@ class TestVisionModels:
 
         # Read and encode test images
         cls.toucan_path = Path(__file__).parent.parent / "demo-data" / "toucan.jpeg"
-        with open(cls.toucan_path, "rb") as image_file:
-            cls.toucan_image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
+        cls.toucan_image_b64 = read_image_b64(cls.toucan_path)
         cls.chameleon_image_path = (
             Path(__file__).parent.parent / "demo-data" / "chameleon.webp"
         )
-        with open(cls.chameleon_image_path, "rb") as chameleon_image_file:
-            cls.chameleon_image_b64 = base64.b64encode(
-                chameleon_image_file.read()
-            ).decode("utf-8")
+        cls.chameleon_image_b64 = read_image_b64(cls.chameleon_image_path)
 
     def toucan_test_runner(
         self,
@@ -151,6 +151,41 @@ class TestVisionModels:
 <|im_start|>assistant
 """
         self.toucan_test_runner("lmstudio-community/LFM2.5-VL-1.6B-MLX-4bit", prompt)
+
+    # This test was added due to a failure observed with mlx-vlm be852ea
+    # ref: https://github.com/Blaizzy/mlx-vlm/issues/698#issuecomment-3887073430
+    def test_lfm2_5_vl_vision_equations(self):
+        prompt = """<|im_start|>user
+<image>What is this<|im_end|>
+<|im_start|>assistant
+"""
+
+        model_kit, prompt_tokens = model_load_and_tokenize_prompt(
+            model_name="lmstudio-community/LFM2.5-VL-1.6B-MLX-4bit",
+            prompt=prompt,
+            trust_remote_code=False,
+            max_seq_nums=1,
+        )
+
+        equations_image_path = self.test_data_dir / "equations.jpg"
+        equations_image_b64 = read_image_b64(equations_image_path)
+
+        generated_text = ""
+        for result in create_generator(
+            model_kit=model_kit,
+            prompt_tokens=prompt_tokens,
+            images_b64=[equations_image_b64],
+            max_image_size=MAX_IMAGE_SIZE,
+            seed=0,
+            max_tokens=30,
+            temp=0.0,
+        ):
+            generated_text += result.text
+            print(result.text, end="", flush=True)
+            if result.stop_condition:
+                break
+        print()
+        # Simply ensure we got here without error, for now.
 
     def test_lfm2_5_vl_text_only(self):
         """Test LFM2.5-VL 1.6B model"""
