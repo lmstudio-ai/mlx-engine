@@ -2,6 +2,7 @@ from threading import Thread, Event
 import json
 import sys
 import traceback
+from typing import Iterable
 import mlx_lm
 import logging
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
@@ -158,7 +159,7 @@ class BatchedModelKit:
             )
         )
 
-        def _inner():
+        def _inner() -> Iterable[BatchedGenerationResponse]:
             """
             Generator that pulls responses from the queue and yields them to the caller.
 

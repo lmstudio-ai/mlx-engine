@@ -1,6 +1,9 @@
 from contextlib import contextmanager
 import uuid
-from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
+from mlx_engine.model_kit.batched_model_kit import (
+    BatchedGenerationResponse,
+    BatchedModelKit,
+)
 from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
 from typing import Iterator, List, Optional
 import json
@@ -681,7 +684,7 @@ def _batched_generation(
 
     while True:
         try:
-            generation_result = next(stream)
+            generation_result: BatchedGenerationResponse = next(stream)
         except StopIteration:
             break
         except RequestCancelled:
@@ -741,6 +744,20 @@ def _batched_generation(
             token_buffer = []
             top_logprobs_buffer = []
             text = ""
+
+        # The batched generator has hit max_tokens, so we can't iterate further
+        if generation_result.finish_reason == "length":
+            yield GenerationResult(
+                text="",
+                tokens=[],
+                stop_condition=GenerationStopCondition(
+                    stop_reason="token_limit",
+                    stop_string="",
+                    stop_tokens=[],
+                ),
+                top_logprobs=[],
+            )
+            return
 
 
 def stop_generation(
