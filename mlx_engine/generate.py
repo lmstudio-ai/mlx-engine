@@ -748,7 +748,14 @@ def _batched_generation(
         # The batched generator has hit max_tokens, so we can't iterate further
         if generation_result.finish_reason == "length":
             yield GenerationResult(
-                text="", tokens=[], stop_condition="token_limit", top_logprobs=[]
+                text="",
+                tokens=[],
+                stop_condition=GenerationStopCondition(
+                    stop_reason="token_limit",
+                    stop_string="",
+                    stop_tokens=[],
+                ),
+                top_logprobs=[],
             )
             return
 
