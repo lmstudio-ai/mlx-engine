@@ -178,9 +178,7 @@ if __name__ == "__main__":
     # Parse arguments
     parser = setup_arg_parser()
     args = parser.parse_args()
-    max_seq_nums = 4
-    if args.images is not None:
-        max_seq_nums = 1
+    max_seq_nums = 1
 
     if isinstance(args.images, str):
         args.images = [args.images]
