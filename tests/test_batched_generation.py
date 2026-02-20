@@ -16,6 +16,38 @@ def model_kit():
     unload(kit)
 
 
+def test_batched_generation_max_tokens(model_kit):
+    """Test that batched generation stops with token_limit when max_tokens is reached."""
+
+    assert isinstance(model_kit, BatchedModelKit)
+
+    prompt = """<|im_start|>user
+Write a short paragraph about the Eiffel Tower in Paris.<|im_end|>
+<|im_start|>assistant
+"""
+    prompt_tokens = tokenize(model_kit, prompt)
+
+    max_tokens = 5
+    token_count = 0
+    stop_condition = None
+
+    for result in create_generator(
+        model_kit=model_kit,
+        prompt_tokens=prompt_tokens,
+        seed=0,
+        max_tokens=max_tokens,
+        temp=0.0,
+    ):
+        token_count += len(result.tokens)
+        if result.stop_condition:
+            stop_condition = result.stop_condition
+            break
+
+    assert stop_condition is not None
+    assert stop_condition.stop_reason == "token_limit"
+    assert token_count <= max_tokens
+
+
 def test_batched_generation_two_threads(model_kit):
     """Test batched generation with two concurrent threads."""
 

@@ -2,7 +2,7 @@ from typing import List, Literal, NamedTuple, Optional
 from mlx_engine.utils.token import Token
 
 
-StopReason = Literal["eos_token", "stop_string", "user_cancelled"]
+StopReason = Literal["eos_token", "stop_string", "token_limit", "user_cancelled"]
 
 
 class GenerationStopCondition(NamedTuple):
