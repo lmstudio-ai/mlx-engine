@@ -128,6 +128,7 @@ def load_model(
     kv_bits: Optional[int] = None,
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
+    prefill_step_size: Optional[int] = None,
 ) -> ModelKit | VisionModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -146,6 +147,8 @@ def load_model(
         kv_bits (Optional[int]): Number of bits for KV cache quantization.
         kv_group_size (Optional[int]): Group size for KV cache quantization.
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
+        prefill_step_size (Optional[int]): Number of tokens to process per prefill chunk.
+            Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
@@ -238,6 +241,7 @@ def load_model(
                 model_path,
                 max_kv_size=max_kv_size,
                 max_seq_nums=max_seq_nums,
+                prefill_step_size=prefill_step_size,
             )
         else:
             model_kit = ModelKit(
@@ -247,6 +251,7 @@ def load_model(
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
+                prefill_step_size=prefill_step_size,
             )
     sanitize_eos_tokens(model_kit)
     model_kit.start()

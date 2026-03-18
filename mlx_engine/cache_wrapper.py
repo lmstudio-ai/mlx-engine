@@ -34,7 +34,7 @@ class CacheWrapper:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
-        chunk_size: int = PROMPT_PROCESSING_CHUNK_SIZE,
+        chunk_size: Optional[int] = None,
     ):
         """
         Initialize the CacheWrapper.
@@ -42,6 +42,8 @@ class CacheWrapper:
         Args:
             model (nn.Module): The model to be cached.
             max_kv_size (Optional[int]): Maximum size of the key-value cache.
+            chunk_size (Optional[int]): Number of tokens per prefill chunk.
+                Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
@@ -55,7 +57,9 @@ class CacheWrapper:
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
-        self.chunk_size = chunk_size
+        self.chunk_size = (
+            chunk_size if chunk_size is not None else PROMPT_PROCESSING_CHUNK_SIZE
+        )
 
     def _get_num_tokens_in_cache(self) -> int | None:
         """

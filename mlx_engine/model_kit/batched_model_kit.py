@@ -59,6 +59,7 @@ class BatchedModelKit:
         model_path: Path,
         max_kv_size: int | None = None,
         max_seq_nums: int | None = None,
+        prefill_step_size: int | None = None,
     ):
         self._requests = Queue()
         self._prompt_cache = LRUPromptCache()
@@ -82,6 +83,7 @@ class BatchedModelKit:
         )
         self._detokenizer = self.tokenizer.detokenizer
         self._max_kv_size = max_kv_size
+        self._prefill_step_size = prefill_step_size
         logger.info("BatchedModelKit loaded successfully")
 
     def start(self):
