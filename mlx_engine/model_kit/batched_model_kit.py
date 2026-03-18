@@ -5,6 +5,7 @@ import traceback
 from typing import Iterable
 import mlx_lm
 import logging
+from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
 from mlx_lm.generate import BatchGenerator
@@ -259,6 +260,7 @@ class BatchedModelKit:
             # As soon as we receive any prompt, stop decoding, prefill the new prompt, and add it to the decoding batch
             # We probably want to make this behavior configurable, so that new prompts do not pause existing decodes
             prefill_batch_size=1,
+            prefill_step_size=PROMPT_PROCESSING_CHUNK_SIZE,
             stop_tokens=set(self.tokenizer.eos_token_ids),
             # Do not set any global post-processors, sampler and logits_processor are set per-request
             sampler=None,
