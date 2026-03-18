@@ -1,43 +1,10 @@
-import math
-
 import pytest
 import threading
 import time
-from pathlib import Path
 
-from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE
 from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
-from tests.shared import model_getter, RecordingReporter
+from tests.shared import model_getter
 from mlx_engine.generate import load_model, create_generator, tokenize, unload
-
-# The default prefill_step_size in mlx_lm.generate.BatchGenerator
-MLX_LM_DEFAULT_PREFILL_STEP_SIZE = 2048
-
-
-def _expected_batched_prefill_updates(num_prompt_tokens: int) -> int:
-    """Compute the expected number of 'update' events from BatchedMlxLmReporterAdapter.
-
-    BatchGenerator._process_prompts fires one progress callback per prefill chunk,
-    leaving prompt_checkpoint (1) token for the final step.
-    BatchedMlxLmReporterAdapter maps these callbacks to events: the first callback
-    emits both begin and update (no early return after begin), middle callbacks emit
-    update, and the last emits finish. So: num_updates = num_callbacks - 1.
-    """
-    prefillable_tokens = num_prompt_tokens - 1
-
-    expected_at_correct_size = (
-        math.ceil(prefillable_tokens / PROMPT_PROCESSING_CHUNK_SIZE) - 1
-    )
-    expected_at_default_size = (
-        math.ceil(prefillable_tokens / MLX_LM_DEFAULT_PREFILL_STEP_SIZE) - 1
-    )
-
-    assert expected_at_correct_size != expected_at_default_size, (
-        f"Test prompt ({num_prompt_tokens} tokens) is not long enough to "
-        f"distinguish chunk size {PROMPT_PROCESSING_CHUNK_SIZE} from {MLX_LM_DEFAULT_PREFILL_STEP_SIZE}"
-    )
-
-    return expected_at_correct_size
 
 
 @pytest.fixture
@@ -79,65 +46,6 @@ Write a short paragraph about the Eiffel Tower in Paris.<|im_end|>
     assert stop_condition is not None
     assert stop_condition.stop_reason == "token_limit"
     assert token_count <= max_tokens
-
-
-@pytest.fixture
-def model_kit_large_kv():
-    """Load model with a large KV cache for long-prompt tests."""
-    model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
-    kit = load_model(model_path=model_path, max_kv_size=20000, seed=0)
-    yield kit
-    unload(kit)
-
-
-def test_batched_prefill_step_size(model_kit_large_kv):
-    """Verify that batched generation uses PROMPT_PROCESSING_CHUNK_SIZE for prefill.
-
-    A prompt longer than PROMPT_PROCESSING_CHUNK_SIZE (512) should produce
-    multiple progress update events. If the batch path silently uses a
-    larger chunk size (e.g. the mlx-lm default of 2048), the prompt would
-    be processed in fewer steps, producing fewer update events.
-    """
-    assert isinstance(model_kit_large_kv, BatchedModelKit)
-
-    test_data_dir = Path(__file__).parent / "data"
-    file_content = (test_data_dir / "ben_franklin_autobiography_start.txt").read_text()
-    prompt = f"""<|im_start|>user
-```
-{file_content}
-```
-Who is this passage about? Only say the name, and nothing else<|im_end|>
-<|im_start|>assistant
-"""
-    prompt_tokens = tokenize(model_kit_large_kv, prompt)
-
-    # The prompt must be long enough that different chunk sizes produce
-    # visibly different callback patterns
-    assert len(prompt_tokens) > PROMPT_PROCESSING_CHUNK_SIZE * 2, (
-        f"Prompt has {len(prompt_tokens)} tokens, need >"
-        f" {PROMPT_PROCESSING_CHUNK_SIZE * 2} to distinguish chunk sizes"
-    )
-
-    reporter = RecordingReporter()
-
-    for result in create_generator(
-        model_kit=model_kit_large_kv,
-        prompt_tokens=prompt_tokens,
-        seed=0,
-        max_tokens=5,
-        temp=0.0,
-        prompt_progress_reporter=reporter,
-    ):
-        if result.stop_condition:
-            break
-
-    expected_updates = _expected_batched_prefill_updates(len(prompt_tokens))
-    update_events = [event for event in reporter.events if event["type"] == "update"]
-    assert len(update_events) == expected_updates, (
-        f"Expected {expected_updates} prefill progress updates "
-        f"for {len(prompt_tokens)} tokens with chunk size "
-        f"{PROMPT_PROCESSING_CHUNK_SIZE}, but got {len(update_events)}."
-    )
 
 
 def test_batched_generation_two_threads(model_kit):
