@@ -37,10 +37,12 @@ class VisionModelKit(ModelKit):
         model_path: Path,
         vocab_only: bool,
         trust_remote_code: bool,
+        prefill_step_size: Optional[int] = None,
     ):
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
         self._shutdown = threading.Event()
+        self.prefill_step_size = prefill_step_size
 
         fix_qwen2_5_vl_image_processor(model_path)
         fix_qwen2_vl_preprocessor(model_path)

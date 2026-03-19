@@ -190,7 +190,12 @@ def load_model(
             raise ValueError(
                 "numParallelSessions must be 1 for vision models as they do not currently support continuous batching"
             )
-        model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
+        model_kit = VisionModelKit(
+            model_path,
+            vocab_only,
+            trust_remote_code,
+            prefill_step_size=prefill_step_size,
+        )
     else:
         # For non-vision models or ModelKit-supported vision models, choose between
         # BatchedModelKit (continuous batching) and ModelKit (sequential)

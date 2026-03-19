@@ -6,6 +6,7 @@ from pathlib import Path
 from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE
 from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 from mlx_engine.model_kit.model_kit import ModelKit
+from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
 from tests.shared import model_getter, RecordingReporter
 from mlx_engine.generate import load_model, create_generator, tokenize, unload
 
@@ -52,6 +53,31 @@ def _expected_sequential_prefill_updates(
     expected_at_requested_size = math.ceil(prefillable_tokens / prefill_step_size)
     expected_at_default_size = math.ceil(
         prefillable_tokens / PROMPT_PROCESSING_CHUNK_SIZE
+    )
+
+    assert expected_at_requested_size != expected_at_default_size, (
+        f"Test prompt ({num_prompt_tokens} tokens) is not long enough to "
+        f"distinguish chunk size {prefill_step_size} from default {PROMPT_PROCESSING_CHUNK_SIZE}"
+    )
+
+    return expected_at_requested_size
+
+
+def _expected_vision_prefill_updates(
+    num_prompt_tokens: int, prefill_step_size: int
+) -> int:
+    """Compute the expected number of 'update' events for the VisionModelKit path.
+
+    VisionModelKit text-only prompts go through stream_generate, which fires
+    callbacks via MlxLmReporterAdapter (emit_begin=True). stream_generate fires
+    ceil(num_tokens / step_size) + 2 total callbacks (the chunked prefill plus
+    two boundary callbacks). MlxLmReporterAdapter converts the first into begin
+    and the last into finish, so: num_updates = ceil(num_tokens / step_size).
+    """
+    expected_at_requested_size = math.ceil(num_prompt_tokens / prefill_step_size)
+
+    expected_at_default_size = math.ceil(
+        num_prompt_tokens / PROMPT_PROCESSING_CHUNK_SIZE
     )
 
     assert expected_at_requested_size != expected_at_default_size, (
@@ -164,6 +190,56 @@ def test_sequential_prefill_step_size(sequential_model_kit_custom_prefill):
             break
 
     expected_updates = _expected_sequential_prefill_updates(
+        len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
+    )
+    update_events = [event for event in reporter.events if event["type"] == "update"]
+    assert len(update_events) == expected_updates, (
+        f"Expected {expected_updates} prefill progress updates "
+        f"for {len(prompt_tokens)} tokens with chunk size "
+        f"{CUSTOM_PREFILL_STEP_SIZE}, but got {len(update_events)}."
+    )
+
+
+@pytest.fixture
+def vision_model_kit_custom_prefill():
+    """Load a VisionModelKit model with a custom prefill_step_size."""
+    model_path = model_getter("mlx-community/Qwen3.5-4B-MLX-4bit")
+    kit = load_model(
+        model_path=model_path,
+        max_kv_size=20000,
+        max_seq_nums=1,
+        seed=0,
+        prefill_step_size=CUSTOM_PREFILL_STEP_SIZE,
+    )
+    yield kit
+    unload(kit)
+
+
+def test_vision_model_prefill_step_size(vision_model_kit_custom_prefill):
+    """Verify that VisionModelKit respects a custom prefill_step_size.
+
+    Loads a vision model with prefill_step_size=256 and sends a long text-only
+    prompt. The number of progress update events must match 256-token chunks,
+    not the default 512.
+    """
+    model_kit = vision_model_kit_custom_prefill
+    assert isinstance(model_kit, VisionModelKit)
+
+    prompt_tokens = _long_prompt_tokens(model_kit)
+    reporter = RecordingReporter()
+
+    for result in create_generator(
+        model_kit=model_kit,
+        prompt_tokens=prompt_tokens,
+        seed=0,
+        max_tokens=5,
+        temp=0.0,
+        prompt_progress_reporter=reporter,
+    ):
+        if result.stop_condition:
+            break
+
+    expected_updates = _expected_vision_prefill_updates(
         len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
     )
     update_events = [event for event in reporter.events if event["type"] == "update"]
