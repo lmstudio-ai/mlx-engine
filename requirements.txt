@@ -25,11 +25,11 @@ lark==1.3.1
 markdown-it-py==4.0.0
 mdurl==0.1.2
 mlx==0.31.1
-mlx-lm==0.31.2
+mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@564281f79328df07c4997b3a6ca00bd929381287
 mlx-metal==0.31.1
-mlx-vlm==0.4.0
+mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@822a843941ea35ddee2849fb0633a80eac1d1d94
 nest-asyncio==1.6.0
-outlines==1.1.2.dev5
+outlines @ git+https://github.com/dottxt-ai/outlines.git@222ca17254ca0a4de1961e16872efe917b8e3498
 outlines-core==0.1.26
 packaging==26.0
 pillow==12.1.1
