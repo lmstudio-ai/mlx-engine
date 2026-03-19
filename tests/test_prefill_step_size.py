@@ -52,18 +52,7 @@ def _expected_batched_prefill_updates(
     update, and the last emits finish. So: num_updates = num_callbacks - 1.
     """
     prefillable_tokens = num_prompt_tokens - 1
-
-    expected_at_requested_size = math.ceil(prefillable_tokens / prefill_step_size) - 1
-    expected_at_default_size = (
-        math.ceil(prefillable_tokens / PROMPT_PROCESSING_CHUNK_SIZE) - 1
-    )
-
-    assert expected_at_requested_size != expected_at_default_size, (
-        f"Test prompt ({num_prompt_tokens} tokens) is not long enough to "
-        f"distinguish chunk size {prefill_step_size} from default {PROMPT_PROCESSING_CHUNK_SIZE}"
-    )
-
-    return expected_at_requested_size
+    return math.ceil(prefillable_tokens / prefill_step_size) - 1
 
 
 def _expected_sequential_prefill_updates(
@@ -76,18 +65,7 @@ def _expected_sequential_prefill_updates(
     then finish. So: num_updates = ceil((num_tokens - 1) / prefill_step_size).
     """
     prefillable_tokens = num_prompt_tokens - 1
-
-    expected_at_requested_size = math.ceil(prefillable_tokens / prefill_step_size)
-    expected_at_default_size = math.ceil(
-        prefillable_tokens / PROMPT_PROCESSING_CHUNK_SIZE
-    )
-
-    assert expected_at_requested_size != expected_at_default_size, (
-        f"Test prompt ({num_prompt_tokens} tokens) is not long enough to "
-        f"distinguish chunk size {prefill_step_size} from default {PROMPT_PROCESSING_CHUNK_SIZE}"
-    )
-
-    return expected_at_requested_size
+    return math.ceil(prefillable_tokens / prefill_step_size)
 
 
 def _expected_vision_prefill_updates(
@@ -101,18 +79,7 @@ def _expected_vision_prefill_updates(
     two boundary callbacks). MlxLmReporterAdapter converts the first into begin
     and the last into finish, so: num_updates = ceil(num_tokens / step_size).
     """
-    expected_at_requested_size = math.ceil(num_prompt_tokens / prefill_step_size)
-
-    expected_at_default_size = math.ceil(
-        num_prompt_tokens / PROMPT_PROCESSING_CHUNK_SIZE
-    )
-
-    assert expected_at_requested_size != expected_at_default_size, (
-        f"Test prompt ({num_prompt_tokens} tokens) is not long enough to "
-        f"distinguish chunk size {prefill_step_size} from default {PROMPT_PROCESSING_CHUNK_SIZE}"
-    )
-
-    return expected_at_requested_size
+    return math.ceil(num_prompt_tokens / prefill_step_size)
 
 
 def _long_prompt_tokens(model_kit):
@@ -183,6 +150,13 @@ def test_batched_prefill_step_size(batched_model_kit_custom_prefill):
     expected_updates = _expected_batched_prefill_updates(
         len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
     )
+    expected_at_default = _expected_batched_prefill_updates(
+        len(prompt_tokens), PROMPT_PROCESSING_CHUNK_SIZE
+    )
+    assert expected_updates != expected_at_default, (
+        f"Test prompt ({len(prompt_tokens)} tokens) is not long enough to "
+        f"distinguish chunk size {CUSTOM_PREFILL_STEP_SIZE} from default {PROMPT_PROCESSING_CHUNK_SIZE}"
+    )
 
     # WHEN
     reporter = RecordingReporter()
@@ -216,6 +190,13 @@ def test_sequential_prefill_step_size(sequential_model_kit_custom_prefill):
     expected_updates = _expected_sequential_prefill_updates(
         len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
     )
+    expected_at_default = _expected_sequential_prefill_updates(
+        len(prompt_tokens), PROMPT_PROCESSING_CHUNK_SIZE
+    )
+    assert expected_updates != expected_at_default, (
+        f"Test prompt ({len(prompt_tokens)} tokens) is not long enough to "
+        f"distinguish chunk size {CUSTOM_PREFILL_STEP_SIZE} from default {PROMPT_PROCESSING_CHUNK_SIZE}"
+    )
 
     # WHEN
     reporter = RecordingReporter()
@@ -248,6 +229,13 @@ def test_vision_model_prefill_step_size(vision_model_kit_custom_prefill):
     prompt_tokens = _long_prompt_tokens(model_kit)
     expected_updates = _expected_vision_prefill_updates(
         len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
+    )
+    expected_at_default = _expected_vision_prefill_updates(
+        len(prompt_tokens), PROMPT_PROCESSING_CHUNK_SIZE
+    )
+    assert expected_updates != expected_at_default, (
+        f"Test prompt ({len(prompt_tokens)} tokens) is not long enough to "
+        f"distinguish chunk size {CUSTOM_PREFILL_STEP_SIZE} from default {PROMPT_PROCESSING_CHUNK_SIZE}"
     )
 
     # WHEN
