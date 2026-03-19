@@ -39,7 +39,7 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE
+from mlx_engine.cache_wrapper import resolve_prefill_step_size
 from mlx_engine.utils.prompt_progress_reporter import (
     BatchedMlxLmReporterAdapter,
     LoggerReporter,
@@ -528,7 +528,7 @@ def _sequential_generation(
             max_tokens=max_tokens,
             logits_processors=logits_processors,
             prompt_progress_callback=mlx_lm_callback,
-            prefill_step_size=PROMPT_PROCESSING_CHUNK_SIZE,
+            prefill_step_size=resolve_prefill_step_size(model_kit.prefill_step_size),
             **generate_args,
         )
 

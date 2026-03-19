@@ -17,6 +17,15 @@ from mlx_engine.utils.prompt_progress_reporter import (
 
 PROMPT_PROCESSING_CHUNK_SIZE = 512
 
+
+def resolve_prefill_step_size(prefill_step_size: Optional[int] = None) -> int:
+    return (
+        prefill_step_size
+        if prefill_step_size is not None
+        else PROMPT_PROCESSING_CHUNK_SIZE
+    )
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,9 +66,7 @@ class CacheWrapper:
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
-        self.chunk_size = (
-            chunk_size if chunk_size is not None else PROMPT_PROCESSING_CHUNK_SIZE
-        )
+        self.chunk_size = resolve_prefill_step_size(chunk_size)
 
     def _get_num_tokens_in_cache(self) -> int | None:
         """
