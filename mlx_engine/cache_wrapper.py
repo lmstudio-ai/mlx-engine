@@ -18,12 +18,28 @@ from mlx_engine.utils.prompt_progress_reporter import (
 PROMPT_PROCESSING_CHUNK_SIZE = 512
 
 
-def resolve_prefill_step_size(prefill_step_size: Optional[int] = None) -> int:
-    return (
-        prefill_step_size
-        if prefill_step_size is not None
-        else PROMPT_PROCESSING_CHUNK_SIZE
-    )
+def validate_prefill_step_size(prefill_step_size: Optional[int] = None) -> int:
+    """
+    Resolve and validate the configured prefill chunk size.
+
+    Args:
+        prefill_step_size: Optional override for tokens processed per prefill chunk.
+
+    Returns:
+        int: The provided chunk size, or PROMPT_PROCESSING_CHUNK_SIZE when unset.
+
+    Raises:
+        ValueError: If prefill_step_size is not a positive integer.
+    """
+    if prefill_step_size is None:
+        return PROMPT_PROCESSING_CHUNK_SIZE
+    if (
+        isinstance(prefill_step_size, bool)
+        or not isinstance(prefill_step_size, int)
+        or prefill_step_size < 1
+    ):
+        raise ValueError("prefill_step_size must be a positive integer")
+    return prefill_step_size
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +68,8 @@ class CacheWrapper:
             model (nn.Module): The model to be cached.
             max_kv_size (Optional[int]): Maximum size of the key-value cache.
             chunk_size (Optional[int]): Number of tokens per prefill chunk.
-                Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
+                Must be a positive integer. Defaults to
+                PROMPT_PROCESSING_CHUNK_SIZE when None.
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
@@ -66,7 +83,7 @@ class CacheWrapper:
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
-        self.chunk_size = resolve_prefill_step_size(chunk_size)
+        self.chunk_size = validate_prefill_step_size(chunk_size)
 
     def _get_num_tokens_in_cache(self) -> int | None:
         """

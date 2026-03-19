@@ -39,7 +39,7 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.cache_wrapper import resolve_prefill_step_size
+from mlx_engine.cache_wrapper import validate_prefill_step_size
 from mlx_engine.utils.prompt_progress_reporter import (
     BatchedMlxLmReporterAdapter,
     LoggerReporter,
@@ -161,6 +161,7 @@ def load_model(
         ValueError: If the model configuration is invalid or unsupported
     """
     set_seed(seed)
+    prefill_step_size = validate_prefill_step_size(prefill_step_size)
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
     model_type = config_json.get("model_type", None)
@@ -533,7 +534,7 @@ def _sequential_generation(
             max_tokens=max_tokens,
             logits_processors=logits_processors,
             prompt_progress_callback=mlx_lm_callback,
-            prefill_step_size=resolve_prefill_step_size(model_kit.prefill_step_size),
+            prefill_step_size=validate_prefill_step_size(model_kit.prefill_step_size),
             **generate_args,
         )
 

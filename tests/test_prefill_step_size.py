@@ -3,7 +3,10 @@ import math
 import pytest
 from pathlib import Path
 
-from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE
+from mlx_engine.cache_wrapper import (
+    PROMPT_PROCESSING_CHUNK_SIZE,
+    validate_prefill_step_size,
+)
 from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
@@ -11,6 +14,30 @@ from tests.shared import model_getter, RecordingReporter
 from mlx_engine.generate import load_model, create_generator, tokenize, unload
 
 CUSTOM_PREFILL_STEP_SIZE = 256
+
+
+@pytest.mark.parametrize("prefill_step_size", [None, CUSTOM_PREFILL_STEP_SIZE])
+def test_validate_prefill_step_size_accepts_valid_values(prefill_step_size):
+    expected_step_size = (
+        PROMPT_PROCESSING_CHUNK_SIZE if prefill_step_size is None else prefill_step_size
+    )
+    assert validate_prefill_step_size(prefill_step_size) == expected_step_size
+
+
+@pytest.mark.parametrize("prefill_step_size", [0, -1, 1.5, True])
+def test_validate_prefill_step_size_rejects_invalid_values(prefill_step_size):
+    with pytest.raises(
+        ValueError, match="prefill_step_size must be a positive integer"
+    ):
+        validate_prefill_step_size(prefill_step_size)
+
+
+@pytest.mark.parametrize("prefill_step_size", [0, -1, 1.5, True])
+def test_load_model_rejects_invalid_prefill_step_size(prefill_step_size):
+    with pytest.raises(
+        ValueError, match="prefill_step_size must be a positive integer"
+    ):
+        load_model(model_path="unused", prefill_step_size=prefill_step_size)
 
 
 def _expected_batched_prefill_updates(
