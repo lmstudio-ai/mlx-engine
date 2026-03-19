@@ -131,75 +131,6 @@ def sequential_model_kit_custom_prefill():
     unload(kit)
 
 
-def test_batched_prefill_step_size(batched_model_kit_custom_prefill):
-    """Verify that batched generation honours a custom prefill_step_size.
-
-    Loads with prefill_step_size=256 and sends a long prompt. The number of
-    progress update events must match 256-token chunks, not the default 512.
-    """
-    model_kit = batched_model_kit_custom_prefill
-    assert isinstance(model_kit, BatchedModelKit)
-
-    prompt_tokens = _long_prompt_tokens(model_kit)
-    reporter = RecordingReporter()
-
-    for result in create_generator(
-        model_kit=model_kit,
-        prompt_tokens=prompt_tokens,
-        seed=0,
-        max_tokens=5,
-        temp=0.0,
-        prompt_progress_reporter=reporter,
-    ):
-        if result.stop_condition:
-            break
-
-    expected_updates = _expected_batched_prefill_updates(
-        len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
-    )
-    update_events = [event for event in reporter.events if event["type"] == "update"]
-    assert len(update_events) == expected_updates, (
-        f"Expected {expected_updates} prefill progress updates "
-        f"for {len(prompt_tokens)} tokens with chunk size "
-        f"{CUSTOM_PREFILL_STEP_SIZE}, but got {len(update_events)}."
-    )
-
-
-def test_sequential_prefill_step_size(sequential_model_kit_custom_prefill):
-    """Verify that sequential generation honours a custom prefill_step_size.
-
-    Loads with prefill_step_size=256 and max_seq_nums=1 (forcing the sequential
-    path). The number of progress update events must match 256-token chunks,
-    not the default 512.
-    """
-    model_kit = sequential_model_kit_custom_prefill
-    assert isinstance(model_kit, ModelKit)
-
-    prompt_tokens = _long_prompt_tokens(model_kit)
-    reporter = RecordingReporter()
-
-    for result in create_generator(
-        model_kit=model_kit,
-        prompt_tokens=prompt_tokens,
-        seed=0,
-        max_tokens=5,
-        temp=0.0,
-        prompt_progress_reporter=reporter,
-    ):
-        if result.stop_condition:
-            break
-
-    expected_updates = _expected_sequential_prefill_updates(
-        len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
-    )
-    update_events = [event for event in reporter.events if event["type"] == "update"]
-    assert len(update_events) == expected_updates, (
-        f"Expected {expected_updates} prefill progress updates "
-        f"for {len(prompt_tokens)} tokens with chunk size "
-        f"{CUSTOM_PREFILL_STEP_SIZE}, but got {len(update_events)}."
-    )
-
-
 @pytest.fixture
 def vision_model_kit_custom_prefill():
     """Load a VisionModelKit model with a custom prefill_step_size."""
@@ -215,19 +146,19 @@ def vision_model_kit_custom_prefill():
     unload(kit)
 
 
-def test_vision_model_prefill_step_size(vision_model_kit_custom_prefill):
-    """Verify that VisionModelKit respects a custom prefill_step_size.
+def test_batched_prefill_step_size(batched_model_kit_custom_prefill):
+    """Verify that batched generation honours a custom prefill_step_size."""
+    model_kit = batched_model_kit_custom_prefill
 
-    Loads a vision model with prefill_step_size=256 and sends a long text-only
-    prompt. The number of progress update events must match 256-token chunks,
-    not the default 512.
-    """
-    model_kit = vision_model_kit_custom_prefill
-    assert isinstance(model_kit, VisionModelKit)
-
+    # GIVEN
+    assert isinstance(model_kit, BatchedModelKit)
     prompt_tokens = _long_prompt_tokens(model_kit)
-    reporter = RecordingReporter()
+    expected_updates = _expected_batched_prefill_updates(
+        len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
+    )
 
+    # WHEN
+    reporter = RecordingReporter()
     for result in create_generator(
         model_kit=model_kit,
         prompt_tokens=prompt_tokens,
@@ -239,9 +170,73 @@ def test_vision_model_prefill_step_size(vision_model_kit_custom_prefill):
         if result.stop_condition:
             break
 
+    # THEN
+    update_events = [event for event in reporter.events if event["type"] == "update"]
+    assert len(update_events) == expected_updates, (
+        f"Expected {expected_updates} prefill progress updates "
+        f"for {len(prompt_tokens)} tokens with chunk size "
+        f"{CUSTOM_PREFILL_STEP_SIZE}, but got {len(update_events)}."
+    )
+
+
+def test_sequential_prefill_step_size(sequential_model_kit_custom_prefill):
+    """Verify that sequential generation honours a custom prefill_step_size."""
+    model_kit = sequential_model_kit_custom_prefill
+
+    # GIVEN
+    assert isinstance(model_kit, ModelKit)
+    prompt_tokens = _long_prompt_tokens(model_kit)
+    expected_updates = _expected_sequential_prefill_updates(
+        len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
+    )
+
+    # WHEN
+    reporter = RecordingReporter()
+    for result in create_generator(
+        model_kit=model_kit,
+        prompt_tokens=prompt_tokens,
+        seed=0,
+        max_tokens=5,
+        temp=0.0,
+        prompt_progress_reporter=reporter,
+    ):
+        if result.stop_condition:
+            break
+
+    # THEN
+    update_events = [event for event in reporter.events if event["type"] == "update"]
+    assert len(update_events) == expected_updates, (
+        f"Expected {expected_updates} prefill progress updates "
+        f"for {len(prompt_tokens)} tokens with chunk size "
+        f"{CUSTOM_PREFILL_STEP_SIZE}, but got {len(update_events)}."
+    )
+
+
+def test_vision_model_prefill_step_size(vision_model_kit_custom_prefill):
+    """Verify that VisionModelKit respects a custom prefill_step_size."""
+    model_kit = vision_model_kit_custom_prefill
+
+    # GIVEN
+    assert isinstance(model_kit, VisionModelKit)
+    prompt_tokens = _long_prompt_tokens(model_kit)
     expected_updates = _expected_vision_prefill_updates(
         len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
     )
+
+    # WHEN
+    reporter = RecordingReporter()
+    for result in create_generator(
+        model_kit=model_kit,
+        prompt_tokens=prompt_tokens,
+        seed=0,
+        max_tokens=5,
+        temp=0.0,
+        prompt_progress_reporter=reporter,
+    ):
+        if result.stop_condition:
+            break
+
+    # THEN
     update_events = [event for event in reporter.events if event["type"] == "update"]
     assert len(update_events) == expected_updates, (
         f"Expected {expected_updates} prefill progress updates "
