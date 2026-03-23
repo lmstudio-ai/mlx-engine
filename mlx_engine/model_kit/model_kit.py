@@ -127,6 +127,7 @@ class ModelKit:
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
         self._shutdown = threading.Event()
+        # Public because the generation loop in generate.py reads this from the model_kit instance
         self.prefill_step_size = prefill_step_size
         if vocab_only:
             self._vocab_only_init(model_path)
