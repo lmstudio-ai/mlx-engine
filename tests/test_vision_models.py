@@ -604,7 +604,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 16  # begin, update x14, finish
+        assert len(reporter.events) == 6  # begin, update x4, finish
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -744,7 +744,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 16  # begin, update x14, finish
+        assert len(reporter.events) == 6  # begin, update x4, finish
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
