@@ -252,12 +252,12 @@ def load_model(
         else:
             model_kit = ModelKit(
                 model_path,
-                vocab_only,
+                prefill_step_size=prefill_step_size,
+                vocab_only=vocab_only,
                 max_kv_size=max_kv_size,
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
-                prefill_step_size=prefill_step_size,
             )
     sanitize_eos_tokens(model_kit)
     model_kit.start()
@@ -534,7 +534,7 @@ def _sequential_generation(
             max_tokens=max_tokens,
             logits_processors=logits_processors,
             prompt_progress_callback=mlx_lm_callback,
-            prefill_step_size=validate_prefill_step_size(model_kit.prefill_step_size),
+            prefill_step_size=model_kit.prefill_step_size,
             **generate_args,
         )
 

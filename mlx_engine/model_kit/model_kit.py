@@ -75,11 +75,11 @@ class ModelKit:
     def _full_model_init(
         self,
         model_path: Path,
+        prefill_step_size: int,
         max_kv_size: Optional[int] = None,
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
-        prefill_step_size: Optional[int] = None,
     ):
         if kv_bits and max_kv_size is not None:
             # Quantized KV cache is only supported for non-rotating KV cache
@@ -117,12 +117,12 @@ class ModelKit:
     def __init__(
         self,
         model_path: Path,
+        prefill_step_size: int,
         vocab_only: bool = False,
         max_kv_size: Optional[int] = None,
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
-        prefill_step_size: Optional[int] = None,
     ):
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
@@ -134,11 +134,11 @@ class ModelKit:
         else:
             self._full_model_init(
                 model_path,
-                max_kv_size,
-                kv_bits,
-                kv_group_size,
-                quantized_kv_start,
                 prefill_step_size,
+                max_kv_size=max_kv_size,
+                kv_bits=kv_bits,
+                kv_group_size=kv_group_size,
+                quantized_kv_start=quantized_kv_start,
             )
 
     def start(self):

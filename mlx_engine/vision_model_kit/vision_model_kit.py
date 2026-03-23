@@ -37,7 +37,7 @@ class VisionModelKit(ModelKit):
         model_path: Path,
         vocab_only: bool,
         trust_remote_code: bool,
-        prefill_step_size: Optional[int] = None,
+        prefill_step_size: int,
     ):
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
