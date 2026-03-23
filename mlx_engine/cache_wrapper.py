@@ -15,7 +15,7 @@ from mlx_engine.utils.prompt_progress_reporter import (
 )
 
 
-PROMPT_PROCESSING_CHUNK_SIZE = 512
+PROMPT_PROCESSING_CHUNK_SIZE = 2048
 
 
 def validate_prefill_step_size(prefill_step_size: Optional[int] = None) -> int:
