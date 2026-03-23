@@ -128,7 +128,7 @@ def sequential_model_kit_custom_prefill():
 @pytest.fixture
 def vision_model_kit_custom_prefill():
     """Load a VisionModelKit model with a custom prefill_step_size."""
-    model_path = model_getter("mlx-community/Qwen3.5-4B-MLX-4bit")
+    model_path = model_getter("mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
     kit = load_model(
         model_path=model_path,
         max_kv_size=20000,
