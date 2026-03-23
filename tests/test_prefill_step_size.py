@@ -74,12 +74,15 @@ def _expected_vision_prefill_updates(
     """Compute the expected number of 'update' events for the VisionModelKit path.
 
     VisionModelKit text-only prompts go through stream_generate, which fires
-    callbacks via MlxLmReporterAdapter (emit_begin=True). stream_generate fires
-    ceil(num_tokens / step_size) + 2 total callbacks (the chunked prefill plus
-    two boundary callbacks). MlxLmReporterAdapter converts the first into begin
-    and the last into finish, so: num_updates = ceil(num_tokens / step_size).
+    callbacks via MlxLmReporterAdapter (emit_begin=True). generate_step processes
+    num_tokens - 1 tokens in chunks (the last token seeds decode), so it fires
+    ceil((num_tokens - 1) / step_size) + 2 total callbacks (one initial, the
+    chunked prefill, and one completion). MlxLmReporterAdapter converts the first
+    into begin and the last into finish, so:
+    num_updates = ceil((num_tokens - 1) / step_size).
     """
-    return math.ceil(num_prompt_tokens / prefill_step_size)
+    prefillable_tokens = num_prompt_tokens - 1
+    return math.ceil(prefillable_tokens / prefill_step_size)
 
 
 def _long_prompt_tokens(model_kit):
