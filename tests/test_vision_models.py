@@ -836,8 +836,10 @@ Summarize this in one sentence<end_of_turn>
         )
 
     def test_qwen3_5_vision_then_text_only(self):
-        """Test that text-only generation works correctly after a vision request
-        on the same loaded Qwen3.5 model, verifying MRoPE state reset."""
+        """Test that text-only generation after a vision request produces the
+        same output as a cold-start text-only generation, verifying that MRoPE
+        state from the vision request does not leak into subsequent text-only
+        requests."""
         model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
         model_kit = load_model(
             model_path=model_path,
@@ -866,17 +868,28 @@ Summarize this in one sentence<end_of_turn>
             print()
             return generated_text
 
-        # Step 1: Vision request
+        text_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
         vision_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+        # Step 1: Text-only baseline (cold start)
+        baseline_text = generate_text(text_prompt)
+
+        # Step 2: Confirm determinism with a second text-only run
+        second_text = generate_text(text_prompt)
+        assert baseline_text == second_text, (
+            f"Text-only generation is not deterministic: {repr(baseline_text)} != {repr(second_text)}"
+        )
+
+        # Step 3: Vision request (populates MRoPE state)
         vision_text = generate_text(vision_prompt, images_b64=[self.toucan_image_b64])
         assert len(vision_text) > 0
-        assert "toucan" in vision_text.lower() or "bird" in vision_text.lower()
 
-        # Step 2: Text-only request on the same model instance
-        text_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
-        text_text = generate_text(text_prompt)
-        assert len(text_text) > 0
-        assert "toucan" in text_text.lower() or "bird" in text_text.lower()
+        # Step 4: Text-only after vision — must match baseline exactly
+        after_vision_text = generate_text(text_prompt)
+        assert baseline_text == after_vision_text, (
+            f"Text-only output after vision request differs from baseline "
+            f"(MRoPE state likely leaked): {repr(baseline_text)} != {repr(after_vision_text)}"
+        )
 
     @pytest.mark.heavy
     def test_qwen3_5_moe_vision(self):
