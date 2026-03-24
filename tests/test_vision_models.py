@@ -818,6 +818,42 @@ Summarize this in one sentence<end_of_turn>
         for i in range(len(progress_values) - 1):
             assert progress_values[i + 1] > progress_values[i]
 
+    def test_qwen3_5_vision(self):
+        """Test Qwen3.5 2B model with vision"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-2B-MLX-4bit",
+            prompt,
+        )
+
+    def test_qwen3_5_text_only(self):
+        """Test Qwen3.5 2B model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-2B-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_moe_vision(self):
+        """Test Qwen3.5 35B-A3B MoE model with vision"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            prompt,
+        )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_moe_text_only(self):
+        """Test Qwen3.5 35B-A3B MoE model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
+
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):
         model_path = model_getter("mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
