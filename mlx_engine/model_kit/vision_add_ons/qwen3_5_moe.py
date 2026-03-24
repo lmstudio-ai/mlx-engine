@@ -1,7 +1,6 @@
 import logging
 from pathlib import Path
 
-from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 from mlx_engine.model_kit.vision_add_ons.qwen3_5 import Qwen3_5VisionAddOn
 
 from mlx_vlm.models.qwen3_5_moe import (
@@ -28,17 +27,13 @@ class Qwen3_5MoEVisionAddOn(Qwen3_5VisionAddOn):
         # Skip Qwen3_5VisionAddOn.__init__ and call BaseVisionAddOn.__init__ directly,
         # since we need entirely different config/model classes.
         super(Qwen3_5VisionAddOn, self).__init__()
-
-        self._last_grid_thw = None
-        self.model_cls = Qwen3_5MoEVLModel
-        self._language_model_cls = Qwen3_5MoEVLMLanguageModel
-
-        self.vision_tower, _, self.config, self.processor = load_vision_addon(
+        self._init_common(
             model_path=model_path,
+            model_cls=Qwen3_5MoEVLModel,
+            language_model_cls=Qwen3_5MoEVLMLanguageModel,
             model_config_class=Qwen3_5MoEModelConfig,
             vision_config_class=Qwen3_5MoEVisionConfig,
             text_config_class=Qwen3_5MoETextConfig,
             vision_tower_class=Qwen3_5MoEVisionTower,
-            multi_modal_projector_class=None,
-            logger=logger,
+            addon_logger=logger,
         )

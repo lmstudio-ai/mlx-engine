@@ -34,20 +34,40 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
 
     def __init__(self, model_path: Path):
         super().__init__()
-
-        self._last_grid_thw = None
-        self.model_cls = Qwen3_5VLModel
-
-        self._language_model_cls = Qwen3_5VLMLanguageModel
-
-        self.vision_tower, _, self.config, self.processor = load_vision_addon(
+        self._init_common(
             model_path=model_path,
+            model_cls=Qwen3_5VLModel,
+            language_model_cls=Qwen3_5VLMLanguageModel,
             model_config_class=Qwen3_5ModelConfig,
             vision_config_class=Qwen3_5VisionConfig,
             text_config_class=Qwen3_5TextConfig,
             vision_tower_class=Qwen3_5VisionTower,
+            addon_logger=logger,
+        )
+
+    def _init_common(
+        self,
+        model_path,
+        model_cls,
+        language_model_cls,
+        model_config_class,
+        vision_config_class,
+        text_config_class,
+        vision_tower_class,
+        addon_logger,
+    ):
+        """Shared initialization for dense and MoE variants."""
+        self._last_grid_thw = None
+        self.model_cls = model_cls
+        self._language_model_cls = language_model_cls
+        self.vision_tower, _, self.config, self.processor = load_vision_addon(
+            model_path=model_path,
+            model_config_class=model_config_class,
+            vision_config_class=vision_config_class,
+            text_config_class=text_config_class,
+            vision_tower_class=vision_tower_class,
             multi_modal_projector_class=None,
-            logger=logger,
+            logger=addon_logger,
         )
 
     def compute_embeddings(
