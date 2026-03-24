@@ -37,6 +37,8 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
 
         self.model_cls = Qwen3_5VLModel
 
+        self._language_model_cls = Qwen3_5VLMLanguageModel
+
         self.vision_tower, _, self.config, self.processor = load_vision_addon(
             model_path=model_path,
             model_config_class=Qwen3_5ModelConfig,
@@ -71,7 +73,7 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
         # Compute and inject MRoPE position IDs for vision tokens
         if self._last_grid_thw is not None:
             mock_language_model = _MockLanguageModel(self.config)
-            position_ids, rope_deltas = Qwen3_5VLMLanguageModel.get_rope_index(
+            position_ids, rope_deltas = self._language_model_cls.get_rope_index(
                 mock_language_model,
                 input_ids[None],
                 image_grid_thw=self._last_grid_thw,
