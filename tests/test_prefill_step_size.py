@@ -130,7 +130,7 @@ def sequential_model_kit_custom_prefill():
 
 @pytest.fixture
 def vision_model_kit_custom_prefill():
-    """Load a VisionModelKit model with a custom prefill_step_size."""
+    """Load a VisionModelKit model with a custom prefill_step_size for text-only prompts."""
     model_path = model_getter("mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
     kit = load_model(
         model_path=model_path,
@@ -223,8 +223,8 @@ def test_sequential_prefill_step_size(sequential_model_kit_custom_prefill):
     )
 
 
-def test_vision_model_prefill_step_size(vision_model_kit_custom_prefill):
-    """Verify that VisionModelKit respects a custom prefill_step_size."""
+def test_vision_model_text_only_prefill_step_size(vision_model_kit_custom_prefill):
+    """Verify that VisionModelKit text-only generation respects a custom prefill_step_size."""
     model_kit = vision_model_kit_custom_prefill
 
     # GIVEN
