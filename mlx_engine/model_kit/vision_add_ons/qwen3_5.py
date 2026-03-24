@@ -35,6 +35,7 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
     def __init__(self, model_path: Path):
         super().__init__()
 
+        self._last_grid_thw = None
         self.model_cls = Qwen3_5VLModel
 
         self._language_model_cls = Qwen3_5VLMLanguageModel

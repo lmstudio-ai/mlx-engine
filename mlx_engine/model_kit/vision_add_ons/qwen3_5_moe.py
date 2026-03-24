@@ -29,6 +29,7 @@ class Qwen3_5MoEVisionAddOn(Qwen3_5VisionAddOn):
         # since we need entirely different config/model classes.
         super(Qwen3_5VisionAddOn, self).__init__()
 
+        self._last_grid_thw = None
         self.model_cls = Qwen3_5MoEVLModel
         self._language_model_cls = Qwen3_5MoEVLMLanguageModel
 
