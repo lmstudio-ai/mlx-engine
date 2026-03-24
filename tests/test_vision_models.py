@@ -19,6 +19,8 @@ MAX_IMAGE_SIZE = (1024, 1024)
 
 MAX_KV_CACHE_SIZE = 20000
 
+# 512 was the previous default, and some tests were written with assertions
+# on the number of prompt processing events.
 CACHING_TEST_PREFILL_STEP_SIZE = 512
 
 
