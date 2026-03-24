@@ -9,6 +9,10 @@ This patch replaces the attention module with mlx-vlm's MRoPE-capable version an
 adds position_ids threading through the model. For text-only (position_ids=None),
 the MRoPE attention falls back to sequential 3D positions, which is mathematically
 equivalent to standard RoPE.
+
+Implementation inspired by:
+  mlx-lm @ 564281f79328df07c4997b3a6ca00bd929381287
+  mlx-vlm @ 822a843941ea35ddee2849fb0633a80eac1d1d94
 """
 
 from typing import Any, Optional
