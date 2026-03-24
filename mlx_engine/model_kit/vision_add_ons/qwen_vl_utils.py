@@ -51,6 +51,9 @@ def compute_qwen_vl_embeddings(
     input_ids = inputs["input_ids"]
     pixel_values = inputs["pixel_values"]
     grid_thw = inputs.get("image_grid_thw")
+    # Set grid_thw on the addon.
+    # Only consumed by Qwen3_5VisionAddOn; harmless on other add-ons.
+    # Mirrors the side-effect pattern in upstream mlx-vlm (qwen3_5/qwen3_5.py:get_input_embeddings).
     addon._last_grid_thw = grid_thw
 
     # Get text embeddings
