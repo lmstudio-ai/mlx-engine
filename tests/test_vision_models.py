@@ -835,6 +835,49 @@ Summarize this in one sentence<end_of_turn>
             text_only=True,
         )
 
+    def test_qwen3_5_vision_then_text_only(self):
+        """Test that text-only generation works correctly after a vision request
+        on the same loaded Qwen3.5 model, verifying MRoPE state reset."""
+        model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=2048,
+            max_seq_nums=1,
+            trust_remote_code=True,
+        )
+
+        def generate_text(prompt, images_b64=None):
+            prompt_tokens = tokenize(model_kit, prompt)
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                images_b64=images_b64,
+                max_image_size=MAX_IMAGE_SIZE,
+                seed=0,
+                temp=0.0,
+                max_tokens=30,
+                repetition_penalty=1.01,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print()
+            return generated_text
+
+        # Step 1: Vision request
+        vision_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        vision_text = generate_text(vision_prompt, images_b64=[self.toucan_image_b64])
+        assert len(vision_text) > 0
+        assert "toucan" in vision_text.lower() or "bird" in vision_text.lower()
+
+        # Step 2: Text-only request on the same model instance
+        text_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        text_text = generate_text(text_prompt)
+        assert len(text_text) > 0
+        assert "toucan" in text_text.lower() or "bird" in text_text.lower()
+
     @pytest.mark.heavy
     def test_qwen3_5_moe_vision(self):
         """Test Qwen3.5 35B-A3B MoE model with vision"""
