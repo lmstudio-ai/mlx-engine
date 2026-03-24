@@ -51,6 +51,7 @@ def compute_qwen_vl_embeddings(
     input_ids = inputs["input_ids"]
     pixel_values = inputs["pixel_values"]
     grid_thw = inputs.get("image_grid_thw")
+    addon._last_grid_thw = grid_thw
 
     # Get text embeddings
     input_embeddings = text_model.language_model.model.embed_tokens(input_ids)
