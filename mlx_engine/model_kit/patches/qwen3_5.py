@@ -61,20 +61,20 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
     """
     Qwen3_5TextModel with MRoPE position state management.
 
-    Adds _position_ids and _rope_deltas attributes that can be set externally
+    Adds position_ids and rope_deltas attributes that can be set externally
     (by the vision add-on) before generation. During forward passes, computes
     the appropriate position_ids from this state and threads them to decoder layers.
 
     Position state logic (ported from mlx_vlm LanguageModel.__call__):
     - Both None: text-only path, passes position_ids=None (attention uses cache offset)
-    - _position_ids set: prefill, slices stored positions by cache offset
-    - Only _rope_deltas set: autoregressive generation, computes from delta
+    - position_ids set: prefill, slices stored positions by cache offset
+    - Only rope_deltas set: autoregressive generation, computes from delta
     """
 
     def __init__(self, args):
         super().__init__(args)
-        self._position_ids = None
-        self._rope_deltas = None
+        self.position_ids = None
+        self.rope_deltas = None
 
     def reset_mrope_state(self):
         """
@@ -84,8 +84,8 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         prediction. For vision requests, compute_embeddings sets fresh
         state immediately after.
         """
-        self._position_ids = None
-        self._rope_deltas = None
+        self.position_ids = None
+        self.rope_deltas = None
 
     def __call__(
         self,
@@ -122,11 +122,11 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
 
         Branching logic:
         - Both state attrs None: text-only, return None (attention uses cache offset)
-        - cache_offset == 0 and _position_ids set: first prefill chunk, slice stored positions
-        - cache_offset > 0 and _rope_deltas set: subsequent chunks / autoregressive, compute
+        - cache_offset == 0 and position_ids set: first prefill chunk, slice stored positions
+        - cache_offset > 0 and rope_deltas set: subsequent chunks / autoregressive, compute
           sequential positions from rope_deltas
         """
-        if self._position_ids is None and self._rope_deltas is None:
+        if self.position_ids is None and self.rope_deltas is None:
             return None
 
         cache_offset = 0
@@ -141,17 +141,17 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         # or when rope_deltas hasn't been computed yet, or when there's no cache.
         use_stored_positions = (
             (cache is not None and cache[self.fa_idx] is not None and cache_offset == 0)
-            or self._rope_deltas is None
+            or self.rope_deltas is None
             or cache is None
         )
 
-        if use_stored_positions and self._position_ids is not None:
+        if use_stored_positions and self.position_ids is not None:
             seq_length = inputs.shape[1]
-            return self._position_ids[:, :, cache_offset : cache_offset + seq_length]
+            return self.position_ids[:, :, cache_offset : cache_offset + seq_length]
 
         # Subsequent prefill chunks and autoregressive: compute from rope_deltas
         batch_size, seq_length = inputs.shape
-        delta = mx.array(cache_offset + self._rope_deltas if cache is not None else 0)
+        delta = mx.array(cache_offset + self.rope_deltas if cache is not None else 0)
         position_ids = mx.arange(seq_length).reshape(1, -1)
         position_ids = mx.broadcast_to(position_ids, (batch_size, seq_length))
 

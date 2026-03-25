@@ -54,7 +54,7 @@ def compute_qwen_vl_embeddings(
     # Set grid_thw on the addon.
     # Only consumed by Qwen3_5VisionAddOn; harmless on other add-ons.
     # Mirrors the side-effect pattern in upstream mlx-vlm (qwen3_5/qwen3_5.py:get_input_embeddings).
-    addon._last_grid_thw = grid_thw
+    addon.last_grid_thw = grid_thw
 
     # Get text embeddings
     input_embeddings = text_model.language_model.model.embed_tokens(input_ids)

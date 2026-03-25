@@ -68,7 +68,7 @@ def test_qwen3_5_prefill_decode_consistency(use_mrope):
         embeddings = text_model.embed_tokens(tokens)
         # 3D positions simulating a vision prompt where image tokens create
         # different spatial positions across temporal/height/width dims.
-        # rope_deltas and _position_ids must be consistent: the last token's
+        # rope_deltas and position_ids must be consistent: the last token's
         # position (1) must equal cache_offset (3) + rope_deltas (-2).
         position_ids = mx.array(
             [
@@ -85,16 +85,16 @@ def test_qwen3_5_prefill_decode_consistency(use_mrope):
 
     # Full prefill: all tokens at once with cache
     cache_full = make_prompt_cache(model)
-    text_model._position_ids = position_ids
-    text_model._rope_deltas = rope_deltas
+    text_model.position_ids = position_ids
+    text_model.rope_deltas = rope_deltas
     full_output = model(tokens, cache=cache_full, input_embeddings=embeddings)
     mx.eval(full_output)
     full_last_logits = full_output[0, -1, :]
 
     # Incremental: prefill N-1 tokens, then decode last token
     cache_incr = make_prompt_cache(model)
-    text_model._position_ids = position_ids
-    text_model._rope_deltas = rope_deltas
+    text_model.position_ids = position_ids
+    text_model.rope_deltas = rope_deltas
     model(
         tokens[:, :-1],
         cache=cache_incr,
