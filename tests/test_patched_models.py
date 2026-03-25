@@ -8,6 +8,7 @@ from small configs with random weights, test through the public interface.
 import pytest
 
 import mlx.core as mx
+from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import make_prompt_cache
 
 from mlx_engine.model_kit.patches.qwen3_5 import apply_patches
@@ -37,11 +38,14 @@ QWEN3_5_TEXT_CONFIG = {
 }
 
 
-def make_model():
+def make_model(**text_config_overrides):
     args = ModelArgs.from_dict(
         {
             "model_type": "qwen3_5",
-            "text_config": QWEN3_5_TEXT_CONFIG,
+            "text_config": {
+                **QWEN3_5_TEXT_CONFIG,
+                **text_config_overrides,
+            },
         }
     )
     return Model(args)
@@ -109,4 +113,69 @@ def test_qwen3_5_prefill_decode_consistency(use_mrope):
     max_diff = mx.max(mx.abs(full_last_logits - decode_logits)).item()
     assert mx.allclose(full_last_logits, decode_logits, atol=1e-4).item(), (
         f"Prefill-decode logit mismatch (max diff {max_diff:.6f})."
+    )
+
+
+def test_qwen3_5_mrope_chunked_prefill_matches_unchunked():
+    """Chunked prefill must match unchunked prefill even when a later prefill
+    chunk is still inside a non-sequential MRoPE image span.
+
+    The prompt is only 6 tokens long, but forcing prefill_step_size=2 reproduces
+    the same chunking scenario as a 512-token prefill boundary in production:
+      - chunk 1 processes text + first image token
+      - chunk 2 processes image tokens while cache_offset > 0
+    Later prompt chunks must continue using the stored 3D position_ids until the
+    precomputed prompt positions are exhausted.
+    """
+    mx.random.seed(0)
+
+    model = make_model(
+        num_hidden_layers=2,
+        full_attention_interval=2,
+    )
+    text_model = model.language_model.model
+
+    tokens = mx.array([0, 1, 2, 3, 4, 5])
+    embeddings = text_model.embed_tokens(tokens)
+
+    # Synthetic prompt layout:
+    #   token 0: text
+    #   tokens 1-4: 2x2 image span with non-sequential 3D positions
+    #   token 5: trailing text
+    #
+    # The final text token's position (3) equals cache_offset (5) + rope_deltas (-2),
+    # so the reference unchunked path and decode path are consistent.
+    position_ids = mx.array(
+        [
+            [[0, 1, 1, 1, 1, 3]],  # temporal
+            [[0, 1, 1, 2, 2, 3]],  # height
+            [[0, 1, 2, 1, 2, 3]],  # width
+        ]
+    )
+    rope_deltas = mx.array(-2)
+
+    def first_step_logprobs(prefill_step_size: int) -> mx.array:
+        text_model.position_ids = position_ids
+        text_model.rope_deltas = rope_deltas
+        step = generate_step(
+            tokens,
+            model,
+            max_tokens=1,
+            prefill_step_size=prefill_step_size,
+            input_embeddings=embeddings,
+        )
+        _, logprobs = next(step)
+        step.close()
+        mx.eval(logprobs)
+        return logprobs
+
+    # Single prefill chunk for tokens[:-1].
+    reference_logprobs = first_step_logprobs(prefill_step_size=16)
+
+    # Forces multiple prefill chunks; chunk 2 still lies inside the image span.
+    chunked_logprobs = first_step_logprobs(prefill_step_size=2)
+
+    max_diff = mx.max(mx.abs(reference_logprobs - chunked_logprobs)).item()
+    assert mx.allclose(reference_logprobs, chunked_logprobs, atol=1e-4).item(), (
+        f"Chunked MRoPE prefill mismatch (max diff {max_diff:.6f})."
     )
