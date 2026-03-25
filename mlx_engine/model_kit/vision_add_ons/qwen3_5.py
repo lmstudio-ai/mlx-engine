@@ -70,6 +70,10 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
             logger=addon_logger,
         )
 
+    def clear_prediction_state(self, text_model: nn.Module) -> None:
+        """Reset MRoPE state injected by compute_embeddings."""
+        text_model.language_model.model.reset_mrope_state()
+
     def compute_embeddings(
         self,
         text_model: nn.Module,

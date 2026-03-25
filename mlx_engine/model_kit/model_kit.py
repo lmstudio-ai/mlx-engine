@@ -157,6 +157,8 @@ class ModelKit:
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
+        if self.vision_add_on is not None:
+            self.vision_add_on.clear_prediction_state(self.model)
         ### TEXT-ONLY PROCESS_PROMPT ###
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
         if is_text_only_processing:

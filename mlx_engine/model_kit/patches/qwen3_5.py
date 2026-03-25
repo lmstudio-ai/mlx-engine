@@ -76,6 +76,17 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         self._position_ids = None
         self._rope_deltas = None
 
+    def reset_mrope_state(self):
+        """
+        Reset MRoPE position state.
+
+        Called by the vision add-on's clear_prediction_state before every
+        prediction. For vision requests, compute_embeddings sets fresh
+        state immediately after.
+        """
+        self._position_ids = None
+        self._rope_deltas = None
+
     def __call__(
         self,
         inputs: mx.array,
@@ -85,14 +96,6 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         if input_embeddings is not None:
             hidden_states = input_embeddings
         else:
-            # Reset MRoPE state for text-only requests. The vision add-on sets
-            # _position_ids and _rope_deltas before calling __call__ with
-            # input_embeddings, but text-only requests bypass compute_embeddings
-            # entirely. Without this reset, a text-only request after a vision
-            # request would use stale MRoPE positions. Mirrors the reset in
-            # mlx-vlm's Model.get_input_embeddings (qwen3_5.py:34-37).
-            self._position_ids = None
-            self._rope_deltas = None
             hidden_states = self.embed_tokens(inputs)
 
         if cache is None:
