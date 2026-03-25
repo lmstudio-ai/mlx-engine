@@ -79,6 +79,7 @@ class ModelKit:
     def _full_model_init(
         self,
         model_path: Path,
+        prefill_step_size: int,
         max_kv_size: Optional[int] = None,
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
@@ -104,6 +105,7 @@ class ModelKit:
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
+            chunk_size=prefill_step_size,
         )
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
@@ -119,6 +121,7 @@ class ModelKit:
     def __init__(
         self,
         model_path: Path,
+        prefill_step_size: int,
         vocab_only: bool = False,
         max_kv_size: Optional[int] = None,
         kv_bits: Optional[int] = None,
@@ -128,15 +131,18 @@ class ModelKit:
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
         self._shutdown = threading.Event()
+        # Public because the generation loop in generate.py reads this from the model_kit instance
+        self.prefill_step_size = prefill_step_size
         if vocab_only:
             self._vocab_only_init(model_path)
         else:
             self._full_model_init(
                 model_path,
-                max_kv_size,
-                kv_bits,
-                kv_group_size,
-                quantized_kv_start,
+                prefill_step_size,
+                max_kv_size=max_kv_size,
+                kv_bits=kv_bits,
+                kv_group_size=kv_group_size,
+                quantized_kv_start=quantized_kv_start,
             )
 
     def start(self):

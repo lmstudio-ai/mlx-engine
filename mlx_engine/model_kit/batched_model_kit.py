@@ -56,6 +56,7 @@ class BatchedModelKit:
     def __init__(
         self,
         model_path: Path,
+        prefill_step_size: int,
         max_kv_size: int | None = None,
         max_seq_nums: int | None = None,
     ):
@@ -81,6 +82,7 @@ class BatchedModelKit:
         )
         self._detokenizer = self.tokenizer.detokenizer
         self._max_kv_size = max_kv_size
+        self._prefill_step_size = prefill_step_size
         logger.info("BatchedModelKit loaded successfully")
 
     def start(self):
@@ -259,6 +261,7 @@ class BatchedModelKit:
             # As soon as we receive any prompt, stop decoding, prefill the new prompt, and add it to the decoding batch
             # We probably want to make this behavior configurable, so that new prompts do not pause existing decodes
             prefill_batch_size=1,
+            prefill_step_size=self._prefill_step_size,
             stop_tokens=set(self.tokenizer.eos_token_ids),
             # Do not set any global post-processors, sampler and logits_processor are set per-request
             sampler=None,
