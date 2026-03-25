@@ -57,7 +57,6 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
         addon_logger,
     ):
         """Shared initialization for dense and MoE variants."""
-        self.last_grid_thw = None
         self.model_cls = model_cls
         self._language_model_cls = language_model_cls
         self.vision_tower, _, self.config, self.processor = load_vision_addon(
@@ -86,7 +85,7 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
         then inject MRoPE position IDs into the patched text model.
         """
 
-        input_ids, final_embeds = compute_qwen_vl_embeddings(
+        result = compute_qwen_vl_embeddings(
             addon=self,
             text_model=text_model,
             prompt_tokens=prompt_tokens,
@@ -96,14 +95,14 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
         )
 
         # Compute and inject MRoPE position IDs for vision tokens
-        if self.last_grid_thw is not None:
+        if result.grid_thw is not None:
             mock_language_model = _MockLanguageModel(self.config)
             position_ids, rope_deltas = self._language_model_cls.get_rope_index(
                 mock_language_model,
-                input_ids[None],
-                image_grid_thw=self.last_grid_thw,
+                result.input_ids[None],
+                image_grid_thw=result.grid_thw,
             )
             text_model.language_model.model.position_ids = position_ids
             text_model.language_model.model.rope_deltas = rope_deltas
 
-        return input_ids, final_embeds
+        return result.input_ids, result.embeddings
