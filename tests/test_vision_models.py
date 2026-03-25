@@ -19,6 +19,10 @@ MAX_IMAGE_SIZE = (1024, 1024)
 
 MAX_KV_CACHE_SIZE = 20000
 
+# 512 was the previous default, and some tests were written with assertions
+# on the number of prompt processing events.
+CACHING_TEST_PREFILL_STEP_SIZE = 512
+
 
 class TestVisionModels:
     @classmethod
@@ -218,7 +222,7 @@ class TestVisionModels:
         "model",
         [
             "lmstudio-community/Mistral-Small-3.2-24B-Instruct-2506-MLX-4bit",
-            "lmstudio-community/Devstral-Small-2-24B-Instruct-2512-MLX-4bit",
+            "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
         ],
     )
     def test_mistral3_text_only_generation_caching(self, model):
@@ -229,6 +233,7 @@ class TestVisionModels:
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
             max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
         def generate_text(prompt):
@@ -263,8 +268,8 @@ class TestVisionModels:
         # Generation 2 - ask for a detail about the story, should not reprocess
         prompt += generated_text + "[INST]What was the main character's name?[/INST]"
         num_tokens = len(model_kit.tokenize(prompt))
-        # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
-        assert num_tokens > 512
+        # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
+        assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
         assert len(reporter.events) == 3  # begin, update, finish
         begin_event = reporter.events[0]
@@ -505,6 +510,7 @@ You are a helpful assistant.<|im_end|>
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
             max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
         def generate_text(prompt):
@@ -549,8 +555,8 @@ You are a helpful assistant.<|im_end|>
             <start_of_turn>model
             """)
         num_tokens = len(model_kit.tokenize(prompt))
-        # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
-        assert num_tokens > 512
+        # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
+        assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
         assert len(reporter.events) == 3  # begin, update, finish
         begin_event = reporter.events[0]
@@ -565,6 +571,7 @@ You are a helpful assistant.<|im_end|>
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
             max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
         print(type(model_kit))
 
@@ -645,6 +652,7 @@ Summarize this in one sentence<end_of_turn>
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
             max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
         def generate_text(prompt):
@@ -689,8 +697,8 @@ Summarize this in one sentence<end_of_turn>
             <start_of_turn>model
             """)
         num_tokens = len(model_kit.tokenize(prompt))
-        # Without caching, prompts > 512 tokens cause multi-batch processing. Ensure prompt meets that condition
-        assert num_tokens > 512
+        # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
+        assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
         assert len(reporter.events) == 3  # begin, update, finish
         begin_event = reporter.events[0]
@@ -706,6 +714,7 @@ Summarize this in one sentence<end_of_turn>
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
             max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
         def generate_text(prompt):

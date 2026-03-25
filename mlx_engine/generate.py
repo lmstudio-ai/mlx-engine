@@ -39,7 +39,7 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from mlx_engine.cache_wrapper import PROMPT_PROCESSING_CHUNK_SIZE
+from mlx_engine.cache_wrapper import validate_prefill_step_size
 from mlx_engine.utils.prompt_progress_reporter import (
     BatchedMlxLmReporterAdapter,
     LoggerReporter,
@@ -128,6 +128,7 @@ def load_model(
     kv_bits: Optional[int] = None,
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
+    prefill_step_size: Optional[int] = None,
 ) -> ModelKit | VisionModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -146,6 +147,8 @@ def load_model(
         kv_bits (Optional[int]): Number of bits for KV cache quantization.
         kv_group_size (Optional[int]): Group size for KV cache quantization.
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
+        prefill_step_size (Optional[int]): Number of tokens to process per prefill chunk.
+            Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
@@ -158,6 +161,7 @@ def load_model(
         ValueError: If the model configuration is invalid or unsupported
     """
     set_seed(seed)
+    prefill_step_size = validate_prefill_step_size(prefill_step_size)
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
     model_type = config_json.get("model_type", None)
@@ -187,7 +191,12 @@ def load_model(
             raise ValueError(
                 "numParallelSessions must be 1 for vision models as they do not currently support continuous batching"
             )
-        model_kit = VisionModelKit(model_path, vocab_only, trust_remote_code)
+        model_kit = VisionModelKit(
+            model_path,
+            vocab_only,
+            trust_remote_code,
+            prefill_step_size=prefill_step_size,
+        )
     else:
         # For non-vision models or ModelKit-supported vision models, choose between
         # BatchedModelKit (continuous batching) and ModelKit (sequential)
@@ -238,11 +247,13 @@ def load_model(
                 model_path,
                 max_kv_size=max_kv_size,
                 max_seq_nums=max_seq_nums,
+                prefill_step_size=prefill_step_size,
             )
         else:
             model_kit = ModelKit(
                 model_path,
-                vocab_only,
+                prefill_step_size=prefill_step_size,
+                vocab_only=vocab_only,
                 max_kv_size=max_kv_size,
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
@@ -523,7 +534,7 @@ def _sequential_generation(
             max_tokens=max_tokens,
             logits_processors=logits_processors,
             prompt_progress_callback=mlx_lm_callback,
-            prefill_step_size=PROMPT_PROCESSING_CHUNK_SIZE,
+            prefill_step_size=model_kit.prefill_step_size,
             **generate_args,
         )
 

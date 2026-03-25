@@ -15,7 +15,32 @@ from mlx_engine.utils.prompt_progress_reporter import (
 )
 
 
-PROMPT_PROCESSING_CHUNK_SIZE = 512
+PROMPT_PROCESSING_CHUNK_SIZE = 2048
+
+
+def validate_prefill_step_size(prefill_step_size: Optional[int] = None) -> int:
+    """
+    Resolve and validate the configured prefill chunk size.
+
+    Args:
+        prefill_step_size: Optional override for tokens processed per prefill chunk.
+
+    Returns:
+        int: The provided chunk size, or PROMPT_PROCESSING_CHUNK_SIZE when unset.
+
+    Raises:
+        ValueError: If prefill_step_size is not a positive integer.
+    """
+    if prefill_step_size is None:
+        return PROMPT_PROCESSING_CHUNK_SIZE
+    if (
+        isinstance(prefill_step_size, bool)
+        or not isinstance(prefill_step_size, int)
+        or prefill_step_size < 1
+    ):
+        raise ValueError("prefill_step_size must be a positive integer")
+    return prefill_step_size
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +59,7 @@ class CacheWrapper:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
-        chunk_size: int = PROMPT_PROCESSING_CHUNK_SIZE,
+        chunk_size: int,
     ):
         """
         Initialize the CacheWrapper.
@@ -42,6 +67,7 @@ class CacheWrapper:
         Args:
             model (nn.Module): The model to be cached.
             max_kv_size (Optional[int]): Maximum size of the key-value cache.
+            chunk_size (int): Number of tokens per prefill chunk.
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
