@@ -66,9 +66,17 @@ def test_qwen3_5_prefill_decode_consistency(use_mrope):
 
     if use_mrope:
         embeddings = text_model.embed_tokens(tokens)
-        # Non-degenerate 3D positions: height dim offset by 50, simulating
-        # image spatial positions that differ across MRoPE dimensions.
-        position_ids = mx.array([[[0, 1, 2, 3]], [[50, 51, 52, 53]], [[0, 1, 2, 3]]])
+        # 3D positions simulating a vision prompt where image tokens create
+        # different spatial positions across temporal/height/width dims.
+        # rope_deltas and _position_ids must be consistent: the last token's
+        # position (1) must equal cache_offset (3) + rope_deltas (-2).
+        position_ids = mx.array(
+            [
+                [[0, 1, 0, 1]],  # temporal
+                [[0, 0, 1, 1]],  # height — differs from dim 0 during prefill
+                [[0, 1, 1, 1]],  # width  — differs from both during prefill
+            ]
+        )
         rope_deltas = mx.array(-2)
     else:
         embeddings = None
