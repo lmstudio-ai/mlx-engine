@@ -179,3 +179,71 @@ def test_qwen3_5_mrope_chunked_prefill_matches_unchunked():
     assert mx.allclose(reference_logprobs, chunked_logprobs, atol=1e-4).item(), (
         f"Chunked MRoPE prefill mismatch (max diff {max_diff:.6f})."
     )
+
+
+def test_qwen3_5_mrope_later_single_image_chunk_matches_unchunked():
+    """Chunked prefill must match unchunked prefill even when the full image
+    span is contained in a later prefill chunk.
+
+    This isolates the more general bug: the implementation must keep using the
+    stored multimodal prompt positions for any later chunk that still belongs to
+    the original multimodal prompt. The image tokens do not cross a chunk
+    boundary here; earlier text simply pushes them out of the first chunk.
+
+    With prefill_step_size=2:
+      - chunk 1 processes only leading text
+      - chunk 2 processes the entire image span
+      - chunk 3 processes trailing text
+    """
+    mx.random.seed(0)
+
+    model = make_model(
+        num_hidden_layers=2,
+        full_attention_interval=2,
+    )
+    text_model = model.language_model.model
+
+    tokens = mx.array([0, 1, 2, 3, 4, 5])
+    embeddings = text_model.embed_tokens(tokens)
+
+    # Synthetic prompt layout:
+    #   tokens 0-1: leading text
+    #   tokens 2-3: 1x2 image span with non-sequential 3D positions
+    #   tokens 4-5: trailing text
+    #
+    # The image span is fully contained in chunk 2 when prefill_step_size=2.
+    # Continuation after the prompt is sequential again, so rope_deltas is 0.
+    position_ids = mx.array(
+        [
+            [[0, 1, 2, 2, 4, 5]],  # temporal
+            [[0, 1, 2, 2, 4, 5]],  # height
+            [[0, 1, 2, 3, 4, 5]],  # width
+        ]
+    )
+    rope_deltas = mx.array(0)
+
+    def first_step_logprobs(prefill_step_size: int) -> mx.array:
+        text_model.position_ids = position_ids
+        text_model.rope_deltas = rope_deltas
+        step = generate_step(
+            tokens,
+            model,
+            max_tokens=1,
+            prefill_step_size=prefill_step_size,
+            input_embeddings=embeddings,
+        )
+        _, logprobs = next(step)
+        step.close()
+        mx.eval(logprobs)
+        return logprobs
+
+    # Single prefill chunk for tokens[:-1].
+    reference_logprobs = first_step_logprobs(prefill_step_size=16)
+
+    # Chunk 2 contains the whole image span but is not the first prefill chunk.
+    chunked_logprobs = first_step_logprobs(prefill_step_size=2)
+
+    max_diff = mx.max(mx.abs(reference_logprobs - chunked_logprobs)).item()
+    assert mx.allclose(reference_logprobs, chunked_logprobs, atol=1e-4).item(), (
+        f"Later-chunk MRoPE prefill mismatch (max diff {max_diff:.6f})."
+    )
