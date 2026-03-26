@@ -407,20 +407,19 @@ def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm():
     mx.clear_cache()
 
     # --- Compare: run all comparisons before failing ---
-    # All three pairwise max diffs ~0.45 +/- 0.5.
-    atol = 0.5
+    vlm_atol = 0.5
     diff_patched_unpatched = mx.max(mx.abs(patched_logits - unpatched_logits)).item()
     diff_patched_vlm = mx.max(mx.abs(patched_logits - vlm_logits)).item()
     diff_unpatched_vlm = mx.max(mx.abs(unpatched_logits - vlm_logits)).item()
 
     failures = []
-    if not mx.allclose(patched_logits, unpatched_logits, atol=atol).item():
+    if diff_patched_unpatched != 0.0:
         failures.append(
             f"Patched vs unpatched mlx-lm: max diff {diff_patched_unpatched:.6f}"
         )
-    if not mx.allclose(patched_logits, vlm_logits, atol=atol).item():
+    if not mx.allclose(patched_logits, vlm_logits, atol=vlm_atol).item():
         failures.append(f"Patched mlx-lm vs mlx-vlm: max diff {diff_patched_vlm:.6f}")
-    if not mx.allclose(unpatched_logits, vlm_logits, atol=atol).item():
+    if not mx.allclose(unpatched_logits, vlm_logits, atol=vlm_atol).item():
         failures.append(
             f"Unpatched mlx-lm vs mlx-vlm: max diff {diff_unpatched_vlm:.6f}"
         )
@@ -431,5 +430,5 @@ def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm():
         f"\n  unpatched vs vlm:    {diff_unpatched_vlm:.6f}"
     )
     assert len(failures) == 0, (
-        f"Logit mismatch (atol={atol}):{summary}\nFailures: {'; '.join(failures)}"
+        f"Logit mismatch (atol={vlm_atol}):{summary}\nFailures: {'; '.join(failures)}"
     )
