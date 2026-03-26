@@ -40,6 +40,11 @@ from mlx_vlm.models.qwen3_5.language import (
     apply_multimodal_rotary_pos_emb,
 )
 
+# Stable aliases to the pristine mlx-lm classes captured before apply_patches()
+# mutates mlx_lm.models.qwen3_5 in place.
+OriginalDecoderLayer = DecoderLayer
+OriginalQwen3_5TextModel = Qwen3_5TextModel
+
 
 class PatchedDecoderLayer(DecoderLayer):
     """

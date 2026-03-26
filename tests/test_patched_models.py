@@ -15,13 +15,14 @@ import mlx.core as mx
 from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 
-# Save original (unpatched) classes before applying patches
-from mlx_lm.models.qwen3_5 import (
-    DecoderLayer as _OrigDecoderLayer,
-    Qwen3_5TextModel as _OrigTextModel,
+# Import pristine mlx-lm classes from the patch module's cached pre-patch refs.
+from mlx_engine.model_kit.patches.qwen3_5 import (
+    OriginalDecoderLayer as _OrigDecoderLayer,
+    OriginalQwen3_5TextModel as _OrigTextModel,
+    PatchedDecoderLayer,
+    PatchedQwen3_5TextModel,
+    apply_patches,
 )
-
-from mlx_engine.model_kit.patches.qwen3_5 import apply_patches
 
 apply_patches()
 
@@ -71,6 +72,19 @@ def make_batched_prompt_cache(model, left_padding):
         else:
             raise AssertionError(f"Unexpected cache type: {type(layer_cache)!r}")
     return cache
+
+
+def _assert_pristine_qwen3_5_refs() -> None:
+    if _OrigDecoderLayer is PatchedDecoderLayer:
+        raise AssertionError(
+            "Expected a pristine qwen3.5 DecoderLayer reference, but the test "
+            "harness captured the patched class."
+        )
+    if _OrigTextModel is PatchedQwen3_5TextModel:
+        raise AssertionError(
+            "Expected a pristine qwen3.5 Qwen3_5TextModel reference, but the "
+            "test harness captured the patched class."
+        )
 
 
 @pytest.mark.parametrize("use_mrope", [False, True], ids=["text_only", "mrope"])
@@ -339,6 +353,7 @@ def _load_unpatched_mlx_lm(model_path: Path):
     import mlx_lm.models.qwen3_5 as mod
     import mlx_lm.utils
 
+    _assert_pristine_qwen3_5_refs()
     patched_dl = mod.DecoderLayer
     patched_tm = mod.Qwen3_5TextModel
     mod.DecoderLayer = _OrigDecoderLayer
