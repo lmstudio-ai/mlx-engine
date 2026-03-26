@@ -5,9 +5,14 @@ The mlx-lm Qwen3.5 model uses standard RoPE (via Qwen3NextAttention), which work
 for text-only generation. However, Qwen3.5 requires Multimodal RoPE (MRoPE) with
 3D position IDs for vision tasks.
 
-This patch keeps the original attention module for text-only calls (preserving
-bit-identical output with unpatched mlx-lm) and adds an MRoPE code path that is
-only used when 3D position_ids are provided by the vision add-on.
+This patch adds a dual code path to each decoder layer, selected by position_ids:
+
+- Text-only (position_ids=None): uses the original mlx-lm modules (Qwen3NextAttention
+  with nn.RoPE, GatedDeltaNet with _precise_swiglu) — bit-identical to unpatched mlx-lm.
+- Vision (position_ids provided): mirrors mlx-vlm's computation (MRoPE attention,
+  GatedDeltaNet with bfloat16 swiglu) — bit-identical to native mlx-vlm.
+
+Both paths read weights from the same modules; no weight duplication.
 
 Implementation inspired by:
   mlx-lm @ 564281f79328df07c4997b3a6ca00bd929381287
@@ -17,6 +22,7 @@ Implementation inspired by:
 from typing import Any, Optional
 
 import mlx.core as mx
+import mlx.nn as nn
 
 from mlx_lm.models.qwen3_5 import (
     DecoderLayer,
@@ -27,6 +33,8 @@ from mlx_lm.models.base import (
     create_ssm_mask,
     scaled_dot_product_attention,
 )
+from mlx_lm.models.activations import swiglu
+from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_vlm.models.qwen3_5.language import (
     Qwen3_5RotaryEmbedding,
     apply_multimodal_rotary_pos_emb,
@@ -38,11 +46,10 @@ class PatchedDecoderLayer(DecoderLayer):
     DecoderLayer that accepts position_ids and uses MRoPE when they are provided.
 
     For text-only calls (position_ids=None), delegates to the original
-    Qwen3NextAttention with nn.RoPE — bit-identical to the unpatched model.
+    Qwen3NextAttention and GatedDeltaNet — bit-identical to the unpatched model.
 
-    For vision calls (position_ids provided), applies interleaved multimodal
-    RoPE using the same q/k/v/o projections and norms from the original
-    attention module.
+    For vision calls (position_ids provided), uses mlx-vlm's MRoPE attention
+    and GatedDeltaNet — bit-identical to the native mlx-vlm model.
     """
 
     def __init__(self, args, layer_idx):
@@ -64,7 +71,12 @@ class PatchedDecoderLayer(DecoderLayer):
         position_ids: Optional[mx.array] = None,
     ) -> mx.array:
         if self.is_linear:
-            r = self.linear_attn(self.input_layernorm(x), mask, cache)
+            if position_ids is None:
+                # Text-only: use original mlx-lm GatedDeltaNet
+                r = self.linear_attn(self.input_layernorm(x), mask, cache)
+            else:
+                # Vision: use mlx-vlm GatedDeltaNet computation path
+                r = self._vlm_gated_delta_net(self.input_layernorm(x), mask, cache)
         elif position_ids is None:
             # Text-only: use original Qwen3NextAttention with nn.RoPE
             r = self.self_attn(self.input_layernorm(x), mask, cache)
@@ -121,6 +133,92 @@ class PatchedDecoderLayer(DecoderLayer):
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
         return attn.o_proj(output * mx.sigmoid(gate))
+
+    def _vlm_gated_delta_net(
+        self,
+        inputs: mx.array,
+        mask: Optional[mx.array],
+        cache: Optional[Any],
+    ) -> mx.array:
+        """
+        mlx-vlm GatedDeltaNet computation path, reusing self.linear_attn's weights.
+
+        Mirrors Qwen3_5GatedDeltaNet.__call__ from mlx-vlm to produce
+        bit-identical output with the native mlx-vlm model.
+        """
+        linear = self.linear_attn
+        B, S, _ = inputs.shape
+
+        mixed_qkv = linear.in_proj_qkv(inputs)
+
+        z = linear.in_proj_z(inputs)
+        z = z.reshape(B, S, -1, linear.head_v_dim)
+
+        b = linear.in_proj_b(inputs)
+        a = linear.in_proj_a(inputs)
+
+        if cache is not None and cache[0] is not None:
+            conv_state = cache[0]
+            if conv_state.shape[0] != B:
+                conv_state = mx.zeros(
+                    (B, linear.conv_kernel_size - 1, linear.conv_dim),
+                    dtype=inputs.dtype,
+                )
+        else:
+            conv_state = mx.zeros(
+                (B, linear.conv_kernel_size - 1, linear.conv_dim),
+                dtype=inputs.dtype,
+            )
+
+        if mask is not None:
+            if mask.shape[0] != B:
+                mask = None
+            else:
+                mixed_qkv = mx.where(mask[..., None], mixed_qkv, 0)
+        conv_input = mx.concatenate([conv_state, mixed_qkv], axis=1)
+        if cache is not None:
+            cache[0] = conv_input[:, -(linear.conv_kernel_size - 1) :]
+        conv_out = nn.silu(linear.conv1d(conv_input))
+
+        q, k, v = [
+            t.reshape(B, S, h, d)
+            for t, h, d in zip(
+                mx.split(conv_out, [linear.key_dim, 2 * linear.key_dim], -1),
+                [linear.num_k_heads, linear.num_k_heads, linear.num_v_heads],
+                [linear.head_k_dim, linear.head_k_dim, linear.head_v_dim],
+            )
+        ]
+
+        state = cache[1] if cache else None
+        if state is not None and state.shape[0] != B:
+            state = None
+        inv_scale = k.shape[-1] ** -0.5
+        q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
+        k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+
+        out, state = gated_delta_update(
+            q,
+            k,
+            v,
+            a,
+            b,
+            linear.A_log,
+            linear.dt_bias,
+            state,
+            mask,
+            use_kernel=not self.training,
+        )
+
+        if cache is not None:
+            cache[1] = state
+
+        # mlx-vlm uses swiglu in bfloat16; mlx-lm's RMSNormGated uses
+        # _precise_swiglu which upcasts to float32. We follow mlx-vlm here
+        # to produce bit-identical output.
+        norm = linear.norm
+        x = mx.fast.rms_norm(out, norm.weight, norm.eps)
+        out = swiglu(z, x)
+        return linear.out_proj(out.reshape(B, S, -1))
 
 
 class PatchedQwen3_5TextModel(Qwen3_5TextModel):
