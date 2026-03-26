@@ -118,16 +118,16 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         """
         Compute position_ids for the current forward pass from stored state.
 
-        Ported from mlx_vlm.models.qwen3_5.language.LanguageModel.__call__ lines 594-651.
-
-        Branching logic:
-        - Both state attrs None: text-only, return None (attention uses cache offset)
-        - cache_offset == 0 and position_ids set: first prefill chunk, slice stored positions
-        - cache_offset > 0 and rope_deltas set: subsequent chunks / autoregressive, compute
-          sequential positions from rope_deltas
+        Inspired by mlx_vlm.models.qwen3_5.language.LanguageModel.__call__ .
         """
+        # Text-only path; no MRoPE state was injected for this call.
         if self.position_ids is None and self.rope_deltas is None:
             return None
+        if self.position_ids is not None and self.rope_deltas is None:
+            raise ValueError(
+                "MRoPE state is inconsistent: position_ids are set but rope_deltas "
+                "are missing."
+            )
 
         cache_offset = 0
         if cache is not None and cache[self.fa_idx] is not None:
@@ -137,21 +137,46 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
             elif isinstance(offset, mx.array):
                 cache_offset = (offset if offset.ndim == 0 else offset[0]).item()
 
-        # Use stored position_ids for the first prefill chunk (cache_offset == 0),
-        # or when rope_deltas hasn't been computed yet, or when there's no cache.
-        use_stored_positions = (
-            (cache is not None and cache[self.fa_idx] is not None and cache_offset == 0)
-            or self.rope_deltas is None
-            or cache is None
+        batch_size, seq_length = inputs.shape
+
+        # This branch is taken for vision requests while the current call is still
+        # consuming prompt tokens that were part of the original multimodal prompt.
+        # That includes chunked prompt prefill where cache_offset > 0 but we are still
+        # inside the image span, and it also covers callers whose chunk begins inside
+        # the stored prompt positions but extends past them by stitching a stored
+        # prefix to a sequential tail.
+        if self.position_ids is not None:
+            stored_seq_length = self.position_ids.shape[2]
+            if cache_offset < stored_seq_length:
+                stored_end = min(cache_offset + seq_length, stored_seq_length)
+                stored_positions = self.position_ids[:, :, cache_offset:stored_end]
+                if stored_end - cache_offset == seq_length:
+                    return stored_positions
+
+                tail_seq_length = seq_length - (stored_end - cache_offset)
+                tail_positions = self._compute_sequential_position_ids(
+                    batch_size=batch_size,
+                    seq_length=tail_seq_length,
+                    start_offset=stored_seq_length,
+                )
+                return mx.concatenate([stored_positions, tail_positions], axis=2)
+
+        return self._compute_sequential_position_ids(
+            batch_size=batch_size,
+            seq_length=seq_length,
+            start_offset=cache_offset,
         )
 
-        if use_stored_positions and self.position_ids is not None:
-            seq_length = inputs.shape[1]
-            return self.position_ids[:, :, cache_offset : cache_offset + seq_length]
-
-        # Subsequent prefill chunks and autoregressive: compute from rope_deltas
-        batch_size, seq_length = inputs.shape
-        delta = mx.array(cache_offset + self.rope_deltas if cache is not None else 0)
+    def _compute_sequential_position_ids(
+        self,
+        *,
+        batch_size: int,
+        seq_length: int,
+        start_offset: int,
+    ) -> mx.array:
+        """Build sequential 3D positions from rope_deltas once prompt positions
+        have been exhausted."""
+        delta = mx.array(start_offset + self.rope_deltas)
         position_ids = mx.arange(seq_length).reshape(1, -1)
         position_ids = mx.broadcast_to(position_ids, (batch_size, seq_length))
 
