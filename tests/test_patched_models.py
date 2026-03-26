@@ -432,3 +432,111 @@ def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm():
     assert len(failures) == 0, (
         f"Logit mismatch (atol={vlm_atol}):{summary}\nFailures: {'; '.join(failures)}"
     )
+
+
+def test_qwen3_5_image_prompt_patched_matches_vlm():
+    """Image-prompt logits from the patched mlx-lm model must match the native
+    mlx-vlm LanguageModel.
+
+    This validates two things:
+    1. The vision add-on's _compute_image_mrope_state produces the same 3D
+       position IDs as mlx-vlm's LanguageModel.get_rope_index.
+    2. Given those positions, the patched model's forward pass produces the
+       same logits as mlx-vlm (within bfloat16 tolerance from different
+       GatedDeltaNet implementations).
+
+    Uses a synthetic token sequence with image token runs — no actual image
+    pixels are processed. The test focuses on position computation and
+    position threading through the model.
+
+    Models are loaded and unloaded sequentially to limit memory usage.
+    """
+    from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
+
+    model_path = _get_real_model_path()
+
+    # --- Load vlm model first to get config and compute reference positions ---
+    vlm_model = _load_vlm(model_path)
+    config = vlm_model.config
+
+    # Construct a synthetic token sequence with an image span.
+    # Layout: [text, text, vision_start, image*4, text, text]
+    # With spatial_merge_size=2 and grid_thw=[1,4,4]:
+    #   llm_grid = [1, 2, 2] → 4 image tokens
+    image_grid_thw = mx.array([[1, 4, 4]])
+    tokens_list = [
+        0,
+        1,
+        config.vision_start_token_id,
+        config.image_token_id,
+        config.image_token_id,
+        config.image_token_id,
+        config.image_token_id,
+        2,
+        3,
+    ]
+    tokens = mx.array([tokens_list])
+
+    # Compute positions via mlx-vlm's get_rope_index
+    vlm_position_ids, vlm_rope_deltas = vlm_model.language_model.get_rope_index(
+        tokens, image_grid_thw=image_grid_thw
+    )
+    mx.eval(vlm_position_ids, vlm_rope_deltas)
+
+    # Compute positions via the vision add-on's method
+    addon_position_ids, addon_rope_deltas = _compute_image_mrope_state(
+        mx.array(tokens_list), image_grid_thw, config
+    )
+    mx.eval(addon_position_ids, addon_rope_deltas)
+
+    # --- Assert position computation matches ---
+    position_ids_match = mx.array_equal(addon_position_ids, vlm_position_ids).item()
+    rope_deltas_match = mx.array_equal(addon_rope_deltas, vlm_rope_deltas).item()
+
+    # --- Forward pass: vlm ---
+    vlm_model.language_model._position_ids = vlm_position_ids
+    vlm_model.language_model._rope_deltas = vlm_rope_deltas
+    vlm_logits = vlm_model.language_model(
+        tokens, cache=None, position_ids=vlm_position_ids
+    ).logits
+    mx.eval(vlm_logits)
+    vlm_logits = mx.array(vlm_logits)
+    del vlm_model
+    mx.clear_cache()
+
+    # --- Forward pass: patched mlx-lm ---
+    patched_model, _ = _load_patched_mlx_lm(model_path)
+    patched_text_model = patched_model.language_model.model
+    patched_text_model.position_ids = addon_position_ids
+    patched_text_model.rope_deltas = addon_rope_deltas
+    patched_logits = patched_model(tokens)
+    mx.eval(patched_logits)
+    patched_logits = mx.array(patched_logits)
+    del patched_model
+    mx.clear_cache()
+
+    # --- Compare: run all checks before failing ---
+    diff_logits = mx.max(mx.abs(patched_logits - vlm_logits)).item()
+
+    failures = []
+    if not position_ids_match:
+        failures.append(
+            f"Position IDs mismatch: addon={addon_position_ids.tolist()}, "
+            f"vlm={vlm_position_ids.tolist()}"
+        )
+    if not rope_deltas_match:
+        failures.append(
+            f"Rope deltas mismatch: addon={addon_rope_deltas.item()}, "
+            f"vlm={vlm_rope_deltas.item()}"
+        )
+    if diff_logits != 0.0:
+        failures.append(f"Logit mismatch: max diff {diff_logits:.6f}")
+
+    summary = (
+        f"\n  position_ids match:  {position_ids_match}"
+        f"\n  rope_deltas match:   {rope_deltas_match}"
+        f"\n  logit max diff:      {diff_logits:.6f}"
+    )
+    assert len(failures) == 0, (
+        f"Image prompt mismatch (expected zero diff):{summary}\nFailures: {'; '.join(failures)}"
+    )
