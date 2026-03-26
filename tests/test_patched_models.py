@@ -3,13 +3,23 @@ Tests for monkey-patched model classes (mlx_engine.model_kit.patches).
 
 Follows the upstream mlx-lm/tests/test_models.py pattern: construct models
 from small configs with random weights, test through the public interface.
+
+Also includes cross-engine tests that load a real model from disk and compare
+patched mlx-lm logits against unpatched mlx-lm and native mlx-vlm.
 """
 
 import pytest
+from pathlib import Path
 
 import mlx.core as mx
 from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
+
+# Save original (unpatched) classes before applying patches
+from mlx_lm.models.qwen3_5 import (
+    DecoderLayer as _OrigDecoderLayer,
+    Qwen3_5TextModel as _OrigTextModel,
+)
 
 from mlx_engine.model_kit.patches.qwen3_5 import apply_patches
 
@@ -299,4 +309,127 @@ def test_qwen3_5_text_only_batch_cache_matches_prompt_cache():
     max_diff = mx.max(mx.abs(reference_logits - batch_logits)).item()
     assert mx.allclose(reference_logits, batch_logits, atol=1e-4).item(), (
         f"Text-only batch-cache logits mismatch (max diff {max_diff:.6f})."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-engine tests: compare patched mlx-lm against unpatched and mlx-vlm
+# using a real model loaded from disk.
+# ---------------------------------------------------------------------------
+
+REAL_MODEL_NAME = "lmstudio-community/Qwen3.5-2B-MLX-4bit"
+
+
+def _get_real_model_path() -> Path:
+    from tests.shared import model_getter
+
+    return model_getter(REAL_MODEL_NAME)
+
+
+def _load_patched_mlx_lm(model_path: Path):
+    """Load model using mlx-lm with patches already applied."""
+    import mlx_lm.utils
+
+    model, tokenizer = mlx_lm.utils.load(model_path)
+    return model, tokenizer
+
+
+def _load_unpatched_mlx_lm(model_path: Path):
+    """Load model using mlx-lm with original (unpatched) classes temporarily restored."""
+    import mlx_lm.models.qwen3_5 as mod
+    import mlx_lm.utils
+
+    patched_dl = mod.DecoderLayer
+    patched_tm = mod.Qwen3_5TextModel
+    mod.DecoderLayer = _OrigDecoderLayer
+    mod.Qwen3_5TextModel = _OrigTextModel
+    try:
+        model, tokenizer = mlx_lm.utils.load(model_path)
+    finally:
+        mod.DecoderLayer = patched_dl
+        mod.Qwen3_5TextModel = patched_tm
+    return model, tokenizer
+
+
+def _load_vlm(model_path: Path):
+    """Load model using mlx-vlm's native loader."""
+    from mlx_vlm.utils import load_model as vlm_load_model
+
+    return vlm_load_model(model_path)
+
+
+def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm():
+    """Text-only logits from the patched mlx-lm model must match both the
+    unpatched mlx-lm model and the native mlx-vlm LanguageModel.
+
+    This validates that the MRoPE patch is a no-op for text-only inference:
+    the patched model's sequential 3D positions collapse to standard RoPE,
+    producing identical logits to the unpatched original.
+
+    Models are loaded and unloaded sequentially to limit memory usage.
+    """
+    model_path = _get_real_model_path()
+    tokens = mx.array([[0, 1, 2, 3, 4, 5, 6, 7]])
+
+    # --- Patched mlx-lm ---
+    patched_model, _ = _load_patched_mlx_lm(model_path)
+    patched_logits = patched_model(tokens)
+    mx.eval(patched_logits)
+    # Detach from model graph before unloading
+    patched_logits = mx.array(patched_logits)
+    del patched_model
+    mx.clear_cache()
+
+    # --- Unpatched mlx-lm ---
+    unpatched_model, _ = _load_unpatched_mlx_lm(model_path)
+    unpatched_logits = unpatched_model(tokens)
+    mx.eval(unpatched_logits)
+    unpatched_logits = mx.array(unpatched_logits)
+    del unpatched_model
+    mx.clear_cache()
+
+    # --- mlx-vlm ---
+    vlm_model = _load_vlm(model_path)
+    # Pass explicit sequential position_ids to skip get_rope_index (which
+    # needs a full ModelConfig). Shape: (3, batch, seq) — all 3 dims identical
+    # for text-only, equivalent to standard RoPE.
+    seq_len = tokens.shape[1]
+    position_ids = mx.broadcast_to(
+        mx.arange(seq_len).reshape(1, 1, seq_len),
+        (3, 1, seq_len),
+    )
+    vlm_logits = vlm_model.language_model(
+        tokens, cache=None, position_ids=position_ids
+    ).logits
+    mx.eval(vlm_logits)
+    vlm_logits = mx.array(vlm_logits)
+    del vlm_model
+    mx.clear_cache()
+
+    # --- Compare: run all comparisons before failing ---
+    # All three pairwise max diffs ~0.45 +/- 0.5.
+    atol = 0.5
+    diff_patched_unpatched = mx.max(mx.abs(patched_logits - unpatched_logits)).item()
+    diff_patched_vlm = mx.max(mx.abs(patched_logits - vlm_logits)).item()
+    diff_unpatched_vlm = mx.max(mx.abs(unpatched_logits - vlm_logits)).item()
+
+    failures = []
+    if not mx.allclose(patched_logits, unpatched_logits, atol=atol).item():
+        failures.append(
+            f"Patched vs unpatched mlx-lm: max diff {diff_patched_unpatched:.6f}"
+        )
+    if not mx.allclose(patched_logits, vlm_logits, atol=atol).item():
+        failures.append(f"Patched mlx-lm vs mlx-vlm: max diff {diff_patched_vlm:.6f}")
+    if not mx.allclose(unpatched_logits, vlm_logits, atol=atol).item():
+        failures.append(
+            f"Unpatched mlx-lm vs mlx-vlm: max diff {diff_unpatched_vlm:.6f}"
+        )
+
+    summary = (
+        f"\n  patched vs unpatched: {diff_patched_unpatched:.6f}"
+        f"\n  patched vs vlm:      {diff_patched_vlm:.6f}"
+        f"\n  unpatched vs vlm:    {diff_unpatched_vlm:.6f}"
+    )
+    assert len(failures) == 0, (
+        f"Logit mismatch (atol={atol}):{summary}\nFailures: {'; '.join(failures)}"
     )
