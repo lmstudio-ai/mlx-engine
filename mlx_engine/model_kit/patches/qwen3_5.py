@@ -6,9 +6,9 @@ for text-only generation. However, Qwen3.5 requires Multimodal RoPE (MRoPE) with
 3D position IDs for vision tasks.
 
 This patch replaces the attention module with mlx-vlm's MRoPE-capable version and
-adds position_ids threading through the model. For text-only (position_ids=None),
-the MRoPE attention falls back to sequential 3D positions, which is mathematically
-equivalent to standard RoPE.
+adds position_ids threading through the model. For text-only calls, the patch
+computes explicit sequential 3D positions, which is mathematically equivalent to
+standard RoPE and works across uncached and batched cache implementations.
 
 Implementation inspired by:
   mlx-lm @ 564281f79328df07c4997b3a6ca00bd929381287
@@ -66,7 +66,7 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
     the appropriate position_ids from this state and threads them to decoder layers.
 
     Position state logic (ported from mlx_vlm LanguageModel.__call__):
-    - Both None: text-only path, passes position_ids=None (attention uses cache offset)
+    - Both None: text-only path, computes sequential 3D positions from cache state
     - position_ids set: prefill, slices stored positions by cache offset
     - Only rope_deltas set: autoregressive generation, computes from delta
     """
@@ -114,30 +114,40 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
 
         return self.norm(hidden_states)
 
-    def _compute_position_ids(self, inputs: mx.array, cache) -> Optional[mx.array]:
+    def _compute_position_ids(self, inputs: mx.array, cache) -> mx.array:
         """
         Compute position_ids for the current forward pass from stored state.
 
         Inspired by mlx_vlm.models.qwen3_5.language.LanguageModel.__call__ .
         """
+        cache_offset = 0
+        cache_offset_scalar = 0
+        if cache is not None and cache[self.fa_idx] is not None:
+            offset = cache[self.fa_idx].offset
+            if isinstance(offset, int):
+                cache_offset = offset
+                cache_offset_scalar = offset
+            elif isinstance(offset, mx.array) and offset.ndim == 0:
+                cache_offset = offset.item()
+                cache_offset_scalar = cache_offset
+            elif isinstance(offset, mx.array):
+                cache_offset = offset
+                cache_offset_scalar = offset[0].item()
+
+        batch_size, seq_length = inputs.shape
+
         # Text-only path; no MRoPE state was injected for this call.
         if self.position_ids is None and self.rope_deltas is None:
-            return None
+            return self._compute_sequential_position_ids(
+                batch_size=batch_size,
+                seq_length=seq_length,
+                start_offset=cache_offset,
+            )
         if self.position_ids is not None and self.rope_deltas is None:
             raise ValueError(
                 "MRoPE state is inconsistent: position_ids are set but rope_deltas "
                 "are missing."
             )
-
-        cache_offset = 0
-        if cache is not None and cache[self.fa_idx] is not None:
-            offset = cache[self.fa_idx].offset
-            if isinstance(offset, int):
-                cache_offset = offset
-            elif isinstance(offset, mx.array):
-                cache_offset = (offset if offset.ndim == 0 else offset[0]).item()
-
-        batch_size, seq_length = inputs.shape
 
         # This branch is taken for vision requests while the current call is still
         # consuming prompt tokens that were part of the original multimodal prompt.
@@ -147,17 +157,20 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         # prefix to a sequential tail.
         if self.position_ids is not None:
             stored_seq_length = self.position_ids.shape[2]
-            if cache_offset < stored_seq_length:
-                stored_end = min(cache_offset + seq_length, stored_seq_length)
-                stored_positions = self.position_ids[:, :, cache_offset:stored_end]
-                if stored_end - cache_offset == seq_length:
+            if cache_offset_scalar < stored_seq_length:
+                stored_end = min(cache_offset_scalar + seq_length, stored_seq_length)
+                stored_positions = self.position_ids[
+                    :, :, cache_offset_scalar:stored_end
+                ]
+                if stored_end - cache_offset_scalar == seq_length:
                     return stored_positions
 
-                tail_seq_length = seq_length - (stored_end - cache_offset)
+                tail_seq_length = seq_length - (stored_end - cache_offset_scalar)
                 tail_positions = self._compute_sequential_position_ids(
                     batch_size=batch_size,
                     seq_length=tail_seq_length,
                     start_offset=stored_seq_length,
+                    rope_deltas=self.rope_deltas,
                 )
                 return mx.concatenate([stored_positions, tail_positions], axis=2)
 
@@ -165,6 +178,7 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
             batch_size=batch_size,
             seq_length=seq_length,
             start_offset=cache_offset,
+            rope_deltas=self.rope_deltas,
         )
 
     def _compute_sequential_position_ids(
@@ -172,20 +186,28 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         *,
         batch_size: int,
         seq_length: int,
-        start_offset: int,
+        start_offset: int | mx.array,
+        rope_deltas: Optional[mx.array] = None,
     ) -> mx.array:
-        """Build sequential 3D positions from rope_deltas once prompt positions
-        have been exhausted."""
-        delta = mx.array(start_offset + self.rope_deltas)
+        """Build sequential 3D positions from cache offsets and optional
+        rope_deltas once prompt positions have been exhausted."""
+        delta = mx.array(start_offset)
+        if rope_deltas is not None:
+            delta = delta + rope_deltas
+
         position_ids = mx.arange(seq_length).reshape(1, -1)
         position_ids = mx.broadcast_to(position_ids, (batch_size, seq_length))
 
         if delta.ndim == 0:
-            delta = mx.expand_dims(delta, axis=0)
-        if delta.shape[0] < batch_size:
-            delta = mx.tile(delta, (batch_size, 1))
+            delta = mx.broadcast_to(delta.reshape(1, 1), (batch_size, 1))
+        elif delta.ndim == 1:
+            delta = delta[:batch_size].reshape(-1, 1)
+            if delta.shape[0] == 1 and batch_size > 1:
+                delta = mx.broadcast_to(delta, (batch_size, 1))
         else:
             delta = delta[:batch_size]
+            if delta.shape[0] == 1 and batch_size > 1:
+                delta = mx.broadcast_to(delta, (batch_size, delta.shape[1]))
 
         position_ids = mx.add(position_ids, delta)[None, ...]
         return mx.broadcast_to(position_ids, (3, batch_size, seq_length))
