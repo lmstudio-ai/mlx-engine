@@ -10,9 +10,6 @@ from mlx_vlm.models.qwen3_5_moe import (
     TextConfig as Qwen3_5MoETextConfig,
     Model as Qwen3_5MoEVLModel,
 )
-from mlx_vlm.models.qwen3_5_moe.language import (
-    LanguageModel as Qwen3_5MoEVLMLanguageModel,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +27,6 @@ class Qwen3_5MoEVisionAddOn(Qwen3_5VisionAddOn):
         self._init_common(
             model_path=model_path,
             model_cls=Qwen3_5MoEVLModel,
-            language_model_cls=Qwen3_5MoEVLMLanguageModel,
             model_config_class=Qwen3_5MoEModelConfig,
             vision_config_class=Qwen3_5MoEVisionConfig,
             text_config_class=Qwen3_5MoETextConfig,
