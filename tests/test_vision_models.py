@@ -24,6 +24,22 @@ MAX_KV_CACHE_SIZE = 20000
 CACHING_TEST_PREFILL_STEP_SIZE = 512
 
 
+def _find_token_runs(tokens: list[int], target_token: int) -> list[tuple[int, int]]:
+    """Return contiguous index ranges where a token repeats."""
+    runs = []
+    start = None
+    for idx, token in enumerate(tokens):
+        if token == target_token:
+            if start is None:
+                start = idx
+        elif start is not None:
+            runs.append((start, idx - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(tokens) - 1))
+    return runs
+
+
 class TestVisionModels:
     @classmethod
     def setup_class(cls):
@@ -899,6 +915,58 @@ Summarize this in one sentence<end_of_turn>
             f"Text-only output after vision request differs from baseline "
             f"(MRoPE state likely leaked): {repr(baseline_text)} != {repr(after_vision_text)}"
         )
+
+    def test_qwen3_5_multi_image_process_prompt_preserves_image_positions(self):
+        """Qwen3.5 must inject MRoPE positions for every image span.
+
+        This targets the prompt-processing path directly instead of relying on
+        generation quality: after two images across messages, both expanded
+        image token runs should still carry image-style position IDs rather than
+        falling back to sequential text positions.
+        """
+        model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=2048,
+            max_seq_nums=1,
+            trust_remote_code=True,
+        )
+
+        prompt = """<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>What is this? In one word.<|im_end|>
+<|im_start|>assistant
+Toucan.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>In a few words, describe all of the images you've seen so far<|im_end|>
+<|im_start|>assistant
+"""
+
+        prompt_tokens = tokenize(model_kit, prompt)
+        reporter = RecordingReporter()
+        input_ids, _ = model_kit.process_prompt(
+            prompt_tokens,
+            [self.toucan_image_b64, self.chameleon_image_b64],
+            reporter,
+            {},
+            MAX_IMAGE_SIZE,
+        )
+
+        text_model = model_kit.model.language_model.model
+        image_token_id = model_kit.vision_add_on.config.image_token_id
+        image_runs = _find_token_runs(input_ids.tolist(), image_token_id)
+
+        assert len(image_runs) == 2, (
+            f"Expected two expanded image spans in the prompt, got {image_runs!r}"
+        )
+
+        for run_idx, (start, end) in enumerate(image_runs):
+            temporal_positions = text_model.position_ids[0, 0, start : end + 1].tolist()
+            assert len(set(temporal_positions)) == 1, (
+                f"Image span {run_idx} used sequential text positions instead of "
+                f"image MRoPE positions: {temporal_positions[:12]!r}..."
+            )
 
     @pytest.mark.heavy
     def test_qwen3_5_moe_vision(self):
