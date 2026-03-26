@@ -5,10 +5,9 @@ The mlx-lm Qwen3.5 model uses standard RoPE (via Qwen3NextAttention), which work
 for text-only generation. However, Qwen3.5 requires Multimodal RoPE (MRoPE) with
 3D position IDs for vision tasks.
 
-This patch replaces the attention module with mlx-vlm's MRoPE-capable version and
-adds position_ids threading through the model. For text-only calls, the patch
-computes explicit sequential 3D positions, which is mathematically equivalent to
-standard RoPE and works across uncached and batched cache implementations.
+This patch keeps the original attention module for text-only calls (preserving
+bit-identical output with unpatched mlx-lm) and adds an MRoPE code path that is
+only used when 3D position_ids are provided by the vision add-on.
 
 Implementation inspired by:
   mlx-lm @ 564281f79328df07c4997b3a6ca00bd929381287
@@ -23,23 +22,39 @@ from mlx_lm.models.qwen3_5 import (
     DecoderLayer,
     Qwen3_5TextModel,
 )
-from mlx_lm.models.base import create_attention_mask, create_ssm_mask
-from mlx_vlm.models.qwen3_5.language import Qwen3_5Attention
+from mlx_lm.models.base import (
+    create_attention_mask,
+    create_ssm_mask,
+    scaled_dot_product_attention,
+)
+from mlx_vlm.models.qwen3_5.language import (
+    Qwen3_5RotaryEmbedding,
+    apply_multimodal_rotary_pos_emb,
+)
 
 
 class PatchedDecoderLayer(DecoderLayer):
     """
-    DecoderLayer that uses MRoPE-capable attention and accepts position_ids.
+    DecoderLayer that accepts position_ids and uses MRoPE when they are provided.
 
-    Replaces the standard Qwen3NextAttention with Qwen3_5Attention from mlx-vlm,
-    which supports interleaved multimodal RoPE with 3D position IDs. GatedDeltaNet
-    layers and MLP/SparseMoeBlock are untouched from the original.
+    For text-only calls (position_ids=None), delegates to the original
+    Qwen3NextAttention with nn.RoPE — bit-identical to the unpatched model.
+
+    For vision calls (position_ids provided), applies interleaved multimodal
+    RoPE using the same q/k/v/o projections and norms from the original
+    attention module.
     """
 
     def __init__(self, args, layer_idx):
         super().__init__(args, layer_idx)
         if not self.is_linear:
-            self.self_attn = Qwen3_5Attention(args)
+            rope_params = args.rope_parameters
+            self._mrope = Qwen3_5RotaryEmbedding(
+                int(self.self_attn.head_dim * rope_params["partial_rotary_factor"]),
+                max_position_embeddings=args.max_position_embeddings,
+                base=rope_params["rope_theta"],
+                mrope_section=rope_params["mrope_section"],
+            )
 
     def __call__(
         self,
@@ -50,11 +65,62 @@ class PatchedDecoderLayer(DecoderLayer):
     ) -> mx.array:
         if self.is_linear:
             r = self.linear_attn(self.input_layernorm(x), mask, cache)
+        elif position_ids is None:
+            # Text-only: use original Qwen3NextAttention with nn.RoPE
+            r = self.self_attn(self.input_layernorm(x), mask, cache)
         else:
-            r = self.self_attn(self.input_layernorm(x), mask, cache, position_ids)
+            # Vision: apply MRoPE using the original attention module's weights
+            r = self._mrope_attention(
+                self.input_layernorm(x), mask, cache, position_ids
+            )
         h = x + r
         out = h + self.mlp(self.post_attention_layernorm(h))
         return out
+
+    def _mrope_attention(
+        self,
+        x: mx.array,
+        mask: Optional[mx.array],
+        cache: Optional[Any],
+        position_ids: mx.array,
+    ) -> mx.array:
+        """
+        MRoPE attention path, reusing the original attention module's weights.
+
+        Mirrors Qwen3_5Attention.__call__ from mlx-vlm but operates on
+        self.self_attn's projections and norms directly.
+        """
+        attn = self.self_attn
+        B, L, D = x.shape
+
+        q_proj_output = attn.q_proj(x)
+        queries, gate = mx.split(
+            q_proj_output.reshape(B, L, attn.num_attention_heads, -1), 2, axis=-1
+        )
+        gate = gate.reshape(B, L, -1)
+
+        keys, values = attn.k_proj(x), attn.v_proj(x)
+
+        queries = attn.q_norm(queries).transpose(0, 2, 1, 3)
+        keys = attn.k_norm(keys.reshape(B, L, attn.num_key_value_heads, -1)).transpose(
+            0, 2, 1, 3
+        )
+        values = values.reshape(B, L, attn.num_key_value_heads, -1).transpose(
+            0, 2, 1, 3
+        )
+
+        cos, sin = self._mrope(values, position_ids)
+        queries, keys = apply_multimodal_rotary_pos_emb(queries, keys, cos, sin)
+
+        if cache is not None:
+            keys, values = cache.update_and_fetch(keys, values)
+
+        output = scaled_dot_product_attention(
+            queries, keys, values, cache=cache, scale=attn.scale, mask=mask
+        )
+        output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+
+        return attn.o_proj(output * mx.sigmoid(gate))
 
 
 class PatchedQwen3_5TextModel(Qwen3_5TextModel):
@@ -114,7 +180,7 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
 
         return self.norm(hidden_states)
 
-    def _compute_position_ids(self, inputs: mx.array, cache) -> mx.array:
+    def _compute_position_ids(self, inputs: mx.array, cache) -> Optional[mx.array]:
         """
         Compute position_ids for the current forward pass from stored state.
 
@@ -137,12 +203,9 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         batch_size, seq_length = inputs.shape
 
         # Text-only path; no MRoPE state was injected for this call.
+        # Return None so PatchedDecoderLayer uses the original nn.RoPE path.
         if self.position_ids is None and self.rope_deltas is None:
-            return self._compute_sequential_position_ids(
-                batch_size=batch_size,
-                seq_length=seq_length,
-                start_offset=cache_offset,
-            )
+            return None
         if self.position_ids is not None and self.rope_deltas is None:
             raise ValueError(
                 "MRoPE state is inconsistent: position_ids are set but rope_deltas "
