@@ -9,7 +9,7 @@ import pytest
 
 import mlx.core as mx
 from mlx_lm.generate import generate_step
-from mlx_lm.models.cache import make_prompt_cache
+from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 
 from mlx_engine.model_kit.patches.qwen3_5 import apply_patches
 
@@ -49,6 +49,18 @@ def make_model(**text_config_overrides):
         }
     )
     return Model(args)
+
+
+def make_batched_prompt_cache(model, left_padding):
+    cache = model.make_cache()
+    for i, layer_cache in enumerate(cache):
+        if isinstance(layer_cache, ArraysCache):
+            layer_cache.left_padding = mx.array(left_padding)
+        elif type(layer_cache) is KVCache:
+            cache[i] = BatchKVCache(left_padding)
+        else:
+            raise AssertionError(f"Unexpected cache type: {type(layer_cache)!r}")
+    return cache
 
 
 @pytest.mark.parametrize("use_mrope", [False, True], ids=["text_only", "mrope"])
@@ -246,4 +258,45 @@ def test_qwen3_5_mrope_later_single_image_chunk_matches_unchunked():
     max_diff = mx.max(mx.abs(reference_logprobs - chunked_logprobs)).item()
     assert mx.allclose(reference_logprobs, chunked_logprobs, atol=1e-4).item(), (
         f"Later-chunk MRoPE prefill mismatch (max diff {max_diff:.6f})."
+    )
+
+
+def test_qwen3_5_text_only_uncached_matches_prompt_cache():
+    """Direct uncached text-only forwards should match the cached prefill path."""
+    model = make_model()
+    tokens = mx.array([[0, 1, 2, 3]])
+
+    reference_cache = make_prompt_cache(model)
+    reference_logits = model(tokens, cache=reference_cache)
+    mx.eval(reference_logits)
+
+    uncached_logits = model(tokens, cache=None)
+    mx.eval(uncached_logits)
+
+    max_diff = mx.max(mx.abs(reference_logits - uncached_logits)).item()
+    assert mx.allclose(reference_logits, uncached_logits, atol=1e-4).item(), (
+        f"Text-only uncached logits mismatch (max diff {max_diff:.6f})."
+    )
+
+
+def test_qwen3_5_text_only_batch_cache_matches_prompt_cache():
+    """Text-only forwards should handle BatchKVCache vector offsets."""
+    model = make_model()
+    text_model = model.language_model.model
+    tokens = mx.array([[0, 1, 2, 3]])
+
+    reference_cache = make_prompt_cache(model)
+    reference_logits = model(tokens, cache=reference_cache)
+    mx.eval(reference_logits)
+
+    batch_cache = make_batched_prompt_cache(model, [0])
+    assert isinstance(batch_cache[text_model.fa_idx], BatchKVCache)
+    assert batch_cache[text_model.fa_idx].offset.ndim == 1
+
+    batch_logits = model(tokens, cache=batch_cache)
+    mx.eval(batch_logits)
+
+    max_diff = mx.max(mx.abs(reference_logits - batch_logits)).item()
+    assert mx.allclose(reference_logits, batch_logits, atol=1e-4).item(), (
+        f"Text-only batch-cache logits mismatch (max diff {max_diff:.6f})."
     )
