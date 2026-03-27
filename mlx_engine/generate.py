@@ -58,6 +58,7 @@ from mlx_engine.utils.generation_helpers import (
     should_yield_token,
 )
 from mlx_engine.utils.request_dump import (
+    create_first_token_logits_processor,
     write_request_prompt,
     write_request_settings,
 )
@@ -542,6 +543,7 @@ def _sequential_generation(
                     tensor_library_name="mlx",
                 )
             )
+        logits_processors.append(create_first_token_logits_processor("mlx_engine"))
 
         # Set up stop string processor if non-empty stop_strings are provided
         stop_string_processor = create_stop_string_processor(stop_strings, tokenizer)
@@ -705,6 +707,7 @@ def _batched_generation(
                 tensor_library_name="mlx",
             )
         )
+    logits_processors.append(create_first_token_logits_processor("mlx_engine"))
 
     # Set up stop string processor if non-empty stop_strings are provided
     stop_string_processor = create_stop_string_processor(stop_strings, tokenizer)

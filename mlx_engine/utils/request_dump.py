@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 from typing import Any, Sequence
 
+import mlx.core as mx
+
 
 REQUEST_DUMP_DIR_ENV_VAR = "LLMSTER_REQUEST_DUMP_DIR"
 DEFAULT_REQUEST_DUMP_DIR_NAME = "request_dump_output"
@@ -62,3 +64,34 @@ def write_request_prompt(
             writer.writerow(
                 [index, int(token_id), _token_text(tokenizer, int(token_id))]
             )
+
+
+def write_first_token_logits(prefix: str, logits) -> None:
+    output_dir = _request_dump_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logits_row = mx.array(logits[0])
+    mx.eval(logits_row)
+    with (output_dir / f"{prefix}_first_token_logits.csv").open(
+        "w", newline=""
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["ID", "Logit"])
+        for token_id, logit in enumerate(logits_row.tolist()):
+            writer.writerow([token_id, logit])
+
+
+class FirstTokenLogitsProcessor:
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+        self._has_dumped = False
+
+    def __call__(self, tokens, logits):
+        if not self._has_dumped:
+            write_first_token_logits(self.prefix, logits)
+            self._has_dumped = True
+        return logits
+
+
+def create_first_token_logits_processor(prefix: str) -> FirstTokenLogitsProcessor:
+    return FirstTokenLogitsProcessor(prefix)
