@@ -93,7 +93,6 @@ class ModelKit:
         logger.info(f"Loading model from {model_path}...")
         config_json = json.loads((model_path / "config.json").read_text())
         self.model_type = config_json.get("model_type", None)
-
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         fix_mistral_pre_tokenizer(
             tokenizer=self.tokenizer, model_path=model_path, model_type=self.model_type
@@ -163,10 +162,8 @@ class ModelKit:
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
-        if self.vision_add_on is not None:
-            self.vision_add_on.clear_prediction_state(self.model)
-        ### TEXT-ONLY PROCESS_PROMPT ###
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
+        ### TEXT-ONLY PROCESS_PROMPT ###
         if is_text_only_processing:
             self._cross_prompt_cache_active = True
             if len(prompt_tokens) == 0:
@@ -184,6 +181,8 @@ class ModelKit:
                 prompt_progress_reporter,
             ), None
         ### WITH IMAGES PROMPT PROCESSING ###
+        if self.vision_add_on is not None:
+            self.vision_add_on.clear_prediction_state(self.model)
         if self.vision_add_on is None:
             raise ValueError(
                 "Vision add-on is not loaded, but images were provided for processing"

@@ -150,6 +150,10 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
 
     def clear_prediction_state(self, text_model: nn.Module) -> None:
         """Reset MRoPE state injected by compute_embeddings."""
+        if not hasattr(text_model.language_model.model, "reset_mrope_state"):
+            raise ValueError(
+                "Qwen3.5 vision support requires the Qwen3.5 patch, but this build does not apply it."
+            )
         text_model.language_model.model.reset_mrope_state()
 
     def compute_embeddings(
