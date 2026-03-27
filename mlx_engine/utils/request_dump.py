@@ -66,32 +66,46 @@ def write_request_prompt(
             )
 
 
-def write_first_token_logits(prefix: str, logits) -> None:
+def _write_token_logits_csv(prefix: str, suffix: str, logits, tokenizer) -> None:
     output_dir = _request_dump_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logits_row = mx.array(logits[0])
     mx.eval(logits_row)
-    with (output_dir / f"{prefix}_first_token_logits.csv").open(
-        "w", newline=""
-    ) as handle:
+    rows = [
+        (token_id, _token_text(tokenizer, token_id), logit)
+        for token_id, logit in enumerate(logits_row.tolist())
+    ]
+    rows.sort(key=lambda row: row[2], reverse=True)
+
+    with (output_dir / f"{prefix}_{suffix}.csv").open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["ID", "Logit"])
-        for token_id, logit in enumerate(logits_row.tolist()):
-            writer.writerow([token_id, logit])
+        writer.writerow(["ID", "Text", "Logit"])
+        for token_id, token_text, logit in rows:
+            writer.writerow([token_id, token_text, logit])
 
 
 class FirstTokenLogitsProcessor:
-    def __init__(self, prefix: str):
+    def __init__(self, prefix: str, tokenizer, suffix: str):
         self.prefix = prefix
+        self.tokenizer = tokenizer
+        self.suffix = suffix
         self._has_dumped = False
 
     def __call__(self, tokens, logits):
         if not self._has_dumped:
-            write_first_token_logits(self.prefix, logits)
+            _write_token_logits_csv(self.prefix, self.suffix, logits, self.tokenizer)
             self._has_dumped = True
         return logits
 
 
-def create_first_token_logits_processor(prefix: str) -> FirstTokenLogitsProcessor:
-    return FirstTokenLogitsProcessor(prefix)
+def create_first_token_logits_processor(
+    prefix: str, tokenizer
+) -> FirstTokenLogitsProcessor:
+    return FirstTokenLogitsProcessor(prefix, tokenizer, "first_token_logits")
+
+
+def create_first_token_raw_logits_processor(
+    prefix: str, tokenizer
+) -> FirstTokenLogitsProcessor:
+    return FirstTokenLogitsProcessor(prefix, tokenizer, "first_token_raw_logits")
