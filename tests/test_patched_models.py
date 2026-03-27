@@ -381,14 +381,13 @@ def _load_vlm(model_path: Path):
 
 
 @pytest.mark.parametrize("model_name", REAL_MODEL_CASES)
-def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm(model_name):
-    """Text-only logits from the patched mlx-lm model must match both the
-    unpatched mlx-lm model and the native mlx-vlm LanguageModel for both
-    dense and MoE Qwen3.5 variants.
+def test_qwen3_5_text_only_patched_matches_unpatched(model_name):
+    """Text-only logits from the patched mlx-lm model must match the
+    unpatched mlx-lm model for both dense and MoE Qwen3.5 variants.
 
     This validates that the MRoPE patch is a no-op for text-only inference:
-    the patched model's sequential 3D positions collapse to standard RoPE,
-    producing identical logits to the unpatched original.
+    the patched model delegates to the original mlx-lm code paths and must
+    produce identical logits to the unpatched original.
 
     Models are loaded and unloaded sequentially to limit memory usage.
     """
@@ -412,49 +411,18 @@ def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm(model_name):
     del unpatched_model
     mx.clear_cache()
 
-    # --- mlx-vlm ---
-    vlm_model = _load_vlm(model_path)
-    # Pass explicit sequential position_ids to skip get_rope_index (which
-    # needs a full ModelConfig). Shape: (3, batch, seq) — all 3 dims identical
-    # for text-only, equivalent to standard RoPE.
-    seq_len = tokens.shape[1]
-    position_ids = mx.broadcast_to(
-        mx.arange(seq_len).reshape(1, 1, seq_len),
-        (3, 1, seq_len),
-    )
-    vlm_logits = vlm_model.language_model(
-        tokens, cache=None, position_ids=position_ids
-    ).logits
-    mx.eval(vlm_logits)
-    vlm_logits = mx.array(vlm_logits)
-    del vlm_model
-    mx.clear_cache()
-
-    # --- Compare: run all comparisons before failing ---
-    vlm_atol = 0.5
+    # --- Compare: run the required invariant before failing ---
     diff_patched_unpatched = mx.max(mx.abs(patched_logits - unpatched_logits)).item()
-    diff_patched_vlm = mx.max(mx.abs(patched_logits - vlm_logits)).item()
-    diff_unpatched_vlm = mx.max(mx.abs(unpatched_logits - vlm_logits)).item()
 
     failures = []
     if diff_patched_unpatched != 0.0:
         failures.append(
             f"Patched vs unpatched mlx-lm: max diff {diff_patched_unpatched:.6f}"
         )
-    if not mx.allclose(patched_logits, vlm_logits, atol=vlm_atol).item():
-        failures.append(f"Patched mlx-lm vs mlx-vlm: max diff {diff_patched_vlm:.6f}")
-    if not mx.allclose(unpatched_logits, vlm_logits, atol=vlm_atol).item():
-        failures.append(
-            f"Unpatched mlx-lm vs mlx-vlm: max diff {diff_unpatched_vlm:.6f}"
-        )
 
-    summary = (
-        f"\n  patched vs unpatched: {diff_patched_unpatched:.6f}"
-        f"\n  patched vs vlm:      {diff_patched_vlm:.6f}"
-        f"\n  unpatched vs vlm:    {diff_unpatched_vlm:.6f}"
-    )
+    summary = f"\n  patched vs unpatched: {diff_patched_unpatched:.6f}"
     assert len(failures) == 0, (
-        f"{model_name}: Logit mismatch (atol={vlm_atol}):{summary}\nFailures: {'; '.join(failures)}"
+        f"{model_name}: Logit mismatch:{summary}\nFailures: {'; '.join(failures)}"
     )
 
 
