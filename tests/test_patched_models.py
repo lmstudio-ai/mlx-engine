@@ -331,13 +331,20 @@ def test_qwen3_5_text_only_batch_cache_matches_prompt_cache():
 # using a real model loaded from disk.
 # ---------------------------------------------------------------------------
 
-REAL_MODEL_NAME = "lmstudio-community/Qwen3.5-2B-MLX-4bit"
+REAL_MODEL_CASES = [
+    pytest.param("lmstudio-community/Qwen3.5-2B-MLX-4bit", id="dense"),
+    pytest.param(
+        "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+        marks=pytest.mark.heavy,
+        id="moe",
+    ),
+]
 
 
-def _get_real_model_path() -> Path:
+def _get_real_model_path(model_name: str) -> Path:
     from tests.shared import model_getter
 
-    return model_getter(REAL_MODEL_NAME)
+    return model_getter(model_name)
 
 
 def _load_patched_mlx_lm(model_path: Path):
@@ -373,9 +380,11 @@ def _load_vlm(model_path: Path):
     return vlm_load_model(model_path)
 
 
-def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm():
+@pytest.mark.parametrize("model_name", REAL_MODEL_CASES)
+def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm(model_name):
     """Text-only logits from the patched mlx-lm model must match both the
-    unpatched mlx-lm model and the native mlx-vlm LanguageModel.
+    unpatched mlx-lm model and the native mlx-vlm LanguageModel for both
+    dense and MoE Qwen3.5 variants.
 
     This validates that the MRoPE patch is a no-op for text-only inference:
     the patched model's sequential 3D positions collapse to standard RoPE,
@@ -383,7 +392,7 @@ def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm():
 
     Models are loaded and unloaded sequentially to limit memory usage.
     """
-    model_path = _get_real_model_path()
+    model_path = _get_real_model_path(model_name)
     tokens = mx.array([[0, 1, 2, 3, 4, 5, 6, 7]])
 
     # --- Patched mlx-lm ---
@@ -445,13 +454,14 @@ def test_qwen3_5_text_only_patched_matches_unpatched_and_vlm():
         f"\n  unpatched vs vlm:    {diff_unpatched_vlm:.6f}"
     )
     assert len(failures) == 0, (
-        f"Logit mismatch (atol={vlm_atol}):{summary}\nFailures: {'; '.join(failures)}"
+        f"{model_name}: Logit mismatch (atol={vlm_atol}):{summary}\nFailures: {'; '.join(failures)}"
     )
 
 
-def test_qwen3_5_image_prompt_patched_matches_vlm():
+@pytest.mark.parametrize("model_name", REAL_MODEL_CASES)
+def test_qwen3_5_image_prompt_patched_matches_vlm(model_name):
     """Image-prompt logits from the patched mlx-lm model must match the native
-    mlx-vlm LanguageModel.
+    mlx-vlm LanguageModel for both dense and MoE Qwen3.5 variants.
 
     This validates two things:
     1. The vision add-on's _compute_image_mrope_state produces the same 3D
@@ -468,7 +478,7 @@ def test_qwen3_5_image_prompt_patched_matches_vlm():
     """
     from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
 
-    model_path = _get_real_model_path()
+    model_path = _get_real_model_path(model_name)
 
     # --- Load vlm model first to get config and compute reference positions ---
     vlm_model = _load_vlm(model_path)
@@ -553,5 +563,5 @@ def test_qwen3_5_image_prompt_patched_matches_vlm():
         f"\n  logit max diff:      {diff_logits:.6f}"
     )
     assert len(failures) == 0, (
-        f"Image prompt mismatch (expected zero diff):{summary}\nFailures: {'; '.join(failures)}"
+        f"{model_name}: Image prompt mismatch (expected zero diff):{summary}\nFailures: {'; '.join(failures)}"
     )
