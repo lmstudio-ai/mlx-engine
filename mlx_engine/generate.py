@@ -57,6 +57,10 @@ from mlx_engine.utils.generation_helpers import (
     process_stop_string_check,
     should_yield_token,
 )
+from mlx_engine.utils.request_dump import (
+    write_request_prompt,
+    write_request_settings,
+)
 
 MAX_TOP_LOGPROBS = 10
 
@@ -345,6 +349,33 @@ def create_generator(
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
+    write_request_settings(
+        "mlx_engine",
+        {
+            "backend": "mlx_engine",
+            "generation_mode": (
+                "batched" if isinstance(model_kit, BatchedModelKit) else "sequential"
+            ),
+            "model_type": getattr(model_kit, "model_type", None),
+            "prompt_token_count": len(prompt_tokens),
+            "max_tokens": kwargs.get("max_tokens"),
+            "temp": kwargs.get("temp"),
+            "top_p": kwargs.get("top_p"),
+            "top_k": kwargs.get("top_k"),
+            "min_p": kwargs.get("min_p"),
+            "min_tokens_to_keep": kwargs.get("min_tokens_to_keep"),
+            "seed": kwargs.get("seed"),
+            "stop_strings": kwargs.get("stop_strings"),
+            "repetition_penalty": kwargs.get("repetition_penalty"),
+            "repetition_context_size": kwargs.get("repetition_context_size"),
+            "json_schema_present": kwargs.get("json_schema") is not None,
+            "images_provided": bool(kwargs.get("images_b64")),
+            "max_image_size": kwargs.get("max_image_size"),
+            "speculative_decoding_toggle": kwargs.get("speculative_decoding_toggle"),
+            "num_draft_tokens": kwargs.get("num_draft_tokens"),
+        },
+    )
+
     if isinstance(model_kit, BatchedModelKit):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
@@ -806,4 +837,11 @@ def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
         List[int]: A list of integer token IDs representing the tokenized prompt,
             ready for model input
     """
-    return model_kit.tokenize(prompt)
+    token_ids = model_kit.tokenize(prompt)
+    write_request_prompt(
+        "mlx_engine",
+        prompt,
+        [int(token_id) for token_id in token_ids],
+        model_kit.tokenizer,
+    )
+    return token_ids
