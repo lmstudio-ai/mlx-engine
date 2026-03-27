@@ -93,6 +93,11 @@ class ModelKit:
         logger.info(f"Loading model from {model_path}...")
         config_json = json.loads((model_path / "config.json").read_text())
         self.model_type = config_json.get("model_type", None)
+        if self.model_type in {"qwen3_5", "qwen3_5_moe"}:
+            logger.warning(
+                "Loading Qwen3.5 without the mlx-engine Qwen3.5 patch. "
+                "Text-only prompts use plain mlx-lm; vision prompts are unsupported in this artifact."
+            )
         self.model, self.tokenizer = mlx_lm.utils.load(self.model_path)
         fix_mistral_pre_tokenizer(
             tokenizer=self.tokenizer, model_path=model_path, model_type=self.model_type
