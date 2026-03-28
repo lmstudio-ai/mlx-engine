@@ -42,7 +42,6 @@ class TestCacheWrapper(unittest.TestCase):
 
     def test_prompt_processing_cancellation(self):
         """Test that progress is saved when processing is cancelled and cache is reused on retry"""
-        self.skipTest("Requires model download")
 
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
