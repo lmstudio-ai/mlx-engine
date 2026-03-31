@@ -93,6 +93,21 @@ class TestCacheWrapper(unittest.TestCase):
         # Verify that the second attempt completed successfully
         self.assertIsNotNone(result_tokens)
 
+    def test_get_num_tokens_in_cache_without_offset(self):
+        """Test that _get_num_tokens_in_cache falls back to len(self.tokens) when offset is unavailable"""
+        mock_cache = [object() for _ in range(10)]
+
+        wrapper = object.__new__(CacheWrapper)
+        wrapper.cache = mock_cache
+        wrapper.tokens = mx.array([1, 2, 3, 4, 5])
+
+        result = wrapper._get_num_tokens_in_cache()
+        self.assertEqual(result, 5)
+
+        wrapper.tokens = None
+        result = wrapper._get_num_tokens_in_cache()
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

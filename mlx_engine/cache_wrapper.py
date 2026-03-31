@@ -93,6 +93,10 @@ class CacheWrapper:
         for c in self.cache:
             if hasattr(c, "offset"):
                 return c.offset
+        # Fallback: use the length of tracked tokens if cache offset is unavailable
+        # This handles models where cache layers don't expose offset (e.g., GPT-OSS)
+        if self.tokens is not None:
+            return len(self.tokens)
         return None
 
     @staticmethod
