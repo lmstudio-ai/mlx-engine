@@ -13,6 +13,8 @@ from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.qwen3_5 import Qwen3_5VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.qwen3_5_moe import Qwen3_5MoEVisionAddOn
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
@@ -40,6 +42,8 @@ class ModelKit:
         "lfm2-vl": LFM2VisionAddOn,
         "mistral3": Mistral3VisionAddOn,
         "pixtral": PixtralVisionAddOn,
+        "qwen3_5": Qwen3_5VisionAddOn,
+        "qwen3_5_moe": Qwen3_5MoEVisionAddOn,
         # qwen vl ports are bugged: https://github.com/lmstudio-ai/mlx-engine/issues/237
         # "qwen2_vl": Qwen2_VLVisionAddOn,
         # "qwen2_5_vl": Qwen2_VLVisionAddOn,
@@ -159,6 +163,8 @@ class ModelKit:
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
+        if self.vision_add_on is not None:
+            self.vision_add_on.clear_prediction_state(self.model)
         ### TEXT-ONLY PROCESS_PROMPT ###
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
         if is_text_only_processing:

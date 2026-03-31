@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+from typing import Optional
+
 import mlx.core as mx
 from mlx import nn
 
@@ -7,6 +10,13 @@ from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
 from mlx_vlm.utils import prepare_inputs
 
 
+@dataclass
+class QwenVLEmbeddingsResult:
+    input_ids: mx.array
+    embeddings: mx.array
+    grid_thw: Optional[mx.array]
+
+
 def compute_qwen_vl_embeddings(
     addon: BaseVisionAddOn,
     text_model: nn.Module,
@@ -14,7 +24,7 @@ def compute_qwen_vl_embeddings(
     images_b64: list[str],
     qwen_vl_version: int,
     max_size: tuple[int, int] | None,
-) -> tuple[mx.array, mx.array]:
+) -> QwenVLEmbeddingsResult:
     """
     Compute input_ids and embeddings for Qwen2-VL, Qwen2.5-VL, and Qwen3-VL models.
 
@@ -25,9 +35,6 @@ def compute_qwen_vl_embeddings(
         images_b64: List of base64-encoded images
         qwen_vl_version: Version number (2 for Qwen2/2.5-VL, 3 for Qwen3-VL)
         max_size: Maximum image size as (width, height) tuple. If None, no resizing.
-
-    Returns:
-        Tuple of (input_ids, final_embeddings) with batch dimension removed
     """
 
     # Convert and resize images
@@ -57,7 +64,11 @@ def compute_qwen_vl_embeddings(
 
     # If no images, return input_ids and input_embeddings
     if pixel_values is None:
-        return input_ids.squeeze(0), input_embeddings.squeeze(0)
+        return QwenVLEmbeddingsResult(
+            input_ids=input_ids.squeeze(0),
+            embeddings=input_embeddings.squeeze(0),
+            grid_thw=grid_thw,
+        )
 
     # Ensure pixel values are in the right format for vision tower
     if pixel_values.dtype != input_embeddings.dtype:
@@ -92,4 +103,8 @@ def compute_qwen_vl_embeddings(
         raise ValueError(f"Invalid Qwen-VL version: {qwen_vl_version}")
 
     # Remove batch dimension
-    return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
+    return QwenVLEmbeddingsResult(
+        input_ids=input_ids.squeeze(0),
+        embeddings=final_inputs_embeds.squeeze(0),
+        grid_thw=grid_thw,
+    )

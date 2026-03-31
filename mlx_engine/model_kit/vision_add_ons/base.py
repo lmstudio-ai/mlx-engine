@@ -32,3 +32,10 @@ class BaseVisionAddOn:
             images_b64: List of base64-encoded images
             max_size: Maximum image size as (width, height) tuple. If None, no resizing.
         """
+
+    def clear_prediction_state(self, text_model: nn.Module) -> None:
+        """
+        Called before every prediction to reset any model state set by a
+        previous request. Default is a no-op; override in add-ons that
+        inject state into the text model (e.g., MRoPE positions).
+        """

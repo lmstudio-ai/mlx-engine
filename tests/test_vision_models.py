@@ -24,6 +24,22 @@ MAX_KV_CACHE_SIZE = 20000
 CACHING_TEST_PREFILL_STEP_SIZE = 512
 
 
+def _find_token_runs(tokens: list[int], target_token: int) -> list[tuple[int, int]]:
+    """Return contiguous index ranges where a token repeats."""
+    runs = []
+    start = None
+    for idx, token in enumerate(tokens):
+        if token == target_token:
+            if start is None:
+                start = idx
+        elif start is not None:
+            runs.append((start, idx - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(tokens) - 1))
+    return runs
+
+
 class TestVisionModels:
     @classmethod
     def setup_class(cls):
@@ -826,6 +842,150 @@ Summarize this in one sentence<end_of_turn>
         assert len(progress_values) > 0
         for i in range(len(progress_values) - 1):
             assert progress_values[i + 1] > progress_values[i]
+
+    def test_qwen3_5_vision(self):
+        """Test Qwen3.5 2B model with vision"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-2B-MLX-4bit",
+            prompt,
+        )
+
+    def test_qwen3_5_text_only(self):
+        """Test Qwen3.5 2B model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-2B-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
+
+    def test_qwen3_5_vision_then_text_only(self):
+        """Test that text-only generation after a vision request produces the
+        same output as a cold-start text-only generation, verifying that MRoPE
+        state from the vision request does not leak into subsequent text-only
+        requests."""
+        model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=2048,
+            max_seq_nums=1,
+            trust_remote_code=True,
+        )
+
+        def generate_text(prompt, images_b64=None):
+            prompt_tokens = tokenize(model_kit, prompt)
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                images_b64=images_b64,
+                max_image_size=MAX_IMAGE_SIZE,
+                seed=0,
+                temp=0.0,
+                max_tokens=30,
+                repetition_penalty=1.01,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print()
+            return generated_text
+
+        text_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        vision_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+        # Step 1: Text-only baseline (cold start)
+        baseline_text = generate_text(text_prompt)
+
+        # Step 2: Confirm determinism with a second text-only run
+        second_text = generate_text(text_prompt)
+        assert baseline_text == second_text, (
+            f"Text-only generation is not deterministic: {repr(baseline_text)} != {repr(second_text)}"
+        )
+
+        # Step 3: Vision request (populates MRoPE state)
+        vision_text = generate_text(vision_prompt, images_b64=[self.toucan_image_b64])
+        assert len(vision_text) > 0
+
+        # Step 4: Text-only after vision — must match baseline exactly
+        after_vision_text = generate_text(text_prompt)
+        assert baseline_text == after_vision_text, (
+            f"Text-only output after vision request differs from baseline "
+            f"(MRoPE state likely leaked): {repr(baseline_text)} != {repr(after_vision_text)}"
+        )
+
+    def test_qwen3_5_multi_image_process_prompt_preserves_image_positions(self):
+        """Qwen3.5 must inject MRoPE positions for every image span.
+
+        This targets the prompt-processing path directly instead of relying on
+        generation quality: after two images across messages, both expanded
+        image token runs should still carry image-style position IDs rather than
+        falling back to sequential text positions.
+        """
+        model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=2048,
+            max_seq_nums=1,
+            trust_remote_code=True,
+        )
+
+        prompt = """<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>What is this? In one word.<|im_end|>
+<|im_start|>assistant
+Toucan.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>In a few words, describe all of the images you've seen so far<|im_end|>
+<|im_start|>assistant
+"""
+
+        prompt_tokens = tokenize(model_kit, prompt)
+        reporter = RecordingReporter()
+        input_ids, _ = model_kit.process_prompt(
+            prompt_tokens,
+            [self.toucan_image_b64, self.chameleon_image_b64],
+            reporter,
+            {},
+            MAX_IMAGE_SIZE,
+        )
+
+        text_model = model_kit.model.language_model.model
+        image_token_id = model_kit.vision_add_on.config.image_token_id
+        image_runs = _find_token_runs(input_ids.tolist(), image_token_id)
+
+        assert len(image_runs) == 2, (
+            f"Expected two expanded image spans in the prompt, got {image_runs!r}"
+        )
+
+        for run_idx, (start, end) in enumerate(image_runs):
+            temporal_positions = text_model.position_ids[0, 0, start : end + 1].tolist()
+            assert len(set(temporal_positions)) == 1, (
+                f"Image span {run_idx} used sequential text positions instead of "
+                f"image MRoPE positions: {temporal_positions[:12]!r}..."
+            )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_moe_vision(self):
+        """Test Qwen3.5 35B-A3B MoE model with vision"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            prompt,
+        )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_moe_text_only(self):
+        """Test Qwen3.5 35B-A3B MoE model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
 
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):
