@@ -84,10 +84,15 @@ class ModelKit:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        turboquant: bool = False,
+        turboquant_fp16_layers: int = 4,
+        turboquant_fused: bool = True,
     ):
-        if kv_bits and max_kv_size is not None:
-            # Quantized KV cache is only supported for non-rotating KV cache
-            logger.warning("max_kv_size is ignored when using KV cache quantization")
+        if (kv_bits or turboquant) and max_kv_size is not None:
+            # Quantized KV cache or TurboQuant is only supported for non-rotating KV cache
+            logger.warning(
+                "max_kv_size is ignored when using KV cache quantization or TurboQuant"
+            )
             max_kv_size = None
         self.model_path = model_path
         logger.info(f"Loading model from {model_path}...")
@@ -105,11 +110,15 @@ class ModelKit:
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
+            turboquant=turboquant,
+            turboquant_fp16_layers=turboquant_fp16_layers,
+            turboquant_fused=turboquant_fused,
             chunk_size=prefill_step_size,
         )
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
+        self.turboquant = turboquant
         vision_add_on_class = self.VISION_ADD_ON_MAP.get(self.model_type)
         should_load_vision_add_on = (
             vision_add_on_class is not None and "vision_config" in config_json
@@ -127,6 +136,9 @@ class ModelKit:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        turboquant: bool = False,
+        turboquant_fp16_layers: int = 4,
+        turboquant_fused: bool = True,
     ):
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
@@ -143,6 +155,9 @@ class ModelKit:
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
+                turboquant=turboquant,
+                turboquant_fp16_layers=turboquant_fp16_layers,
+                turboquant_fused=turboquant_fused,
             )
 
     def start(self):

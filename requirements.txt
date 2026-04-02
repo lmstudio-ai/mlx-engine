@@ -57,3 +57,4 @@ typer==0.24.1
 typing-inspection==0.4.2
 urllib3==2.6.3
 xxhash==3.6.0
+turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx.git@cffcbf0beae92b2cc02de55a9aded19a96a484f6

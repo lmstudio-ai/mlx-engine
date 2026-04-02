@@ -1,4 +1,4 @@
-from typing import List, Optional, Any
+from typing import cast, List, Optional, Any
 import logging
 from mlx_lm.models.cache import (
     make_prompt_cache,
@@ -60,6 +60,9 @@ class CacheWrapper:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
         chunk_size: int,
+        turboquant: bool = False,
+        turboquant_fused: bool = True,
+        turboquant_fp16_layers: int = 4,
     ):
         """
         Initialize the CacheWrapper.
@@ -68,11 +71,30 @@ class CacheWrapper:
             model (nn.Module): The model to be cached.
             max_kv_size (Optional[int]): Maximum size of the key-value cache.
             chunk_size (int): Number of tokens per prefill chunk.
+            turboquant (bool): Use TurboQuant KV cache compression.
+            turboquant_fused (bool): Use fused attention path for TurboQuant.
+            turboquant_fp16_layers (int): Number of first and last layers to keep in FP16.
         """
         # utilize a simple ordered list of tokens processed so far for cache invalidation checking
         self.tokens: Optional[mx.array] = None
-        self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
         self.model = model
+
+        if turboquant:
+            from turboquant_mlx.adaptive import make_adaptive_cache
+            from turboquant_mlx.patch import apply_patch
+
+            apply_patch()
+
+            self.cache = make_adaptive_cache(
+                num_layers=len(model.layers),
+                bits=kv_bits or 3,
+                fp16_layers=turboquant_fp16_layers,
+                fused=turboquant_fused,
+                model=model,
+            )
+        else:
+            self.cache: List[Any] = make_prompt_cache(model, max_kv_size)
+
         self.draft_model: Optional[nn.Module] = None
         self.max_kv_size = max_kv_size
         self.verbose = verbose
@@ -80,6 +102,9 @@ class CacheWrapper:
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
+            turboquant=turboquant,
+            turboquant_fused=turboquant_fused,
+            turboquant_fp16_layers=turboquant_fp16_layers,
         )
         self.chunk_size = chunk_size
 
@@ -219,7 +244,11 @@ class CacheWrapper:
             current_chunk = remaining_tokens[:current_chunk_size]
 
             model(current_chunk[None], cache=cache)
-            maybe_quantize_kv_cache(prompt_cache=cache, **self.kv_cache_qtn_params)
+            qtn_params = self.kv_cache_qtn_params.copy()
+            qtn_params.pop("turboquant", None)
+            qtn_params.pop("turboquant_fused", None)
+            qtn_params.pop("turboquant_fp16_layers", None)
+            maybe_quantize_kv_cache(prompt_cache=cache, **qtn_params)
             mx.eval([c.state for c in cache])
 
             remaining_tokens = remaining_tokens[current_chunk_size:]
@@ -240,7 +269,19 @@ class CacheWrapper:
                     )
                     num_tokens_in_cache = None
                 if num_tokens_in_cache is None:
-                    self.cache = make_prompt_cache(self.model, self.max_kv_size)
+                    if self.kv_cache_qtn_params.get("turboquant"):
+                        from turboquant_mlx.adaptive import make_adaptive_cache
+
+                        self.cache = make_adaptive_cache(
+                            model=self.model,
+                            num_layers=len(self.model.layers),
+                            bits=self.kv_cache_qtn_params.get("kv_bits") or 3,
+                            fused=cast(bool, self.kv_cache_qtn_params.get("turboquant_fused", True)),
+                            fp16_layers=cast(int, self.kv_cache_qtn_params.get("turboquant_fp16_layers", 4)),
+                        )
+                    else:
+                        self.cache = make_prompt_cache(self.model, self.max_kv_size)
+
                     self.tokens = None
                 else:
                     # Remember which tokens were processed so far, so that we can continue processing at a later point
@@ -274,7 +315,17 @@ class CacheWrapper:
         # https://github.com/ml-explore/mlx-examples/blob/514502da22f0dc4c1ac439bdf78c07d5ec41acf7/llms/mlx_lm/utils.py#L381-L382
         logger.info("Clearing current prompt cache and adding draft model to the cache")
         self.tokens = None
-        self.cache: List[Any] = make_prompt_cache(self.model)
+        if self.kv_cache_qtn_params.get("turboquant"):
+            from turboquant_mlx.adaptive import make_adaptive_cache
+            self.cache = make_adaptive_cache(
+                model=self.model,
+                num_layers=len(self.model.layers),
+                bits=self.kv_cache_qtn_params.get("kv_bits") or 3,
+                fused=cast(bool, self.kv_cache_qtn_params.get("turboquant_fused", True)),
+                fp16_layers=cast(int, self.kv_cache_qtn_params.get("turboquant_fp16_layers", 4)),
+            )
+        else:
+            self.cache: List[Any] = make_prompt_cache(self.model)
         if draft_model is not None:
             self.cache += make_prompt_cache(draft_model)
         self.draft_model = draft_model

@@ -129,6 +129,9 @@ def load_model(
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
     prefill_step_size: Optional[int] = None,
+    turboquant: bool = False,
+    turboquant_fused: bool = True,
+    turboquant_fp16_layers: int = 4,
 ) -> ModelKit | VisionModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -149,6 +152,9 @@ def load_model(
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
         prefill_step_size (Optional[int]): Number of tokens to process per prefill chunk.
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
+        turboquant (bool): Use TurboQuant KV cache compression.
+        turboquant_fused (bool): Use fused attention path for TurboQuant.
+        turboquant_fp16_layers (int): Number of first and last layers to keep in FP16.
 
     Returns:
         ModelKit | VisionModelKit: An initialized model instance:
@@ -183,9 +189,9 @@ def load_model(
     if "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
         model_type
     ):
-        if any([kv_bits, kv_group_size, quantized_kv_start]):
+        if any([kv_bits, kv_group_size, quantized_kv_start, turboquant]):
             raise ValueError(
-                "MLX vision models do not currently support KV cache quantization"
+                "MLX vision models do not currently support KV cache quantization or TurboQuant"
             )
         if parallel_requested:
             raise ValueError(
@@ -204,6 +210,7 @@ def load_model(
             kv_bits,
             kv_group_size,
             quantized_kv_start,
+            turboquant=turboquant,
         )
 
         def is_batchable() -> bool:
@@ -221,10 +228,10 @@ def load_model(
                     "this model architecture does not support continuous batching"
                 )
                 return False
-            # 2. KV cache quantization is not compatible with batching yet
-            if kv_bits is not None:
+            # 2. KV cache quantization or TurboQuant is not compatible with batching yet
+            if kv_bits is not None or turboquant:
                 warn_if_parallel(
-                    "concurrency is not supported with KV Cache Quantization"
+                    "concurrency is not supported with KV Cache Quantization or TurboQuant"
                 )
                 return False
             # 3. Vision models are not compatible with batching yet
@@ -258,6 +265,9 @@ def load_model(
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
+                turboquant=turboquant,
+                turboquant_fused=turboquant_fused,
+                turboquant_fp16_layers=turboquant_fp16_layers,
             )
     sanitize_eos_tokens(model_kit)
     model_kit.start()

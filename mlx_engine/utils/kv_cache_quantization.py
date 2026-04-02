@@ -5,11 +5,15 @@ VALID_KV_BITS = (2, 3, 4, 6, 8)
 # https://github.com/ml-explore/mlx/blob/f288db8d34c0bcfa0867b6458ab0277c5e86ed45/mlx/fast.cpp#L775
 VALID_KV_GROUP_SIZE = (32, 64, 128)
 
+# TurboQuant bits
+VALID_TURBOQUANT_BITS = (1, 2, 3, 4)
+
 
 def get_kv_cache_quantization_params(
     kv_bits: Optional[int],
     kv_group_size: Optional[int],
     quantized_kv_start: Optional[int],
+    turboquant: bool = False,
 ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """
     Validates and processes KV cache quantization parameters.
@@ -18,6 +22,7 @@ def get_kv_cache_quantization_params(
         kv_bits: Number of bits for quantization. If None, disables quantization.
         kv_group_size: Group size for quantization. Defaults to 64 if quantization enabled.
         quantized_kv_start: Step to begin quantization. Defaults to 0 if quantization enabled.
+        turboquant: Whether TurboQuant is being used.
 
     Returns:
         Tuple of (kv_bits, kv_group_size, quantized_kv_start), all None if quantization disabled.
@@ -30,6 +35,13 @@ def get_kv_cache_quantization_params(
 
     if kv_bits is None:
         return None, None, None
+
+    if turboquant:
+        if kv_bits not in VALID_TURBOQUANT_BITS:
+            raise ValueError(
+                f"Invalid TurboQuant kv_bits value. Must be one of {VALID_TURBOQUANT_BITS}"
+            )
+        return kv_bits, None, None
 
     # defaults taken from here:
     # https://github.com/ml-explore/mlx-examples/blob/3d793ec/llms/mlx_lm/utils.py#L352-L353
