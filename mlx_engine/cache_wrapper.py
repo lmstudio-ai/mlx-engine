@@ -80,8 +80,8 @@ class CacheWrapper:
         self.model = model
 
         if turboquant:
-            from turboquant_mlx.adaptive import make_adaptive_cache
             from turboquant_mlx.patch import apply_patch
+            from turboquant_mlx.adaptive import make_adaptive_cache
 
             apply_patch()
 
@@ -244,11 +244,12 @@ class CacheWrapper:
             current_chunk = remaining_tokens[:current_chunk_size]
 
             model(current_chunk[None], cache=cache)
-            qtn_params = self.kv_cache_qtn_params.copy()
-            qtn_params.pop("turboquant", None)
-            qtn_params.pop("turboquant_fused", None)
-            qtn_params.pop("turboquant_fp16_layers", None)
-            maybe_quantize_kv_cache(prompt_cache=cache, **qtn_params)
+            if not self.kv_cache_qtn_params.get("turboquant"):
+                qtn_params = self.kv_cache_qtn_params.copy()
+                qtn_params.pop("turboquant", None)
+                qtn_params.pop("turboquant_fused", None)
+                qtn_params.pop("turboquant_fp16_layers", None)
+                maybe_quantize_kv_cache(prompt_cache=cache, **qtn_params)
             mx.eval([c.state for c in cache])
 
             remaining_tokens = remaining_tokens[current_chunk_size:]
