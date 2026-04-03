@@ -377,7 +377,8 @@ def _load_vlm(model_path: Path):
     """Load model using mlx-vlm's native loader."""
     from mlx_vlm.utils import load_model as vlm_load_model
 
-    return vlm_load_model(model_path)
+    result = vlm_load_model(model_path)
+    return result[0] if isinstance(result, tuple) else result
 
 
 @pytest.mark.parametrize("model_name", REAL_MODEL_CASES)
