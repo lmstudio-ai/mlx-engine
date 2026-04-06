@@ -165,9 +165,6 @@ def load_model(
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
     model_type = config_json.get("model_type", None)
-    if model_type == "gemma4":
-        # https://github.com/lmstudio-ai/mlx-engine/issues/301
-        raise ValueError("Gemma 4 support is not ready yet, stay tuned!")
     parallel_requested = max_seq_nums is not None and max_seq_nums > 1
 
     def warn_if_parallel(reason: str) -> None:
