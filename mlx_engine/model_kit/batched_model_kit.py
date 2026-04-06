@@ -78,22 +78,28 @@ def _prepare_prompt_cache_for_generation(
     prompt_cache: LRUPromptCache, model_key: str, prompt_tokens: list[int]
 ):
     """
-    Return a cache plus prompt suffix that always leaves one token available to
-    seed the first generation step.
+    Return `(cache, cached_prefix, rest)` while ensuring batched decode still
+    has one prompt token left to seed its first generation step.
     """
 
+    # Start from mlx-lm's nearest reusable cache entry.
     cache, rest = prompt_cache.fetch_nearest_cache(model_key, prompt_tokens)
+
+    # Any uncached suffix already leaves a seed token outside the cache.
     if rest:
         cached_prefix_len = len(prompt_tokens) - len(rest)
         return cache, prompt_tokens[:cached_prefix_len], rest
 
+    # Empty prompts have no seed token to preserve.
     if len(prompt_tokens) == 0:
         return cache, [], []
 
+    # Exact cache hits need one token moved out of cache to start decoding.
     if cache is not None and can_trim_prompt_cache(cache):
         trim_prompt_cache(cache, 1)
         return cache, prompt_tokens[:-1], prompt_tokens[-1:]
 
+    # If we cannot trim an exact-hit cache, replay the full prompt instead.
     return None, [], prompt_tokens
 
 
