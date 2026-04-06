@@ -96,8 +96,8 @@ def _prepare_prompt_cache_for_generation(
 
     # Exact cache hits need one token moved out of cache to start decoding.
     if cache is not None and can_trim_prompt_cache(cache):
-        trim_prompt_cache(cache, 1)
-        return cache, prompt_tokens[:-1], prompt_tokens[-1:]
+        if trim_prompt_cache(cache, 1) == 1:
+            return cache, prompt_tokens[:-1], prompt_tokens[-1:]
 
     # If we cannot trim an exact-hit cache, replay the full prompt instead.
     return None, [], prompt_tokens
