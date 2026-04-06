@@ -8,6 +8,7 @@ import logging
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
 from mlx_lm.generate import BatchGenerator
+from mlx_lm.models.cache import can_trim_prompt_cache, trim_prompt_cache
 import mlx.nn as nn
 import mlx.core as mx
 from pathlib import Path
@@ -27,45 +28,70 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 logger = logging.getLogger(__name__)
 
 
-def _make_batched_logits_processor(processor, state, trim_prefix_len):
-    def wrapped(tokens, logits):
-        # Newer mlx-lm batch generation passes Python token lists here,
-        # while our processors still expect an MLX array.
-        if not hasattr(tokens, "shape"):
-            tokens = mx.array(tokens)
+class _BatchedLogitsProcessorAdapter:
+    """
+    Adapt mlx-engine logits processors to mlx-lm's batched generation contract.
 
-        if trim_prefix_len > 0:
-            tokens = tokens[trim_prefix_len:]
+    BatchGenerator keeps prompt history in Python lists and passes the history
+    before the current input token has been appended. Our processors are written
+    against the sequential contract, so we restore that view here.
+    """
 
-        # In batched mlx-lm, logits processors are called before the current
-        # input token has been appended to `tokens`. Restore the sequential-path
-        # view by appending the token that was just fed into the model.
-        pending_input_tokens = state["pending_input_tokens"]
-        if pending_input_tokens is not None and pending_input_tokens.size > 0:
-            tokens = mx.concatenate([tokens, pending_input_tokens])
+    def __init__(self, processors, initial_input_tokens):
+        self._processors = processors or []
+        self._current_input_tokens = (
+            mx.array(initial_input_tokens) if initial_input_tokens else None
+        )
 
-        return processor(tokens, logits)
+    def sampler(self, sampler):
+        if sampler is None:
+            return None
 
-    return wrapped
+        def wrapped(logprobs):
+            sampled = sampler(logprobs)
+            self._current_input_tokens = mx.array(sampled).reshape(-1)
+            return sampled
+
+        return wrapped
+
+    def logits_processors(self):
+        return [self._wrap_processor(processor) for processor in self._processors]
+
+    def _wrap_processor(self, processor):
+        def wrapped(tokens, logits):
+            if not hasattr(tokens, "shape"):
+                tokens = mx.array(tokens)
+            if (
+                self._current_input_tokens is not None
+                and self._current_input_tokens.size > 0
+            ):
+                tokens = mx.concatenate([tokens, self._current_input_tokens])
+            return processor(tokens, logits)
+
+        return wrapped
 
 
-def _wrap_batched_sampler(sampler, state):
-    if sampler is None:
-        return None
+def _prepare_prompt_cache_for_generation(
+    prompt_cache: LRUPromptCache, model_key: str, prompt_tokens: list[int]
+):
+    """
+    Return a cache plus prompt suffix that always leaves one token available to
+    seed the first generation step.
+    """
 
-    def wrapped(logprobs):
-        sampled = sampler(logprobs)
-        state["pending_input_tokens"] = mx.array(sampled).reshape(-1)
-        return sampled
+    cache, rest = prompt_cache.fetch_nearest_cache(model_key, prompt_tokens)
+    if rest:
+        cached_prefix_len = len(prompt_tokens) - len(rest)
+        return cache, prompt_tokens[:cached_prefix_len], rest
 
-    return wrapped
+    if len(prompt_tokens) == 0:
+        return cache, [], []
 
+    if cache is not None and can_trim_prompt_cache(cache):
+        trim_prompt_cache(cache, 1)
+        return cache, prompt_tokens[:-1], prompt_tokens[-1:]
 
-def _wrap_batched_logits_processors(logits_processors, state, trim_prefix_len=0):
-    return [
-        _make_batched_logits_processor(processor, state, trim_prefix_len)
-        for processor in (logits_processors or [])
-    ]
+    return None, [], prompt_tokens
 
 
 class BatchedModelKit:
@@ -336,31 +362,21 @@ class BatchedModelKit:
                         logger.warning(f"Could not cancel {request_id=} (id not found)")
                     continue
 
-                # Get cache
-                cache, rest = self._prompt_cache.fetch_nearest_cache(
-                    current_model_key, request.prompt_tokens
+                cache, cached_prefix, rest = _prepare_prompt_cache_for_generation(
+                    self._prompt_cache, current_model_key, request.prompt_tokens
                 )
-                initial_tokens = rest[-1:]
-                trim_prefix_len = max(len(rest) - len(initial_tokens), 0)
-                state = {
-                    "pending_input_tokens": (
-                        mx.array(initial_tokens) if initial_tokens else None
-                    )
-                }
+                adapter = _BatchedLogitsProcessorAdapter(
+                    request.logits_processors, rest[-1:]
+                )
 
                 # Add to batch
                 (uid,) = batch_generator.insert(
                     [rest],
                     [request.max_tokens],
                     caches=[cache],
-                    samplers=[_wrap_batched_sampler(request.samplers, state)],
-                    logits_processors=[
-                        _wrap_batched_logits_processors(
-                            request.logits_processors,
-                            state=state,
-                            trim_prefix_len=trim_prefix_len,
-                        )
-                    ],
+                    all_tokens=[cached_prefix],
+                    samplers=[adapter.sampler(request.samplers)],
+                    logits_processors=[adapter.logits_processors()],
                 )
 
                 # Track this request

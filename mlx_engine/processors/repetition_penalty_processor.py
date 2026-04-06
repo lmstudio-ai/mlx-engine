@@ -23,7 +23,7 @@ class RepetitionPenaltyProcessor:
             repetition_penalty, repetition_context_size
         )
 
-    def __call__(self, tokens: mx.array, logits: mx.array) -> mx.array:
+    def __call__(self, tokens: mx.array | list[int], logits: mx.array) -> mx.array:
         """
         Apply repetition penalty to the logits, accounting for tokens that have already been processed within
         the same prediction.
@@ -32,6 +32,9 @@ class RepetitionPenaltyProcessor:
             tokens: The tokens to be processed.
             logits: The logits to be processed.
         """
+        if not hasattr(tokens, "shape"):
+            tokens = mx.array(tokens, dtype=mx.int64)
+
         # append historical tokens s.t. repetition penalty accounts tokens that have already been processed in this gen
         num_tokens_to_prepend_from_history = max(
             self.repetition_context_size - len(tokens), 0
