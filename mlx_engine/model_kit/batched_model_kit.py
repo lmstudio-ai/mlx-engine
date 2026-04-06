@@ -27,6 +27,47 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 logger = logging.getLogger(__name__)
 
 
+def _make_batched_logits_processor(processor, state, trim_prefix_len):
+    def wrapped(tokens, logits):
+        # Newer mlx-lm batch generation passes Python token lists here,
+        # while our processors still expect an MLX array.
+        if not hasattr(tokens, "shape"):
+            tokens = mx.array(tokens)
+
+        if trim_prefix_len > 0:
+            tokens = tokens[trim_prefix_len:]
+
+        # In batched mlx-lm, logits processors are called before the current
+        # input token has been appended to `tokens`. Restore the sequential-path
+        # view by appending the token that was just fed into the model.
+        pending_input_tokens = state["pending_input_tokens"]
+        if pending_input_tokens is not None and pending_input_tokens.size > 0:
+            tokens = mx.concatenate([tokens, pending_input_tokens])
+
+        return processor(tokens, logits)
+
+    return wrapped
+
+
+def _wrap_batched_sampler(sampler, state):
+    if sampler is None:
+        return None
+
+    def wrapped(logprobs):
+        sampled = sampler(logprobs)
+        state["pending_input_tokens"] = mx.array(sampled).reshape(-1)
+        return sampled
+
+    return wrapped
+
+
+def _wrap_batched_logits_processors(logits_processors, state, trim_prefix_len=0):
+    return [
+        _make_batched_logits_processor(processor, state, trim_prefix_len)
+        for processor in (logits_processors or [])
+    ]
+
+
 class BatchedModelKit:
     """
     This model kit enables continuous batching by running `mlx_lm.BatchGenerator` in a worker thread
@@ -247,13 +288,6 @@ class BatchedModelKit:
         requests receive a RequestCancelled exception.
         """
 
-        def progress_callback(info):
-            for uid, processed, total in info:
-                if uid in self._batch_results:
-                    self._batch_results[uid]["rqueue"].put(
-                        (min(processed, total), total)
-                    )
-
         batch_generator = BatchGenerator(
             self.model,
             max_tokens=10000000,
@@ -262,11 +296,10 @@ class BatchedModelKit:
             # We probably want to make this behavior configurable, so that new prompts do not pause existing decodes
             prefill_batch_size=1,
             prefill_step_size=self._prefill_step_size,
-            stop_tokens=set(self.tokenizer.eos_token_ids),
+            stop_tokens=[[token] for token in self.tokenizer.eos_token_ids],
             # Do not set any global post-processors, sampler and logits_processor are set per-request
             sampler=None,
             logits_processors=None,
-            prompt_progress_callback=progress_callback,
             max_kv_size=self._max_kv_size,
         )
         # only using one model, so model key name value does not matter
@@ -307,14 +340,27 @@ class BatchedModelKit:
                 cache, rest = self._prompt_cache.fetch_nearest_cache(
                     current_model_key, request.prompt_tokens
                 )
+                initial_tokens = rest[-1:]
+                trim_prefix_len = max(len(rest) - len(initial_tokens), 0)
+                state = {
+                    "pending_input_tokens": (
+                        mx.array(initial_tokens) if initial_tokens else None
+                    )
+                }
 
                 # Add to batch
                 (uid,) = batch_generator.insert(
                     [rest],
                     [request.max_tokens],
                     caches=[cache],
-                    samplers=[request.samplers],
-                    logits_processors=[request.logits_processors],
+                    samplers=[_wrap_batched_sampler(request.samplers, state)],
+                    logits_processors=[
+                        _wrap_batched_logits_processors(
+                            request.logits_processors,
+                            state=state,
+                            trim_prefix_len=trim_prefix_len,
+                        )
+                    ],
                 )
 
                 # Track this request
@@ -339,16 +385,25 @@ class BatchedModelKit:
                 if time.time() - start > time_budget:
                     break
 
-                responses = batch_generator.next()
-                if not responses:
+                prompt_responses, generation_responses = batch_generator.next()
+                if not prompt_responses and not generation_responses:
                     break
 
-                for r in responses:
+                for r in prompt_responses:
+                    result = self._batch_results.get(r.uid)
+                    if result is not None:
+                        processed, total = r.progress
+                        result["rqueue"].put((min(processed, total), total))
+
+                for r in generation_responses:
                     # Create response object
                     result = self._batch_results[r.uid]
+                    detokenizer = result["detokenizer"]
                     result["cache_key"].append(r.token)
                     if r.finish_reason != "stop":
-                        result["detokenizer"].add_token(r.token)
+                        detokenizer.add_token(r.token)
+                    if r.finish_reason is not None:
+                        detokenizer.finalize()
                     token_logprob = r.logprobs[r.token].item()
                     top_logprobs_list = None
 
@@ -374,7 +429,7 @@ class BatchedModelKit:
                     # Send the result
                     result["rqueue"].put(
                         BatchedGenerationResponse(
-                            text=result["detokenizer"].last_segment,
+                            text=detokenizer.last_segment,
                             token=r.token,
                             token_logprob=token_logprob,
                             top_logprobs=top_logprobs_list,
