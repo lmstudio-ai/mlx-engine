@@ -35,6 +35,9 @@ class _BatchedLogitsProcessorAdapter:
     BatchGenerator keeps prompt history in Python lists and passes the history
     before the current input token has been appended. Our processors are written
     against the sequential contract, so we restore that view here.
+
+    Remove this adapter after https://github.com/ml-explore/mlx-lm/pull/1115
+    is merged.
     """
 
     def __init__(self, processors, initial_input_tokens):
