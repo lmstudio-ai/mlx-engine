@@ -59,7 +59,7 @@ class _BatchedLogitsProcessorAdapter:
 
     def _wrap_processor(self, processor):
         def wrapped(tokens, logits):
-            if not hasattr(tokens, "shape"):
+            if not isinstance(tokens, mx.array):
                 tokens = mx.array(tokens)
             if (
                 self._current_input_tokens is not None
