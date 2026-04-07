@@ -801,6 +801,127 @@ Summarize this in one sentence<end_of_turn>
         )
         assert len(follow_up_text.strip()) > 0
 
+    @pytest.mark.heavy
+    def test_gemma4_scratchpad_follow_up_reuses_checkpoint_cache(self):
+        """Ensure Gemma 4 reuses a cached prompt checkpoint when follow-up drops a long assistant scratchpad."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        processor = AutoProcessor.from_pretrained(model_path)
+        max_kv_size = 512
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=max_kv_size,
+            max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
+        )
+        control_word = "MERIDIAN"
+        background_words = (
+            (self.test_data_dir / "ben_franklin_autobiography_start.txt")
+            .read_text()
+            .split()
+        )
+
+        def render_prompt(conversation):
+            return processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+        def generate_text(prompt, *, max_tokens):
+            prompt_tokens = tokenize(model_kit, prompt)
+            reporter = RecordingReporter()
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=max_tokens,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_reporter=reporter,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return prompt_tokens, generated_text, reporter
+
+        background = " ".join(background_words[:192])
+        first_conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": dedent(f"""\
+                            Read the background carefully.
+
+                            Background:
+                            {background}
+
+                            Write two sections in order.
+                            First, write a long SCRATCHPAD section with at least 60 numbered lines.
+                            Keep each line short, but make sure the full scratchpad is detailed.
+                            Each line should briefly analyze or restate part of the background.
+                            Second, end with a single final line in the exact format:
+                            FINAL: {control_word}
+                            Do not write anything after that final line.
+                            """),
+                    }
+                ],
+            }
+        ]
+        first_prompt = render_prompt(first_conversation)
+        first_prompt_tokens = tokenize(model_kit, first_prompt)
+        assert len(first_prompt_tokens) < max_kv_size
+
+        (
+            _,
+            generated_text,
+            reporter,
+        ) = generate_text(first_prompt, max_tokens=1600)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
+        assert len(generated_text) > 0
+
+        final_marker = f"FINAL: {control_word}"
+        final_index = generated_text.find(final_marker)
+        assert final_index >= 0, generated_text
+        scratchpad_text = generated_text[:final_index]
+        scratchpad_token_count = len(
+            model_kit.tokenizer.encode(scratchpad_text, add_special_tokens=False)
+        )
+        assert scratchpad_token_count > 512
+
+        assistant_text = control_word
+
+        second_conversation = first_conversation + [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What was the exact single-word final answer from your previous message? Reply with only that word.",
+                    }
+                ],
+            },
+        ]
+        second_prompt = render_prompt(second_conversation)
+
+        _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > len(first_prompt_tokens) // 2
+        assert control_word.lower() in follow_up_text.lower()
+
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_generation_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
