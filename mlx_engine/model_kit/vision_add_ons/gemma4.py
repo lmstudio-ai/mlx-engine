@@ -27,6 +27,26 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
 logger = logging.getLogger(__name__)
 
 
+def _compute_prompt_per_layer_inputs(
+    language_model: nn.Module,
+    input_ids: mx.array,
+    image_token_id: int,
+    audio_token_id: int | None,
+) -> mx.array | None:
+    if not getattr(language_model, "hidden_size_per_layer_input", 0):
+        return None
+
+    image_mask_ids = input_ids == image_token_id
+    audio_mask_ids = (
+        input_ids == audio_token_id
+        if audio_token_id is not None
+        else mx.zeros_like(image_mask_ids)
+    )
+    text_mask = ~(image_mask_ids | audio_mask_ids)
+    per_layer_inputs_tokens = mx.where(text_mask, input_ids, mx.zeros_like(input_ids))
+    return language_model._get_per_layer_inputs(per_layer_inputs_tokens)
+
+
 class Gemma4VisionComponents(nn.Module):
     def __init__(self, vision_tower: nn.Module, embed_vision: nn.Module):
         super().__init__()
@@ -77,6 +97,12 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
         self.config = config
         self.processor = processor
 
+    def clear_prediction_state(self, text_model: nn.Module) -> None:
+        language_model = text_model.language_model.model
+        reset = getattr(language_model, "reset_prompt_per_layer_input_state", None)
+        if reset is not None:
+            reset()
+
     def compute_embeddings(
         self,
         text_model: nn.Module,
@@ -114,4 +140,16 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
         final_inputs_embeds = masked_scatter(
             input_embeddings, image_mask_expanded, scaled_image_features
         )
+
+        prompt_per_layer_inputs = _compute_prompt_per_layer_inputs(
+            text_model.language_model.model,
+            input_ids,
+            self.config.image_token_id,
+            getattr(self.config, "audio_token_id", None),
+        )
+        if prompt_per_layer_inputs is not None:
+            text_model.language_model.model.set_prompt_per_layer_inputs(
+                prompt_per_layer_inputs
+            )
+
         return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)

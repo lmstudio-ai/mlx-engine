@@ -28,52 +28,6 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 logger = logging.getLogger(__name__)
 
 
-class _BatchedLogitsProcessorAdapter:
-    """
-    Adapt mlx-engine logits processors to mlx-lm's batched generation contract.
-
-    BatchGenerator keeps prompt history in Python lists and passes the history
-    before the current input token has been appended. Our processors are written
-    against the sequential contract, so we restore that view here.
-
-    Remove this adapter after https://github.com/ml-explore/mlx-lm/pull/1115
-    is merged.
-    """
-
-    def __init__(self, processors, initial_input_tokens):
-        self._processors = processors or []
-        self._current_input_tokens = (
-            mx.array(initial_input_tokens) if initial_input_tokens else None
-        )
-
-    def sampler(self, sampler):
-        if sampler is None:
-            return None
-
-        def wrapped(logprobs):
-            sampled = sampler(logprobs)
-            self._current_input_tokens = mx.array(sampled).reshape(-1)
-            return sampled
-
-        return wrapped
-
-    def logits_processors(self):
-        return [self._wrap_processor(processor) for processor in self._processors]
-
-    def _wrap_processor(self, processor):
-        def wrapped(tokens, logits):
-            if not isinstance(tokens, mx.array):
-                tokens = mx.array(tokens)
-            if (
-                self._current_input_tokens is not None
-                and self._current_input_tokens.size > 0
-            ):
-                tokens = mx.concatenate([tokens, self._current_input_tokens])
-            return processor(tokens, logits)
-
-        return wrapped
-
-
 def _prepare_prompt_cache_for_generation(
     prompt_cache: LRUPromptCache, model_key: str, prompt_tokens: list[int]
 ):
@@ -374,9 +328,6 @@ class BatchedModelKit:
                 cache, cached_prefix, rest = _prepare_prompt_cache_for_generation(
                     self._prompt_cache, current_model_key, request.prompt_tokens
                 )
-                adapter = _BatchedLogitsProcessorAdapter(
-                    request.logits_processors, rest[-1:]
-                )
 
                 # Add to batch
                 (uid,) = batch_generator.insert(
@@ -384,8 +335,8 @@ class BatchedModelKit:
                     [request.max_tokens],
                     caches=[cache],
                     all_tokens=[cached_prefix],
-                    samplers=[adapter.sampler(request.samplers)],
-                    logits_processors=[adapter.logits_processors()],
+                    samplers=[request.samplers],
+                    logits_processors=[request.logits_processors],
                 )
 
                 # Track this request
