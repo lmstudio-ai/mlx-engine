@@ -27,24 +27,14 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
 logger = logging.getLogger(__name__)
 
 
-def _compute_prompt_per_layer_inputs(
-    language_model: nn.Module,
+def _mask_prompt_per_layer_input_ids(
     input_ids: mx.array,
     image_token_id: int,
-    audio_token_id: int | None,
-) -> mx.array | None:
-    if not getattr(language_model, "hidden_size_per_layer_input", 0):
-        return None
-
-    image_mask_ids = input_ids == image_token_id
-    audio_mask_ids = (
-        input_ids == audio_token_id
-        if audio_token_id is not None
-        else mx.zeros_like(image_mask_ids)
-    )
-    text_mask = ~(image_mask_ids | audio_mask_ids)
-    per_layer_inputs_tokens = mx.where(text_mask, input_ids, mx.zeros_like(input_ids))
-    return language_model._get_per_layer_inputs(per_layer_inputs_tokens)
+    audio_token_id: int,
+) -> mx.array:
+    masked_input_ids = mx.where(input_ids == image_token_id, 0, input_ids)
+    masked_input_ids = mx.where(input_ids == audio_token_id, 0, masked_input_ids)
+    return masked_input_ids
 
 
 class Gemma4VisionComponents(nn.Module):
@@ -97,12 +87,6 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
         self.config = config
         self.processor = processor
 
-    def clear_prediction_state(self, text_model: nn.Module) -> None:
-        language_model = text_model.language_model.model
-        reset = getattr(language_model, "reset_prompt_per_layer_input_state", None)
-        if reset is not None:
-            reset()
-
     def compute_embeddings(
         self,
         text_model: nn.Module,
@@ -119,7 +103,8 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
             max_size=max_size,
         )
 
-        input_embeddings = text_model.language_model.model.embed_tokens(input_ids)
+        language_model = text_model.language_model.model
+        input_embeddings = language_model.embed_tokens(input_ids)
 
         image_features = self.vision_tower(pixel_values)
         image_features = self.embed_vision(image_features).astype(
@@ -127,9 +112,7 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
         )
 
         # Gemma4TextModel applies embed_scale even when input_embeddings are provided.
-        scaled_image_features = (
-            image_features / text_model.language_model.model.embed_scale
-        )
+        scaled_image_features = image_features / language_model.embed_scale
 
         image_mask = input_ids == self.config.image_token_id
         image_mask_expanded = mx.expand_dims(image_mask, -1)
@@ -141,15 +124,13 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
             input_embeddings, image_mask_expanded, scaled_image_features
         )
 
-        prompt_per_layer_inputs = _compute_prompt_per_layer_inputs(
-            text_model.language_model.model,
-            input_ids,
-            self.config.image_token_id,
-            getattr(self.config, "audio_token_id", None),
-        )
-        if prompt_per_layer_inputs is not None:
-            text_model.language_model.model.set_prompt_per_layer_inputs(
-                prompt_per_layer_inputs
+        if language_model.hidden_size_per_layer_input:
+            language_model.prompt_per_layer_input_ids = (
+                _mask_prompt_per_layer_input_ids(
+                    input_ids,
+                    self.config.image_token_id,
+                    self.config.audio_token_id,
+                )
             )
 
         return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
