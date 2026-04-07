@@ -27,16 +27,6 @@ from mlx_engine.model_kit.vision_add_ons.process_prompt_with_images import (
 logger = logging.getLogger(__name__)
 
 
-def _mask_prompt_per_layer_input_ids(
-    input_ids: mx.array,
-    image_token_id: int,
-    audio_token_id: int,
-) -> mx.array:
-    masked_input_ids = mx.where(input_ids == image_token_id, 0, input_ids)
-    masked_input_ids = mx.where(input_ids == audio_token_id, 0, masked_input_ids)
-    return masked_input_ids
-
-
 class Gemma4VisionComponents(nn.Module):
     def __init__(self, vision_tower: nn.Module, embed_vision: nn.Module):
         super().__init__()
@@ -125,12 +115,11 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
         )
 
         if language_model.hidden_size_per_layer_input:
-            language_model.prompt_per_layer_input_ids = (
-                _mask_prompt_per_layer_input_ids(
-                    input_ids,
-                    self.config.image_token_id,
-                    self.config.audio_token_id,
-                )
+            masked_input_ids = mx.where(
+                input_ids == self.config.image_token_id, 0, input_ids
+            )
+            language_model.prompt_per_layer_input_ids = mx.where(
+                input_ids == self.config.audio_token_id, 0, masked_input_ids
             )
 
         return input_ids.squeeze(0), final_inputs_embeds.squeeze(0)
