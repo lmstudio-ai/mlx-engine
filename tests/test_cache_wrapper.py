@@ -71,8 +71,6 @@ class TestCacheWrapper(unittest.TestCase):
         session,
         prompt_tokens,
         reporter=None,
-        *,
-        num_tokens_to_exclude=1,
     ):
         reporter = reporter or RecordingReporter()
         with (
@@ -83,7 +81,6 @@ class TestCacheWrapper(unittest.TestCase):
             result_tokens = session.update_cache(
                 prompt_tokens=prompt_tokens,
                 reporter=reporter,
-                num_tokens_to_exclude=num_tokens_to_exclude,
             )
         return result_tokens, reporter
 
@@ -94,7 +91,6 @@ class TestCacheWrapper(unittest.TestCase):
         model_kit = load_model(model_path=model_path, max_kv_size=4096)
 
         chunk_size = 20  # Small chunk size to ensure multiple progress callbacks
-        num_tokens_to_exclude = 1
         model_kit.cache_wrapper = CacheWrapper(
             model_kit.model,
             max_kv_size=4096,
@@ -114,7 +110,6 @@ class TestCacheWrapper(unittest.TestCase):
             model_kit.cache_wrapper.update_cache(
                 prompt_tokens=prompt_tokens,
                 reporter=cancelling_reporter,
-                num_tokens_to_exclude=1,
             )
 
         # Second attempt: Reporter that doesn't cancel
@@ -123,7 +118,6 @@ class TestCacheWrapper(unittest.TestCase):
         result_tokens = model_kit.cache_wrapper.update_cache(
             prompt_tokens=prompt_tokens,
             reporter=recording_reporter,
-            num_tokens_to_exclude=1,
         )
         cached_before_cancel = cancelling_reporter.events[-1][
             "prefill_tokens_processed"
@@ -135,9 +129,7 @@ class TestCacheWrapper(unittest.TestCase):
 
         # Verify that the second attempt completed successfully
         self.assertIsNotNone(result_tokens)
-        self.assertEqual(
-            result_tokens.tolist(), prompt_tokens[-num_tokens_to_exclude:].tolist()
-        )
+        self.assertEqual(result_tokens.tolist(), prompt_tokens[-1:].tolist())
 
     def test_full_snapshot_reuse_requires_a_longer_prompt_without_checkpoint(self):
         session, _ = self._make_session(
@@ -225,6 +217,24 @@ class TestCacheWrapper(unittest.TestCase):
         _, reporter = self._run_update_cache(session, prompt)
 
         self.assertEqual(reporter.events[0]["cached_tokens"], 0)
+
+    def test_unsetting_draft_model_preserves_live_main_cache(self):
+        session, _ = self._make_session(
+            cache_trimmable=True,
+            checkpoint_tail_tokens=100,
+        )
+        prompt = mx.array([1, 2, 3, 4], dtype=mx.int32)
+
+        session.set_draft_model(FakeModel())
+        self._run_update_cache(session, prompt)
+
+        session.unset_draft_model()
+
+        result_tokens, reporter = self._run_update_cache(session, prompt)
+
+        self.assertEqual(reporter.events[0]["cached_tokens"], 3)
+        self.assertEqual(len(session.cache), 1)
+        self.assertEqual(result_tokens.tolist(), [4])
 
     def test_quantized_mode_reuses_full_snapshots_and_skips_same_prompt_checkpoint_reuse(
         self,

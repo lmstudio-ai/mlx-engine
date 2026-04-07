@@ -209,10 +209,7 @@ class CacheWrapper:
         self,
         prompt_tokens: mx.array,
         reporter: PromptProgressReporter,
-        *,
-        num_tokens_to_exclude: int = 1,
     ) -> mx.array:
-        required_tail_tokens = max(1, min(num_tokens_to_exclude, len(prompt_tokens)))
         total_prompt_tokens = len(prompt_tokens)
 
         self._flush_live_cache()
@@ -232,7 +229,8 @@ class CacheWrapper:
             prefill_tokens_processed=0,
         )
 
-        prefill_tokens = uncached_tokens[:-required_tail_tokens]
+        # Leave one token outside the cache to seed decode.
+        prefill_tokens = uncached_tokens[:-1]
         checkpoint_prefix_len = None
         # Only checkpoint the main-model path; quantized caches skip checkpointing.
         if self.draft_model is None and self.kv_cache_qtn_params["kv_bits"] is None:
@@ -268,7 +266,7 @@ class CacheWrapper:
             )
 
         reporter.finish(is_draft=False)
-        return uncached_tokens[-required_tail_tokens:]
+        return uncached_tokens[-1:]
 
     def record_generated_token(self, token: int) -> None:
         if self._live_tokens is None:
@@ -293,7 +291,11 @@ class CacheWrapper:
     def unset_draft_model(self) -> None:
         if self.draft_model is None:
             return
+        main_cache = self._live_cache[: len(self.model.layers)]
         self._history = LRUPromptCache()
         self.draft_model = None
+        if len(main_cache) == len(self.model.layers):
+            self._live_cache = main_cache
+            return
         self._live_tokens = None
         self._live_cache = self._make_cache()
