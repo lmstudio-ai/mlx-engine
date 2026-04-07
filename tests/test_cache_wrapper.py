@@ -1,10 +1,11 @@
+from contextlib import nullcontext
 import unittest
 from unittest.mock import patch
+
 import mlx.core as mx
 from mlx_engine.cache_wrapper import CacheWrapper, StopPromptProcessing
-from mlx_engine.prompt_cache_session import PromptCacheSession
-from tests.shared import model_getter, RecordingReporter, CancellingReporter
 from mlx_engine.generate import load_model, tokenize
+from tests.shared import CancellingReporter, RecordingReporter, model_getter
 
 
 class FakeCache:
@@ -30,10 +31,18 @@ class FakeCache:
     def nbytes(self):
         return max(self.offset, 1)
 
+    def advance(self, n):
+        self.offset += n
+
 
 class FakeModel:
-    def __init__(self):
+    def __init__(self, *, cache_trimmable: bool = True):
+        self.layers = [object()]
         self.calls = []
+        self.cache_trimmable = cache_trimmable
+
+    def make_cache(self):
+        return [FakeCache(trimmable=self.cache_trimmable)]
 
     def __call__(self, tokens, cache):
         n_tokens = tokens.shape[1]
@@ -42,7 +51,42 @@ class FakeModel:
             entry.offset += n_tokens
 
 
+def _no_op_stream(_stream):
+    return nullcontext()
+
+
 class TestCacheWrapper(unittest.TestCase):
+    def _make_session(self, *, cache_trimmable=True, **kwargs):
+        model = FakeModel(cache_trimmable=cache_trimmable)
+        session = CacheWrapper(
+            model=model,
+            max_kv_size=None,
+            chunk_size=8,
+            **kwargs,
+        )
+        return session, model
+
+    def _run_update_cache(
+        self,
+        session,
+        prompt_tokens,
+        reporter=None,
+        *,
+        num_tokens_to_exclude=1,
+    ):
+        reporter = reporter or RecordingReporter()
+        with (
+            patch("mlx_engine.cache_wrapper.mx.stream", side_effect=_no_op_stream),
+            patch("mlx_engine.cache_wrapper.mx.eval"),
+            patch("mlx_engine.cache_wrapper.mx.clear_cache"),
+        ):
+            result_tokens = session.update_cache(
+                prompt_tokens=prompt_tokens,
+                reporter=reporter,
+                num_tokens_to_exclude=num_tokens_to_exclude,
+            )
+        return result_tokens, reporter
+
     def test_prompt_processing_cancellation(self):
         """Test that progress is saved when processing is cancelled and cache is reused on retry"""
 
@@ -95,150 +139,98 @@ class TestCacheWrapper(unittest.TestCase):
             result_tokens.tolist(), prompt_tokens[-num_tokens_to_exclude:].tolist()
         )
 
-    def test_flush_live_cache_only_stores_full_snapshot(self):
-        session = PromptCacheSession(
-            model=type("FakeLayeredModel", (), {"layers": [object()]})(),
-            max_kv_size=None,
-            chunk_size=8,
+    def test_full_snapshot_reuse_requires_a_longer_prompt_without_checkpoint(self):
+        session, _ = self._make_session(
+            cache_trimmable=False,
+            checkpoint_tail_tokens=100,
         )
-        session._live_cache = [FakeCache(offset=8, trimmable=False)]
-        session._live_tokens = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
+        prompt = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
 
-        stored_prefixes = []
+        self._run_update_cache(session, prompt)
+        session.cache[0].advance(1)
 
-        def store_snapshot(tokens, cache):
-            stored_prefixes.append(tokens.tolist())
-
-        session._store_snapshot = store_snapshot
-        session._flush_live_cache()
-
-        self.assertEqual(stored_prefixes, [[1, 2, 3, 4, 5, 6, 7, 8]])
-
-    def test_fetch_reusable_cache_falls_back_to_shorter_checkpoint(self):
-        session = PromptCacheSession(
-            model=type("FakeLayeredModel", (), {"layers": [object()]})(),
-            max_kv_size=None,
-            chunk_size=8,
+        result_tokens, reporter = self._run_update_cache(
+            session,
+            mx.array([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=mx.int32),
         )
-        prompt = mx.array([1, 2, 3, 4, 5, 6], dtype=mx.int32)
+        self.assertEqual(reporter.events[0]["cached_tokens"], 8)
+        self.assertEqual(result_tokens.tolist(), [9])
 
-        # Exact hit exists but cannot be trimmed to leave a seed token outside cache.
-        session._history.insert_cache(
-            session._history_key,
-            prompt.tolist(),
-            [FakeCache(offset=6, trimmable=False)],
+        _, reporter = self._run_update_cache(
+            session,
+            mx.array([1, 2, 3, 4], dtype=mx.int32),
         )
-        # Checkpoint four tokens before prompt end. This is the usable fallback.
-        session._history.insert_cache(
-            session._history_key,
-            prompt[:2].tolist(),
-            [FakeCache(offset=2, trimmable=True)],
+        self.assertEqual(reporter.events[0]["cached_tokens"], 0)
+
+    def test_same_prompt_reuses_checkpoint_when_full_snapshot_cannot_trim(self):
+        session, _ = self._make_session(cache_trimmable=False)
+        prompt = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
+
+        self._run_update_cache(session, prompt)
+        session.cache[0].advance(1)
+
+        result_tokens, reporter = self._run_update_cache(session, prompt)
+
+        self.assertEqual(reporter.events[0]["cached_tokens"], 4)
+        self.assertEqual(result_tokens.tolist(), [8])
+
+    def test_empty_prompt_update_returns_an_empty_tail(self):
+        session, _ = self._make_session()
+
+        result_tokens, reporter = self._run_update_cache(
+            session,
+            mx.array([], dtype=mx.int32),
         )
 
-        cache, rest = session._restore_cache(prompt)
+        self.assertEqual(reporter.events[0]["cached_tokens"], 0)
+        self.assertEqual(reporter.events[0]["total_prompt_tokens"], 0)
+        self.assertEqual(reporter.events[-1]["type"], "finish")
+        self.assertEqual(result_tokens.tolist(), [])
 
-        self.assertIsNotNone(cache)
-        self.assertEqual(cache[0].offset, 2)
-        self.assertEqual(rest.tolist(), [3, 4, 5, 6])
-
-    def test_restore_cache_returns_early_for_empty_prompt(self):
-        session = PromptCacheSession(
-            model=type("FakeLayeredModel", (), {"layers": [object()]})(),
-            max_kv_size=None,
-            chunk_size=8,
-        )
-        prompt = mx.array([], dtype=mx.int32)
-
-        with patch.object(
-            session._history,
-            "fetch_nearest_cache",
-            side_effect=AssertionError("history lookup should not run"),
-        ):
-            cache, rest = session._restore_cache(prompt)
-
-        self.assertIsNone(cache)
-        self.assertEqual(rest.tolist(), [])
-
-    def test_fetch_reusable_cache_trims_exact_hit_to_one_seed_token(self):
-        session = PromptCacheSession(
-            model=type("FakeLayeredModel", (), {"layers": [object()]})(),
-            max_kv_size=None,
-            chunk_size=8,
+    def test_same_prompt_trims_an_exact_hit_to_leave_one_seed_token(self):
+        session, _ = self._make_session(
+            cache_trimmable=True,
+            checkpoint_tail_tokens=100,
         )
         prompt = mx.array([1, 2, 3, 4, 5, 6], dtype=mx.int32)
 
-        session._history.insert_cache(
-            session._history_key,
-            prompt.tolist(),
-            [FakeCache(offset=6, trimmable=True)],
-        )
+        self._run_update_cache(session, prompt)
+        session.cache[0].advance(1)
 
-        cache, rest = session._restore_cache(prompt)
+        result_tokens, reporter = self._run_update_cache(session, prompt)
 
-        self.assertIsNotNone(cache)
-        self.assertEqual(cache[0].offset, 5)
-        self.assertEqual(rest.tolist(), [6])
+        self.assertEqual(reporter.events[0]["cached_tokens"], 5)
+        self.assertEqual(result_tokens.tolist(), [6])
 
-    def test_prefill_splits_chunk_to_store_near_end_checkpoint(self):
-        session = PromptCacheSession(
-            model=type("FakeLayeredModel", (), {"layers": [object()]})(),
-            max_kv_size=None,
-            chunk_size=8,
-        )
-        session._live_cache = [FakeCache(offset=0, trimmable=True)]
-        session._live_tokens = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
+    def test_update_cache_splits_prefill_at_the_checkpoint_boundary(self):
+        session, model = self._make_session(cache_trimmable=False)
+        prompt = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
 
-        model = FakeModel()
-        reporter = RecordingReporter()
-        stored_prefixes = []
-
-        def store_snapshot(tokens, cache):
-            stored_prefixes.append(tokens.tolist())
-
-        session._store_snapshot = store_snapshot
-
-        with (
-            patch("mlx_engine.prompt_cache_session.mx.eval"),
-            patch("mlx_engine.prompt_cache_session.mx.clear_cache"),
-        ):
-            session._prefill_cache(
-                model=model,
-                cache=session._live_cache,
-                cache_start=0,
-                tokens=mx.array([1, 2, 3, 4, 5, 6, 7], dtype=mx.int32),
-                reporter=reporter,
-                is_draft=False,
-                checkpoint_prefix_len=4,
-            )
+        result_tokens, _ = self._run_update_cache(session, prompt)
 
         self.assertEqual(model.calls, [4, 3])
-        self.assertEqual(stored_prefixes, [[1, 2, 3, 4]])
+        self.assertEqual(result_tokens.tolist(), [8])
 
-    def test_draft_model_switch_resets_history(self):
-        session = PromptCacheSession(
-            model=type("FakeLayeredModel", (), {"layers": [object()]})(),
-            max_kv_size=None,
-            chunk_size=8,
+    def test_setting_a_draft_model_resets_cached_history(self):
+        session, _ = self._make_session(
+            cache_trimmable=True,
+            checkpoint_tail_tokens=100,
         )
         prompt = mx.array([1, 2, 3], dtype=mx.int32)
 
-        session._history.insert_cache(
-            session._history_key,
-            prompt.tolist(),
-            [FakeCache(offset=3, trimmable=True)],
-        )
+        self._run_update_cache(session, prompt)
+        session.cache[0].advance(1)
+        session.set_draft_model(FakeModel())
 
-        session.set_draft_model(type("FakeDraftModel", (), {"layers": [object()]})())
+        _, reporter = self._run_update_cache(session, prompt)
 
-        cache, rest = session._restore_cache(prompt)
+        self.assertEqual(reporter.events[0]["cached_tokens"], 0)
 
-        self.assertIsNone(cache)
-        self.assertEqual(rest.tolist(), [1, 2, 3])
-
-    def test_quantized_prefill_syncs_live_cache_and_skips_checkpointing(self):
-        model = FakeModel()
-        model.layers = [object()]
-        session = PromptCacheSession(
+    def test_quantized_mode_reuses_full_snapshots_and_skips_same_prompt_checkpoint_reuse(
+        self,
+    ):
+        model = FakeModel(cache_trimmable=False)
+        session = CacheWrapper(
             model=model,
             max_kv_size=None,
             kv_bits=8,
@@ -246,38 +238,58 @@ class TestCacheWrapper(unittest.TestCase):
             quantized_kv_start=0,
             chunk_size=8,
         )
-        session._live_cache = [FakeCache(offset=0, trimmable=True)]
-        reporter = RecordingReporter()
-        stored_prefixes = []
-        replacement = FakeCache(offset=0, trimmable=True)
-
-        def store_snapshot(tokens, cache):
-            stored_prefixes.append(tokens.tolist())
+        prompt = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
+        replacement = FakeCache(offset=0, trimmable=False)
 
         def quantize_cache(prompt_cache, **_):
             replacement.offset = prompt_cache[0].offset
             prompt_cache[0] = replacement
 
-        session._store_snapshot = store_snapshot
-
-        with (
-            patch(
-                "mlx_engine.prompt_cache_session.maybe_quantize_kv_cache",
-                quantize_cache,
-            ),
-            patch("mlx_engine.prompt_cache_session.mx.eval"),
-            patch("mlx_engine.prompt_cache_session.mx.clear_cache"),
+        with patch(
+            "mlx_engine.cache_wrapper.maybe_quantize_kv_cache",
+            side_effect=quantize_cache,
         ):
-            prepared = session.prepare(
-                mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32),
-                reporter,
-                num_tokens_to_exclude=1,
-            )
-
+            result_tokens, _ = self._run_update_cache(session, prompt)
         self.assertEqual(model.calls, [7])
-        self.assertEqual(stored_prefixes, [])
-        self.assertIs(session._live_cache[0], replacement)
-        self.assertIs(prepared.cache[0], replacement)
+        self.assertIs(session.cache[0], replacement)
+        self.assertEqual(result_tokens.tolist(), [8])
+
+        session.cache[0].advance(1)
+        with patch(
+            "mlx_engine.cache_wrapper.maybe_quantize_kv_cache",
+            side_effect=quantize_cache,
+        ):
+            _, reporter = self._run_update_cache(
+                session,
+                mx.array([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=mx.int32),
+            )
+        self.assertEqual(reporter.events[0]["cached_tokens"], 8)
+
+        session, _ = self._make_session(
+            cache_trimmable=False,
+            kv_bits=8,
+            kv_group_size=64,
+            quantized_kv_start=0,
+        )
+        replacement = FakeCache(offset=0, trimmable=False)
+
+        def quantize_same_prompt_cache(prompt_cache, **_):
+            replacement.offset = prompt_cache[0].offset
+            prompt_cache[0] = replacement
+
+        with patch(
+            "mlx_engine.cache_wrapper.maybe_quantize_kv_cache",
+            side_effect=quantize_same_prompt_cache,
+        ):
+            self._run_update_cache(session, prompt)
+        session.cache[0].advance(1)
+
+        with patch(
+            "mlx_engine.cache_wrapper.maybe_quantize_kv_cache",
+            side_effect=quantize_same_prompt_cache,
+        ):
+            _, reporter = self._run_update_cache(session, prompt)
+        self.assertEqual(reporter.events[0]["cached_tokens"], 0)
 
 
 if __name__ == "__main__":
