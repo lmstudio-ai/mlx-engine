@@ -45,7 +45,7 @@ class CacheWrapper:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
         chunk_size: int,
-        checkpoint_tail_tokens: int = 4,
+        checkpoint_tail_tokens: int = 4,  # Checkpoint N tokens before end of prompt
     ):
         self.model = model
         self.draft_model: Optional[nn.Module] = None
@@ -58,7 +58,7 @@ class CacheWrapper:
             quantized_kv_start=quantized_kv_start,
         )
 
-        self._history = LRUPromptCache()
+        self._history = self._make_history()
         self._history_key = "session"
         self._live_tokens: Optional[mx.array] = None
         self._live_cache: List[Any] = self._make_cache()
@@ -72,6 +72,12 @@ class CacheWrapper:
         if self.draft_model is not None:
             cache += make_prompt_cache(self.draft_model)
         return cache
+
+    def _make_history(self) -> LRUPromptCache:
+        # Store up to 4 checkpoints. This number can be tuned (or made configurable) if
+        # it's too high or low
+        history_capacity = 4
+        return LRUPromptCache(max_size=history_capacity)
 
     def _num_tokens_in_cache(self, cache: Optional[List[Any]] = None) -> int | None:
         cache = self._live_cache if cache is None else cache
@@ -283,7 +289,7 @@ class CacheWrapper:
             logger.info("Disabling max_kv_size when setting a draft model for cache")
             self.max_kv_size = None
 
-        self._history = LRUPromptCache()
+        self._history = self._make_history()
         self.draft_model = draft_model
         self._live_tokens = None
         self._live_cache = self._make_cache()
@@ -292,7 +298,7 @@ class CacheWrapper:
         if self.draft_model is None:
             return
         main_cache = self._live_cache[: len(self.model.layers)]
-        self._history = LRUPromptCache()
+        self._history = self._make_history()
         self.draft_model = None
         if len(main_cache) == len(self.model.layers):
             self._live_cache = main_cache
