@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import mlx.core as mx
@@ -11,25 +12,16 @@ from mlx_engine.generate import load_model
 from mlx_engine.model_kit.patches.gemma4 import OriginalGemma4TextModel
 from mlx_engine.utils.image_utils import convert_to_pil
 from mlx_engine.utils.prompt_progress_reporter import DefaultPromptProgressReporter
-from mlx_vlm.utils import prepare_inputs
+from mlx_vlm.models.cache import make_prompt_cache as make_vlm_prompt_cache
+from mlx_vlm.utils import load_processor, prepare_inputs
 
 from tests.patched_model_test_utils import (
-    assert_restorable_binding,
     first_mlx_lm_generation_logits,
-    first_vlm_generation_logits,
-    format_token_values,
-    gather_values,
     get_real_model_path,
     load_unpatched_mlx_lm,
     load_patched_mlx_lm,
     load_vlm,
-    load_vlm_processor,
     max_abs_diff,
-    relative_differences,
-    resolve_image_token_index,
-    softmax_probabilities,
-    tokenize_prompt,
-    topk_token_ids,
 )
 from tests.shared import read_image_b64
 from transformers import AutoProcessor
@@ -40,6 +32,11 @@ GEMMA4_MODEL_NAME = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
 GEMMA4_IMAGE_TOPK = 5
 GEMMA4_IMAGE_TOPK_PROB_RTOL = 0.25
 GEMMA4_IMAGE_TOPK_PROB_REF_FLOOR = 1e-3
+
+
+def tokenize_prompt(tokenizer, prompt: str) -> list[int]:
+    ids = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(prompt))
+    return [ids] if isinstance(ids, int) else ids
 
 
 def build_gemma4_prompt(
@@ -61,15 +58,107 @@ def build_gemma4_prompt(
 
 
 def load_unpatched_gemma4_mlx_lm(model_path: Path):
-    assert_restorable_binding(
-        OriginalGemma4TextModel,
-        gemma4_text_module.Gemma4TextModel,
-        "Gemma4TextModel",
-    )
     return load_unpatched_mlx_lm(
         model_path,
         module=gemma4_text_module,
-        replacements={"Gemma4TextModel": OriginalGemma4TextModel},
+        original_bindings={"Gemma4TextModel": OriginalGemma4TextModel},
+    )
+
+
+def load_vlm_processor(model_path: Path):
+    return load_processor(model_path, add_detokenizer=True)
+
+
+def first_vlm_generation_logits(
+    model,
+    *,
+    input_ids: mx.array,
+    pixel_values: mx.array,
+    attention_mask: mx.array,
+    prefill_step_size: int = 2048,
+) -> mx.array:
+    """Return the first-step logits from mlx-vlm's generation path."""
+    prompt_cache = make_vlm_prompt_cache(model.language_model)
+    embedding_output = model.get_input_embeddings(
+        input_ids=input_ids,
+        pixel_values=pixel_values,
+        mask=attention_mask,
+    )
+    inputs_embeds = embedding_output.inputs_embeds
+    kwargs = {
+        key: value
+        for key, value in embedding_output.to_dict().items()
+        if key != "inputs_embeds" and value is not None
+    }
+
+    while inputs_embeds.shape[1] > 1:
+        n_to_process = min(prefill_step_size, inputs_embeds.shape[1] - 1)
+        if n_to_process <= 0:
+            break
+        model.language_model(
+            inputs=input_ids[:, :n_to_process],
+            inputs_embeds=inputs_embeds[:, :n_to_process],
+            cache=prompt_cache,
+            n_to_process=n_to_process,
+            **kwargs,
+        )
+        mx.eval([cache.state for cache in prompt_cache])
+        input_ids = input_ids[:, n_to_process:]
+        inputs_embeds = inputs_embeds[:, n_to_process:]
+        mx.clear_cache()
+
+    outputs = model.language_model(
+        input_ids[:, -1:],
+        inputs_embeds=inputs_embeds[:, -1:],
+        cache=prompt_cache,
+        **kwargs,
+    )
+    mx.eval(outputs.logits)
+    return mx.array(outputs.logits[0, -1, :])
+
+
+def topk_token_ids(logits: mx.array, k: int) -> list[int]:
+    values = np.array(logits.tolist(), dtype=np.float32)
+    return [int(index) for index in np.argsort(values)[-k:][::-1]]
+
+
+def gather_values(values: mx.array, token_ids: list[int]) -> list[float]:
+    return [float(values[token_id].item()) for token_id in token_ids]
+
+
+def softmax_probabilities(logits: mx.array) -> mx.array:
+    return mx.softmax(logits.astype(mx.float32), axis=-1)
+
+
+def relative_differences(
+    actual_values: list[float],
+    reference_values: list[float],
+    reference_floor: float,
+) -> list[float]:
+    diffs = []
+    for actual, reference in zip(actual_values, reference_values):
+        scale = max(abs(reference), reference_floor)
+        diffs.append(abs(actual - reference) / scale)
+    return diffs
+
+
+def format_token_values(token_ids: list[int], values: list[float], tokenizer) -> str:
+    parts = []
+    for token_id, value in zip(token_ids, values):
+        parts.append(f"{token_id}:{tokenizer.decode([token_id])!r}:{value:.6f}")
+    return "[" + ", ".join(parts) + "]"
+
+
+def resolve_image_token_index(config) -> int | None:
+    vision_config = getattr(config, "vision_config", None)
+    return getattr(
+        config,
+        "image_token_index",
+        getattr(
+            config,
+            "image_token_id",
+            getattr(vision_config, "image_token_id", None),
+        ),
     )
 
 

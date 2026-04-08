@@ -15,7 +15,6 @@ from mlx_engine.model_kit.patches.qwen3_5 import (
 )
 
 from tests.patched_model_test_utils import (
-    assert_restorable_binding,
     get_real_model_path,
     load_unpatched_mlx_lm,
     load_patched_mlx_lm,
@@ -108,20 +107,10 @@ def make_batched_prompt_cache(model, left_padding):
 
 
 def load_unpatched_qwen_mlx_lm(model_path):
-    assert_restorable_binding(
-        OriginalDecoderLayer,
-        qwen3_5_module.DecoderLayer,
-        "qwen3.5 DecoderLayer",
-    )
-    assert_restorable_binding(
-        OriginalQwen3_5TextModel,
-        qwen3_5_module.Qwen3_5TextModel,
-        "qwen3.5 Qwen3_5TextModel",
-    )
     return load_unpatched_mlx_lm(
         model_path,
         module=qwen3_5_module,
-        replacements={
+        original_bindings={
             "DecoderLayer": OriginalDecoderLayer,
             "Qwen3_5TextModel": OriginalQwen3_5TextModel,
         },
