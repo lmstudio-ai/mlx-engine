@@ -62,10 +62,22 @@ def _expected_sequential_prefill_updates(
 
     CacheWrapper._prefill drives the sequential reporter. It emits begin before
     any chunks (with prefill_tokens_processed=0), then one update per chunk,
-    then finish. So: num_updates = ceil((num_tokens - 1) / prefill_step_size).
+    then finish.
+
+    The main-model sequential path also checkpoints four tokens before the end
+    of the prompt. When that checkpoint boundary lands inside a chunk, the
+    chunk is split so the checkpoint can be materialized, which adds one extra
+    update event.
     """
     prefillable_tokens = num_prompt_tokens - 1
-    return math.ceil(prefillable_tokens / prefill_step_size)
+    num_updates = math.ceil(prefillable_tokens / prefill_step_size)
+    checkpoint_prefix_len = num_prompt_tokens - 4
+    if (
+        0 < checkpoint_prefix_len < prefillable_tokens
+        and checkpoint_prefix_len % prefill_step_size != 0
+    ):
+        num_updates += 1
+    return num_updates
 
 
 def _expected_vision_prefill_updates(
