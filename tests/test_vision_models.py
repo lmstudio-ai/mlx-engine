@@ -13,6 +13,7 @@ from tests.shared import (
     model_load_and_tokenize_prompt,
 )
 from textwrap import dedent
+from transformers import AutoProcessor
 
 
 MAX_IMAGE_SIZE = (1024, 1024)
@@ -110,6 +111,24 @@ class TestVisionModels:
         )
 
         return generated_text
+
+    def build_gemma4_prompt(
+        self,
+        model_path: Path,
+        prompt: str,
+        *,
+        text_only: bool = False,
+    ) -> str:
+        processor = AutoProcessor.from_pretrained(model_path)
+        content = [{"type": "text", "text": prompt}]
+        if not text_only:
+            content.insert(0, {"type": "image", "base64": self.toucan_image_b64})
+        conversation = [{"role": "user", "content": content}]
+        return processor.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
 
     ### MODEL-SPECIFIC TESTS ###
     def test_llama_3_2_vision_instruct(self):
@@ -659,6 +678,128 @@ Summarize this in one sentence<end_of_turn>
         self.toucan_test_runner(
             "lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt, text_only=True
         )
+
+    @pytest.mark.heavy
+    def test_gemma4_vision(self):
+        """Test Gemma 4 model via the unified multimodal path."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        prompt = self.build_gemma4_prompt(model_path, self.description_prompt)
+        self.toucan_test_runner(
+            model_name,
+            prompt,
+            supplemental_accept_phrases=["bird"],
+        )
+
+    @pytest.mark.heavy
+    def test_gemma4_text_only(self):
+        """Test Gemma 4 model with text only via the unified multimodal path."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        prompt = self.build_gemma4_prompt(
+            model_path,
+            self.text_only_prompt,
+            text_only=True,
+        )
+        self.toucan_test_runner(model_name, prompt, text_only=True)
+
+    @pytest.mark.heavy
+    def test_gemma4_text_only_generation_caching(self):
+        """Ensure unified-arch Gemma 4 reuses cross-prompt cache for text-only turns."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        processor = AutoProcessor.from_pretrained(model_path)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
+        )
+
+        def render_prompt(conversation):
+            return processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+        def generate_text(prompt):
+            prompt_tokens = tokenize(model_kit, prompt)
+            reporter = RecordingReporter()
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=1000,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_reporter=reporter,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return generated_text, reporter
+
+        first_conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Tell me a 500-word story about a traveler, and make the main character's name distinctive.",
+                    }
+                ],
+            }
+        ]
+
+        prompt = render_prompt(first_conversation)
+        generated_text, reporter = generate_text(prompt)
+        first_update_events = [
+            event for event in reporter.events if event["type"] == "update"
+        ]
+        assert len(first_update_events) > 0
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
+        assert len(generated_text) > 0
+
+        second_conversation = first_conversation + [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": generated_text}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What was the main character's name? Answer with only the name.",
+                    }
+                ],
+            },
+        ]
+        prompt = render_prompt(second_conversation)
+        num_tokens = len(model_kit.tokenize(prompt))
+        # Without caching, the follow-up prompt is long enough to require multi-chunk prefill.
+        assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
+
+        follow_up_text, reporter = generate_text(prompt)
+        second_update_events = [
+            event for event in reporter.events if event["type"] == "update"
+        ]
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0
+        assert len(second_update_events) <= len(first_update_events)
+        assert (
+            second_update_events[-1]["prefill_tokens_processed"]
+            < first_update_events[-1]["prefill_tokens_processed"]
+        )
+        assert len(follow_up_text.strip()) > 0
 
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_generation_caching(self):

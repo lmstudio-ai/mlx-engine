@@ -9,6 +9,7 @@ import mlx.core as mx
 import logging
 from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
+from mlx_engine.model_kit.vision_add_ons.gemma4 import Gemma4VisionAddOn
 from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
 from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
@@ -39,6 +40,7 @@ class ModelKit:
     VISION_ADD_ON_MAP = {
         "gemma3": Gemma3VisionAddOn,
         "gemma3n": Gemma3nVisionAddOn,
+        "gemma4": Gemma4VisionAddOn,
         "lfm2-vl": LFM2VisionAddOn,
         "mistral3": Mistral3VisionAddOn,
         "pixtral": PixtralVisionAddOn,
