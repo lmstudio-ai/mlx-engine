@@ -10,36 +10,13 @@ import numpy as np
 import pytest
 
 import mlx.core as mx
-import mlx_lm.models.gemma4_text as gemma4_text_module
-import mlx_lm.models.qwen3_5 as qwen3_5_module
 import mlx_lm.utils
 from mlx_lm.models.cache import make_prompt_cache
 
 import mlx_engine.model_kit  # noqa: F401
-from mlx_engine.model_kit.patches.gemma4 import PatchedGemma4TextModel
-from mlx_engine.model_kit.patches.qwen3_5 import (
-    OriginalDecoderLayer,
-    OriginalQwen3_5TextModel,
-)
 from mlx_vlm.models.cache import make_prompt_cache as make_vlm_prompt_cache
 from mlx_vlm.utils import load_model as vlm_load_model, load_processor
 from tests.shared import model_getter
-from transformers import AutoProcessor
-
-OriginalGemma4TextModel = PatchedGemma4TextModel.__mro__[1]
-
-REAL_MODEL_CASES = [
-    pytest.param("lmstudio-community/Qwen3.5-2B-MLX-4bit", id="dense"),
-    pytest.param(
-        "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
-        marks=pytest.mark.heavy,
-        id="moe",
-    ),
-]
-GEMMA4_MODEL_NAME = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
-GEMMA4_IMAGE_TOPK = 5
-GEMMA4_IMAGE_TOPK_PROB_RTOL = 0.25
-GEMMA4_IMAGE_TOPK_PROB_REF_FLOOR = 1e-3
 
 
 def get_real_model_path(model_name: str) -> Path:
@@ -78,49 +55,17 @@ def _assert_restorable_binding(original, current, label: str) -> None:
         )
 
 
-def _load_unpatched_mlx_lm(
-    model_path: Path, *, module, replacements: dict[str, object]
-):
+def assert_restorable_binding(original, current, label: str) -> None:
+    _assert_restorable_binding(original, current, label)
+
+
+def load_unpatched_mlx_lm(model_path: Path, *, module, replacements: dict[str, object]):
     with _temporary_bindings(module, **replacements):
         return mlx_lm.utils.load(model_path)
 
 
 def load_patched_mlx_lm(model_path: Path):
     return mlx_lm.utils.load(model_path)
-
-
-def load_unpatched_qwen_mlx_lm(model_path: Path):
-    _assert_restorable_binding(
-        OriginalDecoderLayer,
-        qwen3_5_module.DecoderLayer,
-        "qwen3.5 DecoderLayer",
-    )
-    _assert_restorable_binding(
-        OriginalQwen3_5TextModel,
-        qwen3_5_module.Qwen3_5TextModel,
-        "qwen3.5 Qwen3_5TextModel",
-    )
-    return _load_unpatched_mlx_lm(
-        model_path,
-        module=qwen3_5_module,
-        replacements={
-            "DecoderLayer": OriginalDecoderLayer,
-            "Qwen3_5TextModel": OriginalQwen3_5TextModel,
-        },
-    )
-
-
-def load_unpatched_gemma4_mlx_lm(model_path: Path):
-    _assert_restorable_binding(
-        OriginalGemma4TextModel,
-        gemma4_text_module.Gemma4TextModel,
-        "Gemma4TextModel",
-    )
-    return _load_unpatched_mlx_lm(
-        model_path,
-        module=gemma4_text_module,
-        replacements={"Gemma4TextModel": OriginalGemma4TextModel},
-    )
 
 
 def load_vlm(model_path: Path):
@@ -130,24 +75,6 @@ def load_vlm(model_path: Path):
 
 def load_vlm_processor(model_path: Path):
     return load_processor(model_path, add_detokenizer=True)
-
-
-def build_gemma4_prompt(
-    model_path: Path,
-    user_text: str,
-    *,
-    image_b64: str | None = None,
-) -> str:
-    processor = AutoProcessor.from_pretrained(model_path)
-    content = [{"type": "text", "text": user_text}]
-    if image_b64 is not None:
-        content.insert(0, {"type": "image", "base64": image_b64})
-    conversation = [{"role": "user", "content": content}]
-    return processor.apply_chat_template(
-        conversation,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
 
 
 def first_mlx_lm_generation_logits(

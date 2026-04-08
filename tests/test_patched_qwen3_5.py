@@ -5,17 +5,32 @@ import pytest
 import mlx.core as mx
 from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
+from mlx_lm.models.qwen3_5 import Model, ModelArgs
+import mlx_lm.models.qwen3_5 as qwen3_5_module
+
 from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
+from mlx_engine.model_kit.patches.qwen3_5 import (
+    OriginalDecoderLayer,
+    OriginalQwen3_5TextModel,
+)
 
 from tests.patched_model_test_utils import (
-    REAL_MODEL_CASES,
+    assert_restorable_binding,
     get_real_model_path,
+    load_unpatched_mlx_lm,
     load_patched_mlx_lm,
-    load_unpatched_qwen_mlx_lm,
     load_vlm,
     max_abs_diff,
 )
-from mlx_lm.models.qwen3_5 import Model, ModelArgs
+
+REAL_MODEL_CASES = [
+    pytest.param("lmstudio-community/Qwen3.5-2B-MLX-4bit", id="dense"),
+    pytest.param(
+        "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+        marks=pytest.mark.heavy,
+        id="moe",
+    ),
+]
 
 QWEN3_5_TEXT_CONFIG = {
     "model_type": "qwen3_5",
@@ -90,6 +105,27 @@ def make_batched_prompt_cache(model, left_padding):
         else:
             raise AssertionError(f"Unexpected cache type: {type(layer_cache)!r}")
     return cache
+
+
+def load_unpatched_qwen_mlx_lm(model_path):
+    assert_restorable_binding(
+        OriginalDecoderLayer,
+        qwen3_5_module.DecoderLayer,
+        "qwen3.5 DecoderLayer",
+    )
+    assert_restorable_binding(
+        OriginalQwen3_5TextModel,
+        qwen3_5_module.Qwen3_5TextModel,
+        "qwen3.5 Qwen3_5TextModel",
+    )
+    return load_unpatched_mlx_lm(
+        model_path,
+        module=qwen3_5_module,
+        replacements={
+            "DecoderLayer": OriginalDecoderLayer,
+            "Qwen3_5TextModel": OriginalQwen3_5TextModel,
+        },
+    )
 
 
 def _first_generate_step_logprobs(

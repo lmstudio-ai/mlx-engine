@@ -9,8 +9,12 @@ import mlx.core as mx
 
 from mlx_lm.models.gemma4_text import Gemma4TextModel
 
+# Stable alias to the pristine mlx-lm class captured before apply_patches()
+# mutates mlx_lm.models.gemma4_text in place.
+OriginalGemma4TextModel = Gemma4TextModel
 
-class PatchedGemma4TextModel(Gemma4TextModel):
+
+class PatchedGemma4TextModel(OriginalGemma4TextModel):
     def __init__(self, config):
         super().__init__(config)
         self.prompt_per_layer_input_ids = None

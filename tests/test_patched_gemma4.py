@@ -5,25 +5,23 @@ from pathlib import Path
 import pytest
 
 import mlx.core as mx
+import mlx_lm.models.gemma4_text as gemma4_text_module
 
 from mlx_engine.generate import load_model
+from mlx_engine.model_kit.patches.gemma4 import OriginalGemma4TextModel
 from mlx_engine.utils.image_utils import convert_to_pil
 from mlx_engine.utils.prompt_progress_reporter import DefaultPromptProgressReporter
 from mlx_vlm.utils import prepare_inputs
 
 from tests.patched_model_test_utils import (
-    GEMMA4_IMAGE_TOPK,
-    GEMMA4_IMAGE_TOPK_PROB_REF_FLOOR,
-    GEMMA4_IMAGE_TOPK_PROB_RTOL,
-    GEMMA4_MODEL_NAME,
-    build_gemma4_prompt,
+    assert_restorable_binding,
     first_mlx_lm_generation_logits,
     first_vlm_generation_logits,
     format_token_values,
     gather_values,
     get_real_model_path,
+    load_unpatched_mlx_lm,
     load_patched_mlx_lm,
-    load_unpatched_gemma4_mlx_lm,
     load_vlm,
     load_vlm_processor,
     max_abs_diff,
@@ -34,6 +32,45 @@ from tests.patched_model_test_utils import (
     topk_token_ids,
 )
 from tests.shared import read_image_b64
+from transformers import AutoProcessor
+
+pytestmark = pytest.mark.heavy
+
+GEMMA4_MODEL_NAME = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+GEMMA4_IMAGE_TOPK = 5
+GEMMA4_IMAGE_TOPK_PROB_RTOL = 0.25
+GEMMA4_IMAGE_TOPK_PROB_REF_FLOOR = 1e-3
+
+
+def build_gemma4_prompt(
+    model_path: Path,
+    user_text: str,
+    *,
+    image_b64: str | None = None,
+) -> str:
+    processor = AutoProcessor.from_pretrained(model_path)
+    content = [{"type": "text", "text": user_text}]
+    if image_b64 is not None:
+        content.insert(0, {"type": "image", "base64": image_b64})
+    conversation = [{"role": "user", "content": content}]
+    return processor.apply_chat_template(
+        conversation,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+
+def load_unpatched_gemma4_mlx_lm(model_path: Path):
+    assert_restorable_binding(
+        OriginalGemma4TextModel,
+        gemma4_text_module.Gemma4TextModel,
+        "Gemma4TextModel",
+    )
+    return load_unpatched_mlx_lm(
+        model_path,
+        module=gemma4_text_module,
+        replacements={"Gemma4TextModel": OriginalGemma4TextModel},
+    )
 
 
 def test_gemma4_text_only_generation_patched_matches_unpatched():
@@ -76,7 +113,6 @@ def test_gemma4_text_only_generation_patched_matches_unpatched():
     )
 
 
-@pytest.mark.heavy
 def test_gemma4_image_prompt_unified_arch_top5_matches_vlm():
     """Image+text Gemma 4 generation should stay close to native mlx-vlm."""
     model_path = get_real_model_path(GEMMA4_MODEL_NAME)
