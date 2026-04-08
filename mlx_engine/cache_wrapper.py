@@ -19,6 +19,7 @@ from mlx_engine.utils.prompt_progress_reporter import (
 
 
 PROMPT_PROCESSING_CHUNK_SIZE = 2048
+DEFAULT_CHECKPOINT_TAIL_TOKENS = 11  # Checkpoint N tokens before end of prompt
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class CacheWrapper:
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
         chunk_size: int,
-        checkpoint_tail_tokens: int = 4,  # Checkpoint N tokens before end of prompt
+        checkpoint_tail_tokens: int = DEFAULT_CHECKPOINT_TAIL_TOKENS,
     ):
         self.model = model
         self.draft_model: Optional[nn.Module] = None

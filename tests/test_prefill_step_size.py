@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 
 from mlx_engine.cache_wrapper import (
+    DEFAULT_CHECKPOINT_TAIL_TOKENS,
     PROMPT_PROCESSING_CHUNK_SIZE,
     validate_prefill_step_size,
 )
@@ -71,7 +72,7 @@ def _expected_sequential_prefill_updates(
     """
     prefillable_tokens = num_prompt_tokens - 1
     num_updates = math.ceil(prefillable_tokens / prefill_step_size)
-    checkpoint_prefix_len = num_prompt_tokens - 4
+    checkpoint_prefix_len = num_prompt_tokens - DEFAULT_CHECKPOINT_TAIL_TOKENS
     if (
         0 < checkpoint_prefix_len < prefillable_tokens
         and checkpoint_prefix_len % prefill_step_size != 0
