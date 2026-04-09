@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 import pytest
 from mlx_engine.cache_wrapper import DEFAULT_CHECKPOINT_TAIL_TOKENS
+from mlx_lm.models.cache import can_trim_prompt_cache
 from mlx_engine.generate import (
     load_model,
     tokenize,
@@ -1219,6 +1220,97 @@ Summarize this in one sentence<end_of_turn>
             f"Text-only output after vision request differs from baseline "
             f"(MRoPE state likely leaked): {repr(baseline_text)} != {repr(after_vision_text)}"
         )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_text_only_follow_up_reuses_checkpoint_cache(self):
+        """Qwen3.5 should reuse a stored checkpoint for text-only follow-ups.
+
+        The dense Qwen3.5 architecture alternates three linear-attention layers
+        with one full-attention layer (`full_attention_interval=4`). In the
+        current stack this produces a non-trimmable prompt cache, so follow-up
+        reuse after dropping a long assistant scratchpad depends on checkpoint
+        snapshots rather than trimming a longer assistant cache entry.
+        """
+        model_name = "lmstudio-community/Qwen3.5-2B-MLX-4bit"
+        model_path = model_getter(model_name)
+        max_kv_size = 160
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=max_kv_size,
+            max_seq_nums=1,
+            trust_remote_code=True,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
+        )
+        control_word = "MERIDIAN"
+
+        assert not can_trim_prompt_cache(model_kit.cache_wrapper.cache)
+
+        def generate_text(prompt, *, max_tokens):
+            prompt_tokens = tokenize(model_kit, prompt)
+            reporter = RecordingReporter()
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=max_tokens,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_reporter=reporter,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return prompt_tokens, generated_text, reporter
+
+        first_prompt = dedent(f"""\
+            <|im_start|>system
+            You are a helpful assistant.<|im_end|>
+            <|im_start|>user
+            Write two sections in order.
+            First, write a long SCRATCHPAD section with at least 120 numbered lines about medieval trade routes.
+            Keep each line short, between 6 and 12 words.
+            Second, end with a single final line in the exact format:
+            FINAL: {control_word}
+            Do not write anything after that final line.<|im_end|>
+            <|im_start|>assistant
+            """)
+        first_prompt_tokens = tokenize(model_kit, first_prompt)
+        assert len(first_prompt_tokens) < max_kv_size
+
+        _, generated_text, reporter = generate_text(first_prompt, max_tokens=1600)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
+        assert len(generated_text) > 0
+
+        final_marker = f"FINAL: {control_word}"
+        final_index = generated_text.find(final_marker)
+        assert final_index >= 0, generated_text
+        scratchpad_text = generated_text[:final_index]
+        assert len(scratchpad_text.strip()) > 0
+
+        second_prompt = (
+            first_prompt
+            + control_word
+            + dedent("""\
+            <|im_end|>
+            <|im_start|>user
+            What was the exact single-word final answer from your previous message? Reply with only that word.<|im_end|>
+            <|im_start|>assistant
+            """)
+        )
+
+        _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == (
+            len(first_prompt_tokens) - DEFAULT_CHECKPOINT_TAIL_TOKENS
+        )
+        assert len(follow_up_text.strip()) > 0
 
     def test_qwen3_5_multi_image_process_prompt_preserves_image_positions(self):
         """Qwen3.5 must inject MRoPE positions for every image span.
