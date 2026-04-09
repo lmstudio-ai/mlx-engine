@@ -60,12 +60,12 @@ def _no_op_stream(_stream):
 
 
 class TestCacheWrapper(unittest.TestCase):
-    def _make_session(self, *, cache_trimmable=True, **kwargs):
+    def _make_session(self, *, cache_trimmable=True, chunk_size=8, **kwargs):
         model = FakeModel(cache_trimmable=cache_trimmable)
         session = CacheWrapper(
             model=model,
             max_kv_size=None,
-            chunk_size=8,
+            chunk_size=chunk_size,
             **kwargs,
         )
         return session, model
@@ -202,7 +202,11 @@ class TestCacheWrapper(unittest.TestCase):
         self.assertEqual(result_tokens.tolist(), [6])
 
     def test_update_cache_splits_prefill_at_the_checkpoint_boundary(self):
-        session, model = self._make_session(cache_trimmable=False)
+        chunk_size = 8
+        session, model = self._make_session(
+            cache_trimmable=False,
+            chunk_size=chunk_size,
+        )
         prompt = mx.array(list(range(1, 16)), dtype=mx.int32)
 
         result_tokens, _ = self._run_update_cache(session, prompt)
@@ -212,8 +216,8 @@ class TestCacheWrapper(unittest.TestCase):
         remaining_after_checkpoint = prefillable_tokens - checkpoint_prefix_len
         expected_calls = [
             checkpoint_prefix_len,
-            session.chunk_size,
-            remaining_after_checkpoint - session.chunk_size,
+            chunk_size,
+            remaining_after_checkpoint - chunk_size,
         ]
 
         self.assertEqual(model.calls, expected_calls)

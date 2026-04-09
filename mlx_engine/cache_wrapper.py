@@ -54,12 +54,12 @@ class CacheWrapper:
         history_capacity: int = 10,
     ):
         self.model = model
-        self.draft_model: Optional[nn.Module] = None
-        self.max_kv_size = max_kv_size
-        self.chunk_size = chunk_size
-        self.checkpoint_tail_tokens = checkpoint_tail_tokens
-        self.history_capacity = history_capacity
-        self.kv_cache_qtn_params = dict(
+        self._draft_model: Optional[nn.Module] = None
+        self._max_kv_size = max_kv_size
+        self._chunk_size = chunk_size
+        self._checkpoint_tail_tokens = checkpoint_tail_tokens
+        self._history_capacity = history_capacity
+        self._kv_cache_qtn_params = dict(
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
@@ -75,15 +75,15 @@ class CacheWrapper:
         return self._live_cache
 
     def _make_cache(self) -> List[Any]:
-        cache = make_prompt_cache(self.model, self.max_kv_size)
-        if self.draft_model is not None:
-            cache += make_prompt_cache(self.draft_model)
+        cache = make_prompt_cache(self.model, self._max_kv_size)
+        if self._draft_model is not None:
+            cache += make_prompt_cache(self._draft_model)
         return cache
 
     def _make_history(self) -> LRUPromptCache:
         # Store up to N checkpoints. This number can be tuned (or made configurable) if
         # it's too high or low
-        return LRUPromptCache(max_size=self.history_capacity)
+        return LRUPromptCache(max_size=self._history_capacity)
 
     def _num_tokens_in_cache(self, cache: Optional[List[Any]] = None) -> int | None:
         cache = self._live_cache if cache is None else cache
@@ -186,7 +186,7 @@ class CacheWrapper:
         stored_checkpoint = False
 
         while remaining_tokens.size > 0:
-            current_chunk_size = min(self.chunk_size, remaining_tokens.size)
+            current_chunk_size = min(self._chunk_size, remaining_tokens.size)
             current_cache_size = self._num_tokens_in_cache(cache)
             if (
                 checkpoint_prefix_len is not None
@@ -198,7 +198,7 @@ class CacheWrapper:
 
             current_chunk = remaining_tokens[:current_chunk_size]
             model(current_chunk[None], cache=cache)
-            maybe_quantize_kv_cache(prompt_cache=cache, **self.kv_cache_qtn_params)
+            maybe_quantize_kv_cache(prompt_cache=cache, **self._kv_cache_qtn_params)
             self._live_cache[cache_start : cache_start + len(cache)] = cache
             mx.eval([entry.state for entry in cache])
 
@@ -262,8 +262,8 @@ class CacheWrapper:
         prefill_tokens = uncached_tokens[:-1]
         checkpoint_prefix_len = None
         # Only checkpoint the main-model path; quantized caches skip checkpointing.
-        if self.draft_model is None and self.kv_cache_qtn_params["kv_bits"] is None:
-            checkpoint_prefix_len = total_prompt_tokens - self.checkpoint_tail_tokens
+        if self._draft_model is None and self._kv_cache_qtn_params["kv_bits"] is None:
+            checkpoint_prefix_len = total_prompt_tokens - self._checkpoint_tail_tokens
             # Skip checkpoints that are already cached or would be empty.
             if checkpoint_prefix_len <= cached_tokens:
                 checkpoint_prefix_len = None
@@ -271,10 +271,10 @@ class CacheWrapper:
                 checkpoint_prefix_len = None
 
         with mx.stream(generation_stream):
-            if self.draft_model is not None:
+            if self._draft_model is not None:
                 draft_cache = self._live_cache[len(self.model.layers) :]
                 self._prefill_cache(
-                    model=self.draft_model,
+                    model=self._draft_model,
                     cache=draft_cache,
                     cache_start=len(self.model.layers),
                     tokens=prefill_tokens,
@@ -306,23 +306,23 @@ class CacheWrapper:
     def set_draft_model(self, draft_model: nn.Module) -> None:
         if self.model is None:
             raise ValueError("Cannot add a draft model to cache without a main model")
-        if self.draft_model is draft_model:
+        if self._draft_model is draft_model:
             return
-        if self.max_kv_size is not None:
+        if self._max_kv_size is not None:
             logger.info("Disabling max_kv_size when setting a draft model for cache")
-            self.max_kv_size = None
+            self._max_kv_size = None
 
         self._history = self._make_history()
-        self.draft_model = draft_model
+        self._draft_model = draft_model
         self._live_tokens = None
         self._live_cache = self._make_cache()
 
     def unset_draft_model(self) -> None:
-        if self.draft_model is None:
+        if self._draft_model is None:
             return
         main_cache = self._live_cache[: len(self.model.layers)]
         self._history = self._make_history()
-        self.draft_model = None
+        self._draft_model = None
         if len(main_cache) == len(self.model.layers):
             self._live_cache = main_cache
             return
