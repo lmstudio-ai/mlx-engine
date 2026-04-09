@@ -19,7 +19,11 @@ from mlx_engine.utils.prompt_progress_reporter import (
 
 
 PROMPT_PROCESSING_CHUNK_SIZE = 2048
-DEFAULT_CHECKPOINT_TAIL_TOKENS = 11  # Checkpoint N tokens before end of prompt
+
+# Checkpoint N tokens before end of prompt
+# This value is at parity with mlx-lm:
+# https://github.com/ml-explore/mlx-lm/blob/d9c63f/mlx_lm/server.py#L587
+DEFAULT_CHECKPOINT_TAIL_TOKENS = 11
 
 logger = logging.getLogger(__name__)
 
