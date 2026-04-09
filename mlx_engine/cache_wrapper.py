@@ -1,6 +1,6 @@
 import copy
 import logging
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -51,12 +51,14 @@ class CacheWrapper:
         quantized_kv_start: Optional[int] = None,
         chunk_size: int,
         checkpoint_tail_tokens: int = DEFAULT_CHECKPOINT_TAIL_TOKENS,
+        history_capacity: int = 10,
     ):
         self.model = model
         self.draft_model: Optional[nn.Module] = None
         self.max_kv_size = max_kv_size
         self.chunk_size = chunk_size
         self.checkpoint_tail_tokens = checkpoint_tail_tokens
+        self.history_capacity = history_capacity
         self.kv_cache_qtn_params = dict(
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
@@ -81,8 +83,7 @@ class CacheWrapper:
     def _make_history(self) -> LRUPromptCache:
         # Store up to N checkpoints. This number can be tuned (or made configurable) if
         # it's too high or low
-        history_capacity = 10
-        return LRUPromptCache(max_size=history_capacity)
+        return LRUPromptCache(max_size=self.history_capacity)
 
     def _num_tokens_in_cache(self, cache: Optional[List[Any]] = None) -> int | None:
         cache = self._live_cache if cache is None else cache
@@ -91,13 +92,20 @@ class CacheWrapper:
                 return entry.offset
         return None
 
-    def _store_snapshot(self, tokens: mx.array, cache: List[Any]) -> None:
+    def _store_snapshot(
+        self,
+        tokens: mx.array,
+        cache: List[Any],
+        *,
+        cache_type: Literal["user", "assistant"],
+    ) -> None:
         if tokens.size == 0:
             return
         self._history.insert_cache(
             self._history_key,
             tokens.tolist(),
             copy.deepcopy(cache),
+            cache_type=cache_type,
         )
 
     def _flush_live_cache(self) -> None:
@@ -122,7 +130,11 @@ class CacheWrapper:
         if cache_length <= 0:
             return
 
-        self._store_snapshot(self._live_tokens[:cache_length], self._live_cache)
+        self._store_snapshot(
+            self._live_tokens[:cache_length],
+            self._live_cache,
+            cache_type="assistant",
+        )
 
     def _restore_cache(
         self,
@@ -203,6 +215,7 @@ class CacheWrapper:
                 self._store_snapshot(
                     self._live_tokens[:checkpoint_prefix_len],
                     self._live_cache,
+                    cache_type="user",
                 )
                 stored_checkpoint = True
 
@@ -232,6 +245,11 @@ class CacheWrapper:
         self._live_tokens = prompt_tokens
 
         cached_tokens = total_prompt_tokens - len(uncached_tokens)
+        logger.info(
+            "Prompt cache: using %d/%d tokens from cache",
+            cached_tokens,
+            total_prompt_tokens,
+        )
 
         reporter.begin(
             is_draft=False,

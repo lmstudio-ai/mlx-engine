@@ -3,7 +3,11 @@ import unittest
 from unittest.mock import patch
 
 import mlx.core as mx
-from mlx_engine.cache_wrapper import CacheWrapper, StopPromptProcessing
+from mlx_engine.cache_wrapper import (
+    CacheWrapper,
+    DEFAULT_CHECKPOINT_TAIL_TOKENS,
+    StopPromptProcessing,
+)
 from mlx_engine.generate import load_model, tokenize
 from tests.shared import CancellingReporter, RecordingReporter, model_getter
 
@@ -156,15 +160,18 @@ class TestCacheWrapper(unittest.TestCase):
 
     def test_same_prompt_reuses_checkpoint_when_full_snapshot_cannot_trim(self):
         session, _ = self._make_session(cache_trimmable=False)
-        prompt = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
+        prompt = mx.array(list(range(1, 16)), dtype=mx.int32)
 
         self._run_update_cache(session, prompt)
         session.cache[0].advance(1)
 
         result_tokens, reporter = self._run_update_cache(session, prompt)
 
-        self.assertEqual(reporter.events[0]["cached_tokens"], 4)
-        self.assertEqual(result_tokens.tolist(), [8])
+        self.assertEqual(
+            reporter.events[0]["cached_tokens"],
+            len(prompt) - DEFAULT_CHECKPOINT_TAIL_TOKENS,
+        )
+        self.assertEqual(result_tokens.tolist(), prompt[-1:].tolist())
 
     def test_empty_prompt_update_returns_an_empty_tail(self):
         session, _ = self._make_session()
@@ -196,12 +203,41 @@ class TestCacheWrapper(unittest.TestCase):
 
     def test_update_cache_splits_prefill_at_the_checkpoint_boundary(self):
         session, model = self._make_session(cache_trimmable=False)
-        prompt = mx.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=mx.int32)
+        prompt = mx.array(list(range(1, 16)), dtype=mx.int32)
 
         result_tokens, _ = self._run_update_cache(session, prompt)
 
-        self.assertEqual(model.calls, [4, 3])
-        self.assertEqual(result_tokens.tolist(), [8])
+        checkpoint_prefix_len = len(prompt) - DEFAULT_CHECKPOINT_TAIL_TOKENS
+        prefillable_tokens = len(prompt) - 1
+        remaining_after_checkpoint = prefillable_tokens - checkpoint_prefix_len
+        expected_calls = [
+            checkpoint_prefix_len,
+            session.chunk_size,
+            remaining_after_checkpoint - session.chunk_size,
+        ]
+
+        self.assertEqual(model.calls, expected_calls)
+        self.assertEqual(result_tokens.tolist(), prompt[-1:].tolist())
+
+    def test_user_checkpoint_survives_assistant_snapshot_eviction_pressure(self):
+        session, _ = self._make_session(
+            cache_trimmable=False,
+            history_capacity=2,
+        )
+        prompt = mx.array(list(range(1, 16)), dtype=mx.int32)
+
+        # First request stores a reusable user checkpoint four tokens deep.
+        self._run_update_cache(session, prompt)
+        # These short follow-ups only flush assistant snapshots, creating eviction pressure.
+        self._run_update_cache(session, mx.array([101, 102, 103], dtype=mx.int32))
+        self._run_update_cache(session, mx.array([201, 202, 203], dtype=mx.int32))
+
+        _, reporter = self._run_update_cache(session, prompt)
+
+        self.assertEqual(
+            reporter.events[0]["cached_tokens"],
+            len(prompt) - DEFAULT_CHECKPOINT_TAIL_TOKENS,
+        )
 
     def test_setting_a_draft_model_resets_cached_history(self):
         session, _ = self._make_session(

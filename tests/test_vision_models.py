@@ -1,5 +1,7 @@
+import math
 from pathlib import Path
 import pytest
+from mlx_engine.cache_wrapper import DEFAULT_CHECKPOINT_TAIL_TOKENS
 from mlx_engine.generate import (
     load_model,
     tokenize,
@@ -23,6 +25,46 @@ MAX_KV_CACHE_SIZE = 20000
 # 512 was the previous default, and some tests were written with assertions
 # on the number of prompt processing events.
 CACHING_TEST_PREFILL_STEP_SIZE = 512
+
+
+def _expected_sequential_reporter_event_count(
+    *,
+    total_prompt_tokens: int,
+    cached_tokens: int,
+    prefill_step_size: int = CACHING_TEST_PREFILL_STEP_SIZE,
+) -> int:
+    """Compute begin/update/finish events for CacheWrapper-based prompt processing."""
+    prefillable_tokens = max(0, total_prompt_tokens - cached_tokens - 1)
+    num_updates = math.ceil(prefillable_tokens / prefill_step_size)
+
+    checkpoint_prefix_len = total_prompt_tokens - DEFAULT_CHECKPOINT_TAIL_TOKENS
+    checkpoint_offset = checkpoint_prefix_len - cached_tokens
+    if (
+        0 < checkpoint_offset < prefillable_tokens
+        and checkpoint_offset % prefill_step_size != 0
+    ):
+        num_updates += 1
+
+    return num_updates + 2
+
+
+def _assert_sequential_reporter_event_count(
+    reporter: RecordingReporter,
+    *,
+    prefill_step_size: int = CACHING_TEST_PREFILL_STEP_SIZE,
+) -> None:
+    begin_event = reporter.events[0]
+    expected_count = _expected_sequential_reporter_event_count(
+        total_prompt_tokens=begin_event["total_prompt_tokens"],
+        cached_tokens=begin_event["cached_tokens"],
+        prefill_step_size=prefill_step_size,
+    )
+    assert len(reporter.events) == expected_count, (
+        f"Expected {expected_count} prompt progress events for "
+        f"{begin_event['total_prompt_tokens']} total tokens and "
+        f"{begin_event['cached_tokens']} cached tokens at chunk size "
+        f"{prefill_step_size}, but got {len(reporter.events)}."
+    )
 
 
 def _find_token_runs(tokens: list[int], target_token: int) -> list[tuple[int, int]]:
@@ -294,7 +336,7 @@ class TestVisionModels:
         # Generation 1 - model creates a long story
         prompt = "<s>[INST]Tell me a 500 word story about the bravest soul in the middle ages, and their weapon of choice[/INST]"
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -306,7 +348,7 @@ class TestVisionModels:
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -576,7 +618,7 @@ You are a helpful assistant.<|im_end|>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -593,7 +635,7 @@ You are a helpful assistant.<|im_end|>
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -646,7 +688,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 16  # begin, update x14, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -661,7 +703,7 @@ Summarize this in one sentence<end_of_turn>
                 """)
         print(prompt)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -961,7 +1003,7 @@ Summarize this in one sentence<end_of_turn>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -978,7 +1020,7 @@ Summarize this in one sentence<end_of_turn>
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -1031,7 +1073,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 16  # begin, update x14, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -1046,7 +1088,7 @@ Summarize this in one sentence<end_of_turn>
                 """)
         print(prompt)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
