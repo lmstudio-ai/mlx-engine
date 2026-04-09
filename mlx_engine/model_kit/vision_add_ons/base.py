@@ -1,19 +1,28 @@
-from abc import abstractmethod
+import hashlib
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import Any
 
 import mlx.core as mx
 from mlx import nn
+from mlx_vlm.vision_cache import VisionFeatureCache
 
 
-class BaseVisionAddOn:
+DEFAULT_VISION_FEATURE_CACHE_SIZE = 8
+
+
+class BaseVisionAddOn(ABC):
     """
     Base class that defines the interface for a VisionAddOn.
     """
 
-    @abstractmethod
     def __init__(self):
         """
         Where load of vision model components is intended to occur.
         """
+        self._vision_feature_cache = VisionFeatureCache(
+            max_size=DEFAULT_VISION_FEATURE_CACHE_SIZE
+        )
 
     @abstractmethod
     def compute_embeddings(
@@ -39,3 +48,57 @@ class BaseVisionAddOn:
         previous request. Default is a no-op; override in add-ons that
         inject state into the text model (e.g., MRoPE positions).
         """
+
+    def get_cached_vision_features(
+        self,
+        images_b64: list[str],
+        max_size: tuple[int, int] | None,
+    ) -> Any | None:
+        """Return cached image features for an ordered image list, if present."""
+        return self._vision_feature_cache.get(
+            self._build_vision_cache_key(images_b64, max_size)
+        )
+
+    def store_cached_vision_features(
+        self,
+        images_b64: list[str],
+        max_size: tuple[int, int] | None,
+        features: Any,
+    ) -> None:
+        """Store image features for an ordered image list."""
+        self._vision_feature_cache.put(
+            self._build_vision_cache_key(images_b64, max_size),
+            features,
+        )
+
+    def get_or_compute_cached_vision_features(
+        self,
+        images_b64: list[str],
+        max_size: tuple[int, int] | None,
+        compute_features: Callable[[], Any],
+    ) -> Any:
+        """Return cached image features or compute, materialize, and cache them."""
+        features = self.get_cached_vision_features(images_b64, max_size)
+        if features is not None:
+            return features
+
+        features = compute_features()
+        mx.eval(features)
+        self.store_cached_vision_features(images_b64, max_size, features)
+        return features
+
+    def clear_feature_cache(self) -> None:
+        """Release cached image features."""
+        self._vision_feature_cache.clear()
+
+    def _build_vision_cache_key(
+        self,
+        images_b64: list[str],
+        max_size: tuple[int, int] | None,
+    ) -> str:
+        size_key = "orig" if max_size is None else f"{max_size[0]}x{max_size[1]}"
+        image_hashes = [
+            hashlib.sha256(image.encode("utf-8")).hexdigest()[:16]
+            for image in images_b64
+        ]
+        return f"{size_key}:{'|'.join(image_hashes)}"

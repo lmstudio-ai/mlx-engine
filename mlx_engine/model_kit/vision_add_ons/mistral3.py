@@ -87,26 +87,31 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
         # Get the input embeddings from the language model
         inputs_embeds = text_model.language_model.model.embed_tokens(input_ids)
 
-        # Get the output hidden states from the vision model
-        if isinstance(pixel_values, list):
-            pixel_values = mx.concatenate(
-                [mx.array(pv)[None, ...] for pv in pixel_values], axis=0
+        def compute_image_features() -> mx.array:
+            vision_pixel_values = pixel_values
+            if isinstance(vision_pixel_values, list):
+                vision_pixel_values = mx.concatenate(
+                    [mx.array(pv)[None, ...] for pv in vision_pixel_values], axis=0
+                )
+            if vision_pixel_values.ndim == 3:
+                vision_pixel_values = vision_pixel_values[None, ...]
+
+            # Pass pixel_values as list of images, as each image is individually run through conv2d and position encoding
+            # Reference code from transformers: https://github.com/huggingface/transformers/blob/main/src/transformers/models/pixtral/modeling_pixtral.py#L479C9-L479C21
+            # and mistral_inference: https://github.com/mistralai/mistral-inference/blob/main/src/mistral_inference/vision_encoder.py#L85
+            *_, hidden_states = self.vision_tower(
+                vision_pixel_values.transpose(0, 2, 3, 1),
+                output_hidden_states=True,
             )
-        if pixel_values.ndim == 3:
-            pixel_values = pixel_values[None, ...]
+            # Select the hidden states from the desired layer
+            selected_image_feature = hidden_states[self.config.vision_feature_layer]
 
-        # Pass pixel_values as list of images, as each image is individually run through conv2d and position encoding
-        # Reference code from transformers: https://github.com/huggingface/transformers/blob/main/src/transformers/models/pixtral/modeling_pixtral.py#L479C9-L479C21
-        # and mistral_inference: https://github.com/mistralai/mistral-inference/blob/main/src/mistral_inference/vision_encoder.py#L85
-        *_, hidden_states = self.vision_tower(
-            pixel_values.transpose(0, 2, 3, 1),
-            output_hidden_states=True,
+            # Pass image features through the multi-modal projector
+            return self.multi_modal_projector(selected_image_feature, image_sizes)
+
+        image_features = self.get_or_compute_cached_vision_features(
+            images_b64, max_size, compute_image_features
         )
-        # Select the hidden states from the desired layer
-        selected_image_feature = hidden_states[self.config.vision_feature_layer]
-
-        # Pass image features through the multi-modal projector
-        image_features = self.multi_modal_projector(selected_image_feature, image_sizes)
 
         # Insert special image tokens in the input_ids
         final_inputs_embeds = Mistral3CombinedModel.merge_input_ids_with_image_features(

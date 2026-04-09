@@ -262,6 +262,8 @@ class ModelKit:
         return False
 
     def shutdown(self) -> None:
+        if self.vision_add_on is not None:
+            self.vision_add_on.clear_feature_cache()
         self._shutdown.set()
 
     def is_shutdown(self) -> None:

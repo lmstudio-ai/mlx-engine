@@ -96,10 +96,14 @@ class Gemma4VisionAddOn(BaseVisionAddOn):
         language_model = text_model.language_model.model
         input_embeddings = language_model.embed_tokens(input_ids)
 
-        image_features = self.vision_tower(pixel_values)
-        image_features = self.embed_vision(image_features).astype(
-            input_embeddings.dtype
-        )
+        def compute_image_features() -> mx.array:
+            return self.embed_vision(self.vision_tower(pixel_values)).astype(
+                input_embeddings.dtype
+            )
+
+        image_features = self.get_or_compute_cached_vision_features(
+            images_b64, max_size, compute_image_features
+        ).astype(input_embeddings.dtype)
 
         # Gemma4TextModel applies embed_scale even when input_embeddings are provided.
         scaled_image_features = image_features / language_model.embed_scale
