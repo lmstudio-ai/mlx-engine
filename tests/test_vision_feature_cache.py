@@ -55,21 +55,44 @@ def test_base_helper_computes_once_and_reuses_cached_features():
 
 def test_cache_key_distinguishes_image_order():
     add_on = _MinimalVisionAddOn()
-    feature = mx.array([[1.0, 2.0]], dtype=mx.float32)
+    first_compute = _CountingModule(mx.array([[1.0, 2.0]], dtype=mx.float32))
+    second_compute = _CountingModule(mx.array([[3.0, 4.0]], dtype=mx.float32))
 
-    add_on.store_cached_vision_features(["img-a", "img-b"], (512, 512), feature)
+    first = add_on.get_or_compute_cached_vision_features(
+        ["img-a", "img-b"], (512, 512), first_compute
+    )
+    second = add_on.get_or_compute_cached_vision_features(
+        ["img-b", "img-a"], (512, 512), second_compute
+    )
 
-    assert add_on.get_cached_vision_features(["img-b", "img-a"], (512, 512)) is None
+    assert first_compute.calls == 1
+    assert second_compute.calls == 1
+    assert mx.array_equal(first, mx.array([[1.0, 2.0]], dtype=mx.float32))
+    assert mx.array_equal(second, mx.array([[3.0, 4.0]], dtype=mx.float32))
 
 
 def test_cache_key_distinguishes_max_size():
     add_on = _MinimalVisionAddOn()
-    feature = mx.array([[1.0, 2.0]], dtype=mx.float32)
+    resized_compute = _CountingModule(mx.array([[1.0, 2.0]], dtype=mx.float32))
+    larger_compute = _CountingModule(mx.array([[3.0, 4.0]], dtype=mx.float32))
+    original_compute = _CountingModule(mx.array([[5.0, 6.0]], dtype=mx.float32))
 
-    add_on.store_cached_vision_features(["img-a"], (512, 512), feature)
+    resized = add_on.get_or_compute_cached_vision_features(
+        ["img-a"], (512, 512), resized_compute
+    )
+    larger = add_on.get_or_compute_cached_vision_features(
+        ["img-a"], (1024, 1024), larger_compute
+    )
+    original = add_on.get_or_compute_cached_vision_features(
+        ["img-a"], None, original_compute
+    )
 
-    assert add_on.get_cached_vision_features(["img-a"], (1024, 1024)) is None
-    assert add_on.get_cached_vision_features(["img-a"], None) is None
+    assert resized_compute.calls == 1
+    assert larger_compute.calls == 1
+    assert original_compute.calls == 1
+    assert mx.array_equal(resized, mx.array([[1.0, 2.0]], dtype=mx.float32))
+    assert mx.array_equal(larger, mx.array([[3.0, 4.0]], dtype=mx.float32))
+    assert mx.array_equal(original, mx.array([[5.0, 6.0]], dtype=mx.float32))
 
 
 def test_gemma4_add_on_reuses_cached_image_features():
@@ -239,7 +262,10 @@ class _TrackingVisionAddOn(BaseVisionAddOn):
 
 def test_model_kit_shutdown_clears_cached_image_features():
     add_on = _TrackingVisionAddOn()
-    add_on.store_cached_vision_features(["img-a"], (256, 256), mx.ones((1, 2, 2)))
+    first_compute = _CountingModule(mx.ones((1, 2, 2)))
+    second_compute = _CountingModule(mx.zeros((1, 2, 2)))
+
+    add_on.get_or_compute_cached_vision_features(["img-a"], (256, 256), first_compute)
 
     kit = ModelKit.__new__(ModelKit)
     kit.vision_add_on = add_on
@@ -247,6 +273,12 @@ def test_model_kit_shutdown_clears_cached_image_features():
 
     ModelKit.shutdown(kit)
 
+    result = add_on.get_or_compute_cached_vision_features(
+        ["img-a"], (256, 256), second_compute
+    )
+
     assert add_on.cleared == 1
     assert kit.is_shutdown() is True
-    assert add_on.get_cached_vision_features(["img-a"], (256, 256)) is None
+    assert first_compute.calls == 1
+    assert second_compute.calls == 1
+    assert mx.array_equal(result, mx.zeros((1, 2, 2)))

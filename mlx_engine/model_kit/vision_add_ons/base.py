@@ -49,28 +49,6 @@ class BaseVisionAddOn(ABC):
         inject state into the text model (e.g., MRoPE positions).
         """
 
-    def get_cached_vision_features(
-        self,
-        images_b64: list[str],
-        max_size: tuple[int, int] | None,
-    ) -> Any | None:
-        """Return cached image features for an ordered image list, if present."""
-        return self._vision_feature_cache.get(
-            self._build_vision_cache_key(images_b64, max_size)
-        )
-
-    def store_cached_vision_features(
-        self,
-        images_b64: list[str],
-        max_size: tuple[int, int] | None,
-        features: Any,
-    ) -> None:
-        """Store image features for an ordered image list."""
-        self._vision_feature_cache.put(
-            self._build_vision_cache_key(images_b64, max_size),
-            features,
-        )
-
     def get_or_compute_cached_vision_features(
         self,
         images_b64: list[str],
@@ -78,13 +56,14 @@ class BaseVisionAddOn(ABC):
         compute_features: Callable[[], Any],
     ) -> Any:
         """Return cached image features or compute, materialize, and cache them."""
-        features = self.get_cached_vision_features(images_b64, max_size)
+        cache_key = self._build_vision_cache_key(images_b64, max_size)
+        features = self._vision_feature_cache.get(cache_key)
         if features is not None:
             return features
 
         features = compute_features()
         mx.eval(features)
-        self.store_cached_vision_features(images_b64, max_size, features)
+        self._vision_feature_cache.put(cache_key, features)
         return features
 
     def clear_feature_cache(self) -> None:
@@ -96,9 +75,9 @@ class BaseVisionAddOn(ABC):
         images_b64: list[str],
         max_size: tuple[int, int] | None,
     ) -> str:
+        """Keep cache hits exact across image changes, reorderings, and resize settings."""
         size_key = "orig" if max_size is None else f"{max_size[0]}x{max_size[1]}"
         image_hashes = [
-            hashlib.sha256(image.encode("utf-8")).hexdigest()[:16]
-            for image in images_b64
+            hashlib.sha256(image.encode("utf-8")).hexdigest() for image in images_b64
         ]
         return f"{size_key}:{'|'.join(image_hashes)}"
