@@ -88,29 +88,33 @@ class LFM2VisionAddOn(BaseVisionAddOn):
         spatial_shapes = other_model_inputs["spatial_shapes"]
         pixel_attention_mask = other_model_inputs["pixel_attention_mask"]
 
-        # Get the ouptut hidden states from the vision model
-        *_, hidden_states = self.vision_tower(
-            pixel_values, output_hidden_states=True, spatial_shapes=spatial_shapes
+        def compute_image_features() -> mx.array:
+            *_, hidden_states = self.vision_tower(
+                pixel_values, output_hidden_states=True, spatial_shapes=spatial_shapes
+            )
+
+            img_feature_lengths = pixel_attention_mask.sum(axis=1).tolist()
+            image_features = []
+
+            for img_idx in range(hidden_states.shape[0]):
+                feature = hidden_states[img_idx]
+
+                feature = feature[: img_feature_lengths[img_idx], :][None, ...]
+
+                feature_org_h, feature_org_w = spatial_shapes[img_idx]
+                feature = feature.reshape(1, feature_org_h, feature_org_w, -1)
+                feature = self.pixel_unshuffle(feature)
+
+                img_embedding = self.multi_modal_projector(feature)
+
+                img_embedding = img_embedding.reshape(-1, img_embedding.shape[-1])
+                image_features.append(img_embedding)
+
+            return mx.concatenate(image_features, axis=0)
+
+        image_features = self._vision_feature_memoizer.get_or_compute(
+            images_b64, max_size, compute_image_features
         )
-
-        img_feature_lengths = pixel_attention_mask.sum(axis=1).tolist()
-        image_features = []
-
-        for img_idx in range(hidden_states.shape[0]):
-            feature = hidden_states[img_idx]
-
-            feature = feature[: img_feature_lengths[img_idx], :][None, ...]
-
-            feature_org_h, feature_org_w = spatial_shapes[img_idx]
-            feature = feature.reshape(1, feature_org_h, feature_org_w, -1)
-            feature = self.pixel_unshuffle(feature)
-
-            img_embedding = self.multi_modal_projector(feature)
-
-            img_embedding = img_embedding.reshape(-1, img_embedding.shape[-1])
-            image_features.append(img_embedding)
-
-        image_features = mx.concatenate(image_features, axis=0)
 
         final_inputs_embeds = LFM2VlModel.merge_input_ids_with_image_features(
             image_features, inputs_embeds, input_ids, self.config.image_token_index

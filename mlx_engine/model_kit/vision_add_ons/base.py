@@ -1,19 +1,23 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 
 import mlx.core as mx
 from mlx import nn
 
+from mlx_engine.model_kit.vision_add_ons.vision_feature_memoizer import (
+    VisionFeatureMemoizer,
+)
 
-class BaseVisionAddOn:
+
+class BaseVisionAddOn(ABC):
     """
     Base class that defines the interface for a VisionAddOn.
     """
 
-    @abstractmethod
     def __init__(self):
         """
         Where load of vision model components is intended to occur.
         """
+        self._vision_feature_memoizer = VisionFeatureMemoizer()
 
     @abstractmethod
     def compute_embeddings(

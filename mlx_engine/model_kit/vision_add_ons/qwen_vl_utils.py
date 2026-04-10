@@ -76,8 +76,12 @@ def compute_qwen_vl_embeddings(
 
     # Process image through vision tower and merge embeddings
     if qwen_vl_version == 2:
-        hidden_states = addon.vision_tower(
-            pixel_values, grid_thw, output_hidden_states=False
+        hidden_states = addon._vision_feature_memoizer.get_or_compute(
+            images_b64,
+            max_size,
+            lambda: addon.vision_tower(
+                pixel_values, grid_thw, output_hidden_states=False
+            ),
         )
 
         final_inputs_embeds = addon.model_cls.merge_input_ids_with_image_features(
@@ -88,8 +92,12 @@ def compute_qwen_vl_embeddings(
             input_ids,
         )
     elif qwen_vl_version == 3:
-        hidden_states, _ = addon.vision_tower(
-            pixel_values, grid_thw, output_hidden_states=False
+        hidden_states = addon._vision_feature_memoizer.get_or_compute(
+            images_b64,
+            max_size,
+            lambda: addon.vision_tower(
+                pixel_values, grid_thw, output_hidden_states=False
+            )[0],
         )
 
         final_inputs_embeds, _ = addon.model_cls.merge_input_ids_with_image_features(
