@@ -109,7 +109,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
             # Pass image features through the multi-modal projector
             return self.multi_modal_projector(selected_image_feature, image_sizes)
 
-        image_features = self.vision_feature_cache.get_or_compute(
+        image_features = self._vision_feature_memoizer.get_or_compute(
             images_b64, max_size, compute_image_features
         )
 

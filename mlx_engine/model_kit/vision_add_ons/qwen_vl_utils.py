@@ -76,7 +76,7 @@ def compute_qwen_vl_embeddings(
 
     # Process image through vision tower and merge embeddings
     if qwen_vl_version == 2:
-        hidden_states = addon.vision_feature_cache.get_or_compute(
+        hidden_states = addon._vision_feature_memoizer.get_or_compute(
             images_b64,
             max_size,
             lambda: addon.vision_tower(
@@ -92,7 +92,7 @@ def compute_qwen_vl_embeddings(
             input_ids,
         )
     elif qwen_vl_version == 3:
-        hidden_states = addon.vision_feature_cache.get_or_compute(
+        hidden_states = addon._vision_feature_memoizer.get_or_compute(
             images_b64,
             max_size,
             lambda: addon.vision_tower(

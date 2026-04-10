@@ -70,7 +70,7 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
             )
             return self.multi_modal_projector(hidden_state.astype(pixel_values.dtype))
 
-        image_features = self.vision_feature_cache.get_or_compute(
+        image_features = self._vision_feature_memoizer.get_or_compute(
             images_b64, max_size, compute_image_features
         )
 

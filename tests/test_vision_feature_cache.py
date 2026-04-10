@@ -5,6 +5,8 @@ import mlx.core as mx
 
 from mlx_engine.model_kit.vision_add_ons.base import (
     BaseVisionAddOn,
+)
+from mlx_engine.model_kit.vision_add_ons.vision_feature_memoizer import (
     VisionFeatureMemoizer,
 )
 from mlx_engine.model_kit.vision_add_ons.gemma4 import Gemma4VisionAddOn

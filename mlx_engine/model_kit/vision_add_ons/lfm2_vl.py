@@ -112,7 +112,7 @@ class LFM2VisionAddOn(BaseVisionAddOn):
 
             return mx.concatenate(image_features, axis=0)
 
-        image_features = self.vision_feature_cache.get_or_compute(
+        image_features = self._vision_feature_memoizer.get_or_compute(
             images_b64, max_size, compute_image_features
         )
 
