@@ -8,7 +8,8 @@ from mlx import nn
 from mlx_vlm.vision_cache import VisionFeatureCache
 
 
-DEFAULT_VISION_FEATURE_CACHE_SIZE = 8
+# Match mlx-vlm's default cache size to keep behavior aligned across servers.
+DEFAULT_VISION_FEATURE_CACHE_SIZE = 20
 
 
 class BaseVisionAddOn(ABC):

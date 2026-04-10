@@ -137,16 +137,6 @@ def test_gemma4_add_on_reuses_cached_image_features():
     assert mx.array_equal(first_embeddings, second_embeddings)
 
 
-class _FakeQwenVisionTower:
-    def __init__(self, hidden_states: mx.array):
-        self.hidden_states = hidden_states
-        self.calls = 0
-
-    def __call__(self, *_args, **_kwargs):
-        self.calls += 1
-        return self.hidden_states, None
-
-
 class _FakeQwenModel:
     @staticmethod
     def merge_input_ids_with_image_features(
@@ -156,17 +146,19 @@ class _FakeQwenModel:
         image_token_id: int,
         video_token_id: int,
     ) -> tuple[mx.array, mx.array]:
-        special_mask = (input_ids == image_token_id) | (input_ids == video_token_id)
-        expanded_mask = mx.broadcast_to(special_mask[..., None], inputs_embeds.shape)
-        flat_mask = expanded_mask.flatten()
-        flat_indices = mx.cumsum(flat_mask.astype(mx.int32)) - 1
-        aligned_features = image_features.flatten()[flat_indices % image_features.size]
-        merged = mx.where(
-            flat_mask,
-            aligned_features,
-            inputs_embeds.flatten(),
-        ).reshape(inputs_embeds.shape)
-        return merged, expanded_mask
+        merged_rows = []
+        feature_index = 0
+        token_ids = input_ids.squeeze(0).tolist()
+        text_rows = inputs_embeds.squeeze(0)
+
+        for index, token_id in enumerate(token_ids):
+            if token_id in (image_token_id, video_token_id):
+                merged_rows.append(image_features[feature_index])
+                feature_index += 1
+            else:
+                merged_rows.append(text_rows[index])
+
+        return mx.expand_dims(mx.stack(merged_rows), axis=0), None
 
 
 class _FakeQwenProcessor:
@@ -180,7 +172,7 @@ class _FakeQwenAddOn(BaseVisionAddOn):
         self.processor = _FakeQwenProcessor()
         self.config = SimpleNamespace(image_token_id=99, video_token_id=100)
         self.model_cls = _FakeQwenModel
-        self.vision_tower = _FakeQwenVisionTower(hidden_states)
+        self.vision_tower = _CountingModule((hidden_states, None))
 
     def compute_embeddings(self, *args, **kwargs):
         raise NotImplementedError
@@ -247,21 +239,8 @@ def test_qwen_helper_reuses_cached_image_features_across_prompt_changes():
     assert second_embeddings[3] == [6.0, 6.5]
 
 
-class _TrackingVisionAddOn(BaseVisionAddOn):
-    def __init__(self):
-        super().__init__()
-        self.cleared = 0
-
-    def compute_embeddings(self, *args, **kwargs):
-        raise NotImplementedError
-
-    def clear_feature_cache(self) -> None:
-        self.cleared += 1
-        super().clear_feature_cache()
-
-
 def test_model_kit_shutdown_clears_cached_image_features():
-    add_on = _TrackingVisionAddOn()
+    add_on = _MinimalVisionAddOn()
     first_compute = _CountingModule(mx.ones((1, 2, 2)))
     second_compute = _CountingModule(mx.zeros((1, 2, 2)))
 
@@ -271,13 +250,16 @@ def test_model_kit_shutdown_clears_cached_image_features():
     kit.vision_add_on = add_on
     kit._shutdown = threading.Event()
 
-    ModelKit.shutdown(kit)
+    with patch.object(
+        add_on, "clear_feature_cache", wraps=add_on.clear_feature_cache
+    ) as clear_feature_cache:
+        ModelKit.shutdown(kit)
 
     result = add_on.get_or_compute_cached_vision_features(
         ["img-a"], (256, 256), second_compute
     )
 
-    assert add_on.cleared == 1
+    assert clear_feature_cache.call_count == 1
     assert kit.is_shutdown() is True
     assert first_compute.calls == 1
     assert second_compute.calls == 1
