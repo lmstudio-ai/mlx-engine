@@ -1,6 +1,8 @@
 """Tests for the Gemma 4 monkey patch."""
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -8,7 +10,10 @@ import mlx.core as mx
 import mlx_lm.models.gemma4_text as gemma4_text_module
 
 from mlx_engine.generate import load_model
-from mlx_engine.model_kit.patches.gemma4 import OriginalGemma4TextModel
+from mlx_engine.model_kit.patches.gemma4 import (
+    OriginalGemma4TextModel,
+    PatchedGemma4TextModel,
+)
 from mlx_engine.utils.image_utils import convert_to_pil
 from mlx_engine.utils.prompt_progress_reporter import DefaultPromptProgressReporter
 from mlx_vlm.utils import load_processor, prepare_inputs
@@ -23,8 +28,6 @@ from tests.patched_model_test_utils import (
 )
 from tests.shared import read_image_b64
 from transformers import AutoProcessor
-
-pytestmark = pytest.mark.heavy
 
 GEMMA4_MODEL_NAME = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
 GEMMA4_IMAGE_PROMPT_EMBEDDINGS_ATOL = 0.05
@@ -78,6 +81,38 @@ def resolve_image_token_index(config) -> int | None:
     )
 
 
+def test_patched_gemma4_slices_stored_prompt_ids_before_forward():
+    model = PatchedGemma4TextModel.__new__(PatchedGemma4TextModel)
+    model.prompt_per_layer_input_ids = mx.array([[10, 11, 12, 13, 14]], dtype=mx.int32)
+    expected_input_ids = mx.array([[12, 13]], dtype=mx.int32)
+    input_embeddings = mx.zeros((1, 2, 8), dtype=mx.float32)
+
+    with (
+        patch.object(
+            PatchedGemma4TextModel,
+            "_get_per_layer_inputs",
+            autospec=True,
+            return_value=expected_input_ids,
+        ) as get_per_layer_inputs,
+        patch.object(
+            OriginalGemma4TextModel,
+            "__call__",
+            autospec=True,
+            return_value="forwarded",
+        ) as super_call,
+    ):
+        result = model(
+            inputs=mx.array([[0, 1]], dtype=mx.int32),
+            cache=[SimpleNamespace(offset=2)],
+            input_embeddings=input_embeddings,
+        )
+
+    assert result == "forwarded"
+    assert mx.array_equal(get_per_layer_inputs.call_args.args[1], expected_input_ids)
+    assert super_call.call_args.kwargs["per_layer_inputs"] is expected_input_ids
+
+
+@pytest.mark.heavy
 def test_gemma4_text_only_generation_patched_matches_unpatched():
     """The Gemma 4 patch must be a no-op for text-only generation."""
     model_path = get_real_model_path(GEMMA4_MODEL_NAME)
@@ -118,6 +153,7 @@ def test_gemma4_text_only_generation_patched_matches_unpatched():
     )
 
 
+@pytest.mark.heavy
 def test_gemma4_image_prompt_unified_arch_prompt_inputs_match_vlm():
     """Image+text Gemma 4 prompt inputs should match native mlx-vlm before LM."""
     model_path = get_real_model_path(GEMMA4_MODEL_NAME)
