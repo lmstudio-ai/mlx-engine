@@ -65,22 +65,6 @@ def load_vlm_processor(model_path: Path):
     return load_processor(model_path, add_detokenizer=True)
 
 
-def mask_non_text_tokens(input_ids: mx.array, config) -> mx.array:
-    zeros = mx.zeros_like(input_ids)
-    masked_input_ids = input_ids
-    image_token_id = resolve_image_token_index(config)
-    if image_token_id is not None:
-        masked_input_ids = mx.where(
-            input_ids == image_token_id, zeros, masked_input_ids
-        )
-    audio_token_id = getattr(config, "audio_token_id", None)
-    if audio_token_id is not None:
-        masked_input_ids = mx.where(
-            input_ids == audio_token_id, zeros, masked_input_ids
-        )
-    return masked_input_ids
-
-
 def resolve_image_token_index(config) -> int | None:
     vision_config = getattr(config, "vision_config", None)
     return getattr(
@@ -170,12 +154,13 @@ def test_gemma4_image_prompt_unified_arch_prompt_inputs_match_vlm():
     mx.clear_cache()
 
     vlm_model = load_vlm(model_path)
+    image_token_index = resolve_image_token_index(vlm_model.config)
     vlm_processor = load_vlm_processor(model_path)
     vlm_inputs = prepare_inputs(
         processor=vlm_processor,
         images=convert_to_pil([image_b64]),
         prompts=prompt,
-        image_token_index=resolve_image_token_index(vlm_model.config),
+        image_token_index=image_token_index,
         resize_shape=None,
     )
     native_input_ids = vlm_inputs["input_ids"]
@@ -187,8 +172,8 @@ def test_gemma4_image_prompt_unified_arch_prompt_inputs_match_vlm():
         mask=native_attention_mask,
     )
     native_prompt_embeddings = native_embedding_output.inputs_embeds.astype(mx.float32)
-    expected_prompt_per_layer_input_ids = mask_non_text_tokens(
-        native_input_ids, vlm_model.config
+    expected_prompt_per_layer_input_ids = mx.where(
+        native_input_ids == image_token_index, 0, native_input_ids
     )
     mx.eval(expected_prompt_per_layer_input_ids)
 
