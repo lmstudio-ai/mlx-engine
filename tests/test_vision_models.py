@@ -1,5 +1,8 @@
+import math
 from pathlib import Path
 import pytest
+from mlx_engine.cache_wrapper import DEFAULT_CHECKPOINT_TAIL_TOKENS
+from mlx_lm.models.cache import can_trim_prompt_cache
 from mlx_engine.generate import (
     load_model,
     tokenize,
@@ -13,6 +16,7 @@ from tests.shared import (
     model_load_and_tokenize_prompt,
 )
 from textwrap import dedent
+from transformers import AutoProcessor
 
 
 MAX_IMAGE_SIZE = (1024, 1024)
@@ -22,6 +26,62 @@ MAX_KV_CACHE_SIZE = 20000
 # 512 was the previous default, and some tests were written with assertions
 # on the number of prompt processing events.
 CACHING_TEST_PREFILL_STEP_SIZE = 512
+
+
+def _expected_sequential_reporter_event_count(
+    *,
+    total_prompt_tokens: int,
+    cached_tokens: int,
+    prefill_step_size: int = CACHING_TEST_PREFILL_STEP_SIZE,
+) -> int:
+    """Compute begin/update/finish events for CacheWrapper-based prompt processing."""
+    prefillable_tokens = max(0, total_prompt_tokens - cached_tokens - 1)
+    num_updates = math.ceil(prefillable_tokens / prefill_step_size)
+
+    checkpoint_prefix_len = total_prompt_tokens - DEFAULT_CHECKPOINT_TAIL_TOKENS
+    checkpoint_offset = checkpoint_prefix_len - cached_tokens
+    if (
+        0 < checkpoint_offset < prefillable_tokens
+        and checkpoint_offset % prefill_step_size != 0
+    ):
+        num_updates += 1
+
+    return num_updates + 2
+
+
+def _assert_sequential_reporter_event_count(
+    reporter: RecordingReporter,
+    *,
+    prefill_step_size: int = CACHING_TEST_PREFILL_STEP_SIZE,
+) -> None:
+    begin_event = reporter.events[0]
+    expected_count = _expected_sequential_reporter_event_count(
+        total_prompt_tokens=begin_event["total_prompt_tokens"],
+        cached_tokens=begin_event["cached_tokens"],
+        prefill_step_size=prefill_step_size,
+    )
+    assert len(reporter.events) == expected_count, (
+        f"Expected {expected_count} prompt progress events for "
+        f"{begin_event['total_prompt_tokens']} total tokens and "
+        f"{begin_event['cached_tokens']} cached tokens at chunk size "
+        f"{prefill_step_size}, but got {len(reporter.events)}."
+    )
+
+
+def _find_token_runs(tokens: list[int], target_token: int) -> list[tuple[int, int]]:
+    """Return contiguous index ranges where a token repeats."""
+    runs = []
+    start = None
+    for idx, token in enumerate(tokens):
+        if token == target_token:
+            if start is None:
+                start = idx
+        elif start is not None:
+            runs.append((start, idx - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(tokens) - 1))
+    return runs
 
 
 class TestVisionModels:
@@ -94,6 +154,24 @@ class TestVisionModels:
         )
 
         return generated_text
+
+    def build_gemma4_prompt(
+        self,
+        model_path: Path,
+        prompt: str,
+        *,
+        text_only: bool = False,
+    ) -> str:
+        processor = AutoProcessor.from_pretrained(model_path)
+        content = [{"type": "text", "text": prompt}]
+        if not text_only:
+            content.insert(0, {"type": "image", "base64": self.toucan_image_b64})
+        conversation = [{"role": "user", "content": content}]
+        return processor.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
 
     ### MODEL-SPECIFIC TESTS ###
     def test_llama_3_2_vision_instruct(self):
@@ -259,7 +337,7 @@ class TestVisionModels:
         # Generation 1 - model creates a long story
         prompt = "<s>[INST]Tell me a 500 word story about the bravest soul in the middle ages, and their weapon of choice[/INST]"
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -271,7 +349,7 @@ class TestVisionModels:
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -541,7 +619,7 @@ You are a helpful assistant.<|im_end|>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -558,7 +636,7 @@ You are a helpful assistant.<|im_end|>
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -611,7 +689,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 16  # begin, update x14, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -626,7 +704,7 @@ Summarize this in one sentence<end_of_turn>
                 """)
         print(prompt)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -643,6 +721,249 @@ Summarize this in one sentence<end_of_turn>
         self.toucan_test_runner(
             "lmstudio-community/gemma-3n-E2B-it-MLX-4bit", prompt, text_only=True
         )
+
+    @pytest.mark.heavy
+    def test_gemma4_vision(self):
+        """Test Gemma 4 model via the unified multimodal path."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        prompt = self.build_gemma4_prompt(model_path, self.description_prompt)
+        self.toucan_test_runner(
+            model_name,
+            prompt,
+            supplemental_accept_phrases=["bird"],
+        )
+
+    @pytest.mark.heavy
+    def test_gemma4_text_only(self):
+        """Test Gemma 4 model with text only via the unified multimodal path."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        prompt = self.build_gemma4_prompt(
+            model_path,
+            self.text_only_prompt,
+            text_only=True,
+        )
+        self.toucan_test_runner(model_name, prompt, text_only=True)
+
+    @pytest.mark.heavy
+    def test_gemma4_text_only_generation_caching(self):
+        """Ensure unified-arch Gemma 4 reuses cross-prompt cache for text-only turns."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        processor = AutoProcessor.from_pretrained(model_path)
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=MAX_KV_CACHE_SIZE,
+            max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
+        )
+
+        def render_prompt(conversation):
+            return processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+        def generate_text(prompt):
+            prompt_tokens = tokenize(model_kit, prompt)
+            reporter = RecordingReporter()
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=1000,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_reporter=reporter,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return generated_text, reporter
+
+        first_conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Tell me a 500-word story about a traveler, and make the main character's name distinctive.",
+                    }
+                ],
+            }
+        ]
+
+        prompt = render_prompt(first_conversation)
+        generated_text, reporter = generate_text(prompt)
+        first_update_events = [
+            event for event in reporter.events if event["type"] == "update"
+        ]
+        assert len(first_update_events) > 0
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
+        assert len(generated_text) > 0
+
+        second_conversation = first_conversation + [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": generated_text}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What was the main character's name? Answer with only the name.",
+                    }
+                ],
+            },
+        ]
+        prompt = render_prompt(second_conversation)
+        num_tokens = len(model_kit.tokenize(prompt))
+        # Without caching, the follow-up prompt is long enough to require multi-chunk prefill.
+        assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
+
+        follow_up_text, reporter = generate_text(prompt)
+        second_update_events = [
+            event for event in reporter.events if event["type"] == "update"
+        ]
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > 0
+        assert len(second_update_events) <= len(first_update_events)
+        assert (
+            second_update_events[-1]["prefill_tokens_processed"]
+            < first_update_events[-1]["prefill_tokens_processed"]
+        )
+        assert len(follow_up_text.strip()) > 0
+
+    @pytest.mark.heavy
+    def test_gemma4_scratchpad_follow_up_reuses_checkpoint_cache(self):
+        """Ensure Gemma 4 reuses a cached prompt checkpoint when follow-up drops a long assistant scratchpad."""
+        model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
+        model_path = model_getter(model_name)
+        processor = AutoProcessor.from_pretrained(model_path)
+        max_kv_size = 512
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=max_kv_size,
+            max_seq_nums=1,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
+        )
+        control_word = "MERIDIAN"
+        background_words = (
+            (self.test_data_dir / "ben_franklin_autobiography_start.txt")
+            .read_text()
+            .split()
+        )
+
+        def render_prompt(conversation):
+            return processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+        def generate_text(prompt, *, max_tokens):
+            prompt_tokens = tokenize(model_kit, prompt)
+            reporter = RecordingReporter()
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=max_tokens,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_reporter=reporter,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return prompt_tokens, generated_text, reporter
+
+        background = " ".join(background_words[:192])
+        first_conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": dedent(f"""\
+                            Read the background carefully.
+
+                            Background:
+                            {background}
+
+                            Write two sections in order.
+                            First, write a long SCRATCHPAD section with at least 60 numbered lines.
+                            Keep each line short, but make sure the full scratchpad is detailed.
+                            Each line should briefly analyze or restate part of the background.
+                            Second, end with a single final line in the exact format:
+                            FINAL: {control_word}
+                            Do not write anything after that final line.
+                            """),
+                    }
+                ],
+            }
+        ]
+        first_prompt = render_prompt(first_conversation)
+        first_prompt_tokens = tokenize(model_kit, first_prompt)
+        assert len(first_prompt_tokens) < max_kv_size
+
+        (
+            _,
+            generated_text,
+            reporter,
+        ) = generate_text(first_prompt, max_tokens=1600)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
+        assert len(generated_text) > 0
+
+        final_marker = f"FINAL: {control_word}"
+        final_index = generated_text.find(final_marker)
+        assert final_index >= 0, generated_text
+        scratchpad_text = generated_text[:final_index]
+        scratchpad_token_count = len(
+            model_kit.tokenizer.encode(scratchpad_text, add_special_tokens=False)
+        )
+        assert scratchpad_token_count > 512
+
+        assistant_text = control_word
+
+        second_conversation = first_conversation + [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What was the exact single-word final answer from your previous message? Reply with only that word.",
+                    }
+                ],
+            },
+        ]
+        second_prompt = render_prompt(second_conversation)
+
+        _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] > len(first_prompt_tokens) // 2
+        assert control_word.lower() in follow_up_text.lower()
 
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_generation_caching(self):
@@ -683,7 +1004,7 @@ Summarize this in one sentence<end_of_turn>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -700,7 +1021,7 @@ Summarize this in one sentence<end_of_turn>
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -753,7 +1074,7 @@ Summarize this in one sentence<end_of_turn>
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 16  # begin, update x14, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -768,7 +1089,7 @@ Summarize this in one sentence<end_of_turn>
                 """)
         print(prompt)
         generated_text, reporter = generate_text(prompt)
-        assert len(reporter.events) == 3  # begin, update, finish
+        _assert_sequential_reporter_event_count(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] > 0  # Cache should be used
@@ -826,6 +1147,241 @@ Summarize this in one sentence<end_of_turn>
         assert len(progress_values) > 0
         for i in range(len(progress_values) - 1):
             assert progress_values[i + 1] > progress_values[i]
+
+    def test_qwen3_5_vision(self):
+        """Test Qwen3.5 2B model with vision"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-2B-MLX-4bit",
+            prompt,
+        )
+
+    def test_qwen3_5_text_only(self):
+        """Test Qwen3.5 2B model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-2B-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
+
+    def test_qwen3_5_vision_then_text_only(self):
+        """Test that text-only generation after a vision request produces the
+        same output as a cold-start text-only generation, verifying that MRoPE
+        state from the vision request does not leak into subsequent text-only
+        requests."""
+        model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=2048,
+            max_seq_nums=1,
+            trust_remote_code=True,
+        )
+
+        def generate_text(prompt, images_b64=None):
+            prompt_tokens = tokenize(model_kit, prompt)
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                images_b64=images_b64,
+                max_image_size=MAX_IMAGE_SIZE,
+                seed=0,
+                temp=0.0,
+                max_tokens=30,
+                repetition_penalty=1.01,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print()
+            return generated_text
+
+        text_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        vision_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+        # Step 1: Text-only baseline (cold start)
+        baseline_text = generate_text(text_prompt)
+
+        # Step 2: Confirm determinism with a second text-only run
+        second_text = generate_text(text_prompt)
+        assert baseline_text == second_text, (
+            f"Text-only generation is not deterministic: {repr(baseline_text)} != {repr(second_text)}"
+        )
+
+        # Step 3: Vision request (populates MRoPE state)
+        vision_text = generate_text(vision_prompt, images_b64=[self.toucan_image_b64])
+        assert len(vision_text) > 0
+
+        # Step 4: Text-only after vision — must match baseline exactly
+        after_vision_text = generate_text(text_prompt)
+        assert baseline_text == after_vision_text, (
+            f"Text-only output after vision request differs from baseline "
+            f"(MRoPE state likely leaked): {repr(baseline_text)} != {repr(after_vision_text)}"
+        )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_text_only_follow_up_reuses_checkpoint_cache(self):
+        """Qwen3.5 should reuse a stored checkpoint for text-only follow-ups.
+
+        The dense Qwen3.5 architecture alternates three linear-attention layers
+        with one full-attention layer (`full_attention_interval=4`). In the
+        current stack this produces a non-trimmable prompt cache, so follow-up
+        reuse after dropping a long assistant scratchpad depends on checkpoint
+        snapshots rather than trimming a longer assistant cache entry.
+        """
+        model_name = "lmstudio-community/Qwen3.5-2B-MLX-4bit"
+        model_path = model_getter(model_name)
+        max_kv_size = 160
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=max_kv_size,
+            max_seq_nums=1,
+            trust_remote_code=True,
+            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
+        )
+        control_word = "MERIDIAN"
+
+        assert not can_trim_prompt_cache(model_kit.cache_wrapper.cache)
+
+        def generate_text(prompt, *, max_tokens):
+            prompt_tokens = tokenize(model_kit, prompt)
+            reporter = RecordingReporter()
+
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                seed=0,
+                temp=0.0,
+                max_tokens=max_tokens,
+                repetition_penalty=1.01,  # to enable this code path
+                prompt_progress_reporter=reporter,
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+            return prompt_tokens, generated_text, reporter
+
+        first_prompt = dedent(f"""\
+            <|im_start|>system
+            You are a helpful assistant.<|im_end|>
+            <|im_start|>user
+            Write two sections in order.
+            First, write a long SCRATCHPAD section with at least 120 numbered lines about medieval trade routes.
+            Keep each line short, between 6 and 12 words.
+            Second, end with a single final line in the exact format:
+            FINAL: {control_word}
+            Do not write anything after that final line.<|im_end|>
+            <|im_start|>assistant
+            """)
+        first_prompt_tokens = tokenize(model_kit, first_prompt)
+        assert len(first_prompt_tokens) < max_kv_size
+
+        _, generated_text, reporter = generate_text(first_prompt, max_tokens=1600)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == 0
+        assert len(generated_text) > 0
+
+        final_marker = f"FINAL: {control_word}"
+        final_index = generated_text.find(final_marker)
+        assert final_index >= 0, generated_text
+        scratchpad_text = generated_text[:final_index]
+        assert len(scratchpad_text.strip()) > 0
+
+        second_prompt = (
+            first_prompt
+            + control_word
+            + dedent("""\
+            <|im_end|>
+            <|im_start|>user
+            What was the exact single-word final answer from your previous message? Reply with only that word.<|im_end|>
+            <|im_start|>assistant
+            """)
+        )
+
+        _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
+        begin_event = reporter.events[0]
+        assert begin_event["type"] == "begin"
+        assert begin_event["cached_tokens"] == (
+            len(first_prompt_tokens) - DEFAULT_CHECKPOINT_TAIL_TOKENS
+        )
+        assert len(follow_up_text.strip()) > 0
+
+    def test_qwen3_5_multi_image_process_prompt_preserves_image_positions(self):
+        """Qwen3.5 must inject MRoPE positions for every image span.
+
+        This targets the prompt-processing path directly instead of relying on
+        generation quality: after two images across messages, both expanded
+        image token runs should still carry image-style position IDs rather than
+        falling back to sequential text positions.
+        """
+        model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=2048,
+            max_seq_nums=1,
+            trust_remote_code=True,
+        )
+
+        prompt = """<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>What is this? In one word.<|im_end|>
+<|im_start|>assistant
+Toucan.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>In a few words, describe all of the images you've seen so far<|im_end|>
+<|im_start|>assistant
+"""
+
+        prompt_tokens = tokenize(model_kit, prompt)
+        reporter = RecordingReporter()
+        input_ids, _ = model_kit.process_prompt(
+            prompt_tokens,
+            [self.toucan_image_b64, self.chameleon_image_b64],
+            reporter,
+            {},
+            MAX_IMAGE_SIZE,
+        )
+
+        text_model = model_kit.model.language_model.model
+        image_token_id = model_kit.vision_add_on.config.image_token_id
+        image_runs = _find_token_runs(input_ids.tolist(), image_token_id)
+
+        assert len(image_runs) == 2, (
+            f"Expected two expanded image spans in the prompt, got {image_runs!r}"
+        )
+
+        for run_idx, (start, end) in enumerate(image_runs):
+            temporal_positions = text_model.position_ids[0, 0, start : end + 1].tolist()
+            assert len(set(temporal_positions)) == 1, (
+                f"Image span {run_idx} used sequential text positions instead of "
+                f"image MRoPE positions: {temporal_positions[:12]!r}..."
+            )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_moe_vision(self):
+        """Test Qwen3.5 35B-A3B MoE model with vision"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            prompt,
+        )
+
+    @pytest.mark.heavy
+    def test_qwen3_5_moe_text_only(self):
+        """Test Qwen3.5 35B-A3B MoE model with only text"""
+        prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        self.toucan_test_runner(
+            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            prompt,
+            text_only=True,
+        )
 
     ### NON-MODEL-SPECIFIC TESTS ###
     def test_draft_model_not_compatible_vision(self):

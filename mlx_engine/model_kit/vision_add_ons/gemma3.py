@@ -63,15 +63,16 @@ class Gemma3VisionAddOn(BaseVisionAddOn):
         )
         input_embeddings = text_model.language_model.model.embed_tokens(input_ids)
 
-        # Process image through vision tower
-        hidden_state, _, _ = self.vision_tower(
-            pixel_values.transpose(0, 2, 3, 1).astype(input_embeddings.dtype),
-            output_hidden_states=True,
-        )
+        def compute_image_features() -> mx.array:
+            hidden_state, _, _ = self.vision_tower(
+                pixel_values.transpose(0, 2, 3, 1).astype(input_embeddings.dtype),
+                output_hidden_states=True,
+            )
+            return self.multi_modal_projector(hidden_state.astype(pixel_values.dtype))
 
-        # Format image features
-        image_features = hidden_state.astype(pixel_values.dtype)
-        image_features = self.multi_modal_projector(image_features)
+        image_features = self._vision_feature_memoizer.get_or_compute(
+            images_b64, max_size, compute_image_features
+        )
 
         # Combine image and text embeddings
         final_inputs_embeds, _ = Gemma3CombinedModel.prepare_inputs_for_multimodal(

@@ -131,12 +131,16 @@ class Gemma3nVisionAddOn(BaseVisionAddOn):
             # Transpose the HW axes
             pixel_values = pixel_values.swapaxes(2, 3)
 
-        # Process image through vision tower, then embed into language model space
-        image_features = Gemma3nCombinedModel.get_image_features(
-            pixel_values,
-            self.vision_tower,
-            self.config,
-            self.embed_vision,
+        def compute_image_features() -> mx.array:
+            return Gemma3nCombinedModel.get_image_features(
+                pixel_values,
+                self.vision_tower,
+                self.config,
+                self.embed_vision,
+            )
+
+        image_features = self._vision_feature_memoizer.get_or_compute(
+            images_b64, max_size, compute_image_features
         )
 
         # Construct mask that matches image embedding locations

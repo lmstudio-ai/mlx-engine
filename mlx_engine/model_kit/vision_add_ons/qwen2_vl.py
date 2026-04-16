@@ -81,7 +81,7 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
         Compute input_ids and embeddings for text with images.
         """
 
-        return compute_qwen_vl_embeddings(
+        result = compute_qwen_vl_embeddings(
             addon=self,
             text_model=text_model,
             prompt_tokens=prompt_tokens,
@@ -89,3 +89,4 @@ class Qwen2_VLVisionAddOn(BaseVisionAddOn):
             qwen_vl_version=2,
             max_size=max_size,
         )
+        return result.input_ids, result.embeddings

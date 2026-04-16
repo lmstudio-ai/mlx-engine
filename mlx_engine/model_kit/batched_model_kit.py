@@ -8,6 +8,7 @@ import logging
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
 from mlx_lm.generate import BatchGenerator
+from mlx_lm.models.cache import can_trim_prompt_cache, trim_prompt_cache
 import mlx.nn as nn
 import mlx.core as mx
 from pathlib import Path
@@ -25,6 +26,35 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _prepare_prompt_cache_for_generation(
+    prompt_cache: LRUPromptCache, model_key: str, prompt_tokens: list[int]
+):
+    """
+    Return `(cache, cached_prefix, rest)` while ensuring batched decode still
+    has one prompt token left to seed its first generation step.
+    """
+
+    # Start from mlx-lm's nearest reusable cache entry.
+    cache, rest = prompt_cache.fetch_nearest_cache(model_key, prompt_tokens)
+
+    # Any uncached suffix already leaves a seed token outside the cache.
+    if rest:
+        cached_prefix_len = len(prompt_tokens) - len(rest)
+        return cache, prompt_tokens[:cached_prefix_len], rest
+
+    # Empty prompts have no seed token to preserve.
+    if len(prompt_tokens) == 0:
+        return cache, [], []
+
+    # Exact cache hits need one token moved out of cache to start decoding.
+    if cache is not None and can_trim_prompt_cache(cache):
+        if trim_prompt_cache(cache, 1) == 1:
+            return cache, prompt_tokens[:-1], prompt_tokens[-1:]
+
+    # If we cannot trim an exact-hit cache, replay the full prompt instead.
+    return None, [], prompt_tokens
 
 
 class BatchedModelKit:
@@ -247,13 +277,6 @@ class BatchedModelKit:
         requests receive a RequestCancelled exception.
         """
 
-        def progress_callback(info):
-            for uid, processed, total in info:
-                if uid in self._batch_results:
-                    self._batch_results[uid]["rqueue"].put(
-                        (min(processed, total), total)
-                    )
-
         batch_generator = BatchGenerator(
             self.model,
             max_tokens=10000000,
@@ -262,11 +285,10 @@ class BatchedModelKit:
             # We probably want to make this behavior configurable, so that new prompts do not pause existing decodes
             prefill_batch_size=1,
             prefill_step_size=self._prefill_step_size,
-            stop_tokens=set(self.tokenizer.eos_token_ids),
+            stop_tokens=[[token] for token in self.tokenizer.eos_token_ids],
             # Do not set any global post-processors, sampler and logits_processor are set per-request
             sampler=None,
             logits_processors=None,
-            prompt_progress_callback=progress_callback,
             max_kv_size=self._max_kv_size,
         )
         # only using one model, so model key name value does not matter
@@ -303,9 +325,8 @@ class BatchedModelKit:
                         logger.warning(f"Could not cancel {request_id=} (id not found)")
                     continue
 
-                # Get cache
-                cache, rest = self._prompt_cache.fetch_nearest_cache(
-                    current_model_key, request.prompt_tokens
+                cache, cached_prefix, rest = _prepare_prompt_cache_for_generation(
+                    self._prompt_cache, current_model_key, request.prompt_tokens
                 )
 
                 # Add to batch
@@ -313,6 +334,7 @@ class BatchedModelKit:
                     [rest],
                     [request.max_tokens],
                     caches=[cache],
+                    all_tokens=[cached_prefix],
                     samplers=[request.samplers],
                     logits_processors=[request.logits_processors],
                 )
@@ -342,16 +364,25 @@ class BatchedModelKit:
                 if time.time() - start > time_budget:
                     break
 
-                responses = batch_generator.next()
-                if not responses:
+                prompt_responses, generation_responses = batch_generator.next()
+                if not prompt_responses and not generation_responses:
                     break
 
-                for r in responses:
+                for r in prompt_responses:
+                    result = self._batch_results.get(r.uid)
+                    if result is not None:
+                        processed, total = r.progress
+                        result["rqueue"].put((min(processed, total), total))
+
+                for r in generation_responses:
                     # Create response object
                     result = self._batch_results[r.uid]
+                    detokenizer = result["detokenizer"]
                     result["live_cache_key"].append(r.token)
                     if r.finish_reason != "stop":
-                        result["detokenizer"].add_token(r.token)
+                        detokenizer.add_token(r.token)
+                    if r.finish_reason is not None:
+                        detokenizer.finalize()
                     token_logprob = r.logprobs[r.token].item()
                     top_logprobs_list = None
 
@@ -377,7 +408,7 @@ class BatchedModelKit:
                     # Send the result
                     result["rqueue"].put(
                         BatchedGenerationResponse(
-                            text=result["detokenizer"].last_segment,
+                            text=detokenizer.last_segment,
                             token=r.token,
                             token_logprob=token_logprob,
                             top_logprobs=top_logprobs_list,

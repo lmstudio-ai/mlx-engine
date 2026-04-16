@@ -1,19 +1,23 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 
 import mlx.core as mx
 from mlx import nn
 
+from mlx_engine.model_kit.vision_add_ons.vision_feature_memoizer import (
+    VisionFeatureMemoizer,
+)
 
-class BaseVisionAddOn:
+
+class BaseVisionAddOn(ABC):
     """
     Base class that defines the interface for a VisionAddOn.
     """
 
-    @abstractmethod
     def __init__(self):
         """
         Where load of vision model components is intended to occur.
         """
+        self._vision_feature_memoizer = VisionFeatureMemoizer()
 
     @abstractmethod
     def compute_embeddings(
@@ -31,4 +35,11 @@ class BaseVisionAddOn:
             prompt_tokens: Input prompt tokens
             images_b64: List of base64-encoded images
             max_size: Maximum image size as (width, height) tuple. If None, no resizing.
+        """
+
+    def clear_prediction_state(self, text_model: nn.Module) -> None:
+        """
+        Called before every prediction to reset any model state set by a
+        previous request. Default is a no-op; override in add-ons that
+        inject state into the text model (e.g., MRoPE positions).
         """

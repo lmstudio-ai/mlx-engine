@@ -72,16 +72,20 @@ class PixtralVisionAddOn(BaseVisionAddOn):
         if pixel_values.ndim == 3:
             pixel_values = pixel_values[None, ...]
 
-        # Process image through vision tower
-        *_, hidden_states = self.vision_tower(
-            pixel_values.transpose(0, 2, 3, 1),
-            output_hidden_states=True,
-        )
-        # Select the hidden states from the desired layer
-        selected_image_feature = hidden_states[self.config.vision_feature_layer]
+        def compute_image_features() -> mx.array:
+            *_, hidden_states = self.vision_tower(
+                pixel_values.transpose(0, 2, 3, 1),
+                output_hidden_states=True,
+            )
+            # Select the hidden states from the desired layer
+            selected_image_feature = hidden_states[self.config.vision_feature_layer]
 
-        # Pass image features through the multi-modal projector
-        image_features = self.multi_modal_projector(selected_image_feature)
+            # Pass image features through the multi-modal projector
+            return self.multi_modal_projector(selected_image_feature)
+
+        image_features = self._vision_feature_memoizer.get_or_compute(
+            images_b64, max_size, compute_image_features
+        )
 
         # Insert special image tokens in the input_ids
         final_inputs_embeds = PixtralCombinedModel.merge_input_ids_with_image_features(

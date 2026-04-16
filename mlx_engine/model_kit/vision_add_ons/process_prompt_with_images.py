@@ -49,6 +49,8 @@ def common_process_prompt_with_images(
 
     if hasattr(config, "image_token_index"):
         image_token_index = config.image_token_index
+    elif hasattr(config, "image_token_id"):
+        image_token_index = config.image_token_id
     elif hasattr(config.vision_config, "image_token_id"):
         image_token_index = config.vision_config.image_token_id
     else:
