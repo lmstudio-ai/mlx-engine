@@ -49,8 +49,11 @@ def _trim_cache_for_snapshot(cache: List[Any]) -> List[Any]:
         if type(entry) is _KVCache:
             offset = entry.offset
             trimmed = copy.copy(entry)
-            trimmed.keys = mx.array(entry.keys[..., :offset, :])
-            trimmed.values = mx.array(entry.values[..., :offset, :])
+            # MLX slicing creates a lazy view, not a copy. mx.concatenate([slice], axis)
+            # forces a materialized independent copy so the snapshot won't be corrupted
+            # by later mutations to the live cache.
+            trimmed.keys = mx.concatenate([entry.keys[..., :offset, :]], axis=2)
+            trimmed.values = mx.concatenate([entry.values[..., :offset, :]], axis=2)
             result.append(trimmed)
         else:
             result.append(copy.deepcopy(entry))

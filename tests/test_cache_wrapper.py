@@ -1,12 +1,14 @@
-from contextlib import nullcontext
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import mlx.core as mx
+
 from mlx_engine.cache_wrapper import (
-    CacheWrapper,
     DEFAULT_CHECKPOINT_TAIL_TOKENS,
+    CacheWrapper,
     StopPromptProcessing,
+    _trim_cache_for_snapshot,
 )
 from mlx_engine.generate import load_model, tokenize
 from tests.shared import CancellingReporter, RecordingReporter, model_getter
@@ -340,6 +342,88 @@ class TestCacheWrapper(unittest.TestCase):
         ):
             _, reporter = self._run_update_cache(session, prompt)
         self.assertEqual(reporter.events[0]["cached_tokens"], 0)
+
+
+class TestTrimCacheForSnapshot(unittest.TestCase):
+    def _make_real_kv_entry(self, buffer_size: int = 256, offset: int = 10) -> object:
+        """Create a real KVCache entry with known buffer and offset."""
+        from mlx_lm.models.cache import KVCache as _KVCache
+
+        entry = _KVCache()
+        B, n_heads, dim = 1, 8, 64
+        entry.keys = mx.zeros((B, n_heads, buffer_size, dim), dtype=mx.float32)
+        entry.values = mx.zeros((B, n_heads, buffer_size, dim), dtype=mx.float32)
+        entry.offset = offset
+        return entry
+
+    def test_snapshot_stores_trimmed_size_not_full_buffer(self):
+        """Snapshot of a KVCache should store only the used portion, not the full buffer."""
+        entry = self._make_real_kv_entry(buffer_size=256, offset=10)
+        cache = [entry]
+
+        snapshot = _trim_cache_for_snapshot(cache)
+
+        self.assertEqual(len(snapshot), 1)
+        trimmed_entry = snapshot[0]
+        # The snapshot keys/values should only cover the offset range
+        self.assertEqual(trimmed_entry.keys.shape[2], 10)
+        self.assertEqual(trimmed_entry.values.shape[2], 10)
+        # Full buffer was 256, snapshot is 10 — memory reduced ~25x
+        self.assertLess(trimmed_entry.nbytes, entry.nbytes)
+
+    def test_snapshot_tensors_are_independent_from_live_cache(self):
+        """Modifying live cache must not affect stored snapshot (P1 fix)."""
+        entry = self._make_real_kv_entry(buffer_size=256, offset=10)
+        cache = [entry]
+
+        # Write a known pattern into the used portion
+        entry.keys[0, 0, :5, 0] = mx.array([1.0, 2.0, 3.0, 4.0, 5.0])
+
+        snapshot = _trim_cache_for_snapshot(cache)
+        snapshot_keys = snapshot[0].keys
+
+        # Mutate the live cache
+        entry.keys[0, 0, :5, 0] = mx.array([99.0, 99.0, 99.0, 99.0, 99.0])
+
+        # Snapshot should be unchanged — evaluate before asserting
+        mx.eval(snapshot_keys)
+        result = snapshot_keys[0, 0, :5, 0]
+        mx.eval(result)
+        self.assertTrue(
+            bool(mx.array_equal(result, mx.array([1.0, 2.0, 3.0, 4.0, 5.0])))
+        )
+
+    def test_non_kv_cache_entries_are_deepcopied(self):
+        """Non-KVCache entries should still use full deepcopy."""
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+        fake.offset = 5
+        cache = [fake]
+
+        snapshot = _trim_cache_for_snapshot(cache)
+
+        self.assertIsNot(snapshot[0], fake)
+
+    def test_zero_offset_produces_empty_tensors(self):
+        """A cache with offset=0 should produce empty tensors in the snapshot."""
+        entry = self._make_real_kv_entry(buffer_size=256, offset=0)
+        cache = [entry]
+
+        snapshot = _trim_cache_for_snapshot(cache)
+
+        self.assertEqual(snapshot[0].keys.shape[2], 0)
+        self.assertEqual(snapshot[0].values.shape[2], 0)
+
+    def test_full_buffer_snapshot_does_not_trim(self):
+        """When offset == buffer_size, no trimming should occur."""
+        entry = self._make_real_kv_entry(buffer_size=256, offset=256)
+        cache = [entry]
+
+        snapshot = _trim_cache_for_snapshot(cache)
+
+        self.assertEqual(snapshot[0].keys.shape[2], 256)
+        self.assertEqual(snapshot[0].values.shape[2], 256)
 
 
 if __name__ == "__main__":
