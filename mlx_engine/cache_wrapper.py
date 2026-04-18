@@ -11,6 +11,7 @@ from mlx_lm.models.cache import (
     make_prompt_cache,
     trim_prompt_cache,
 )
+from mlx_lm.models.cache import KVCache as _KVCache
 
 from mlx_engine.utils.prompt_progress_reporter import (
     PromptProgressReporter,
@@ -26,6 +27,31 @@ PROMPT_PROCESSING_CHUNK_SIZE = 2048
 DEFAULT_CHECKPOINT_TAIL_TOKENS = 11
 
 logger = logging.getLogger(__name__)
+
+
+def _trim_cache_for_snapshot(cache: List[Any]) -> List[Any]:
+    """Return a copy of the cache with KVCache buffers trimmed to actual offset.
+
+    KVCache buffers grow in steps of 256 and never shrink. copy.deepcopy on a
+    KVCache copies the full underlying buffers even when only a fraction is used.
+    This function creates trimmed copies so only the used portion is stored in the
+    LRU history, dramatically reducing memory for long-context workloads.
+
+    RotatingKVCache and other bounded caches are copied as-is since their buffers
+    are already bounded by max_size.
+    """
+    result = []
+    for entry in cache:
+        if type(entry) is _KVCache:
+            # Trim to actual offset to avoid copying unused buffer space.
+            trimmed = copy.deepcopy(entry)
+            offset = entry.offset
+            trimmed.keys = entry.keys[..., :offset, :]
+            trimmed.values = entry.values[..., :offset, :]
+            result.append(trimmed)
+        else:
+            result.append(copy.deepcopy(entry))
+    return result
 
 
 def validate_prefill_step_size(prefill_step_size: Optional[int] = None) -> int:
@@ -104,7 +130,7 @@ class CacheWrapper:
         self._history.insert_cache(
             self._history_key,
             tokens.tolist(),
-            copy.deepcopy(cache),
+            _trim_cache_for_snapshot(cache),
             cache_type=cache_type,
         )
 
