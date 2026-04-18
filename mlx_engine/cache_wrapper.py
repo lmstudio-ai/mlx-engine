@@ -37,17 +37,20 @@ def _trim_cache_for_snapshot(cache: List[Any]) -> List[Any]:
     This function creates trimmed copies so only the used portion is stored in the
     LRU history, dramatically reducing memory for long-context workloads.
 
+    Uses a shallow copy of the KVCache object plus explicit copies of the sliced
+    tensor data to avoid both full-buffer deepcopy cost and shared storage with
+    the live cache.
+
     RotatingKVCache and other bounded caches are copied as-is since their buffers
     are already bounded by max_size.
     """
     result = []
     for entry in cache:
         if type(entry) is _KVCache:
-            # Trim to actual offset to avoid copying unused buffer space.
-            trimmed = copy.deepcopy(entry)
             offset = entry.offset
-            trimmed.keys = entry.keys[..., :offset, :]
-            trimmed.values = entry.values[..., :offset, :]
+            trimmed = copy.copy(entry)
+            trimmed.keys = mx.array(entry.keys[..., :offset, :])
+            trimmed.values = mx.array(entry.values[..., :offset, :])
             result.append(trimmed)
         else:
             result.append(copy.deepcopy(entry))
