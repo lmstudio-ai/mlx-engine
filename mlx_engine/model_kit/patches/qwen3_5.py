@@ -10,13 +10,13 @@ This patch adds a dual code path to each decoder layer, selected by position_ids
 - Text-only (position_ids=None): uses the original mlx-lm modules (Qwen3NextAttention
   with nn.RoPE, GatedDeltaNet with _precise_swiglu) — bit-identical to unpatched mlx-lm.
 - Vision (position_ids provided): mirrors mlx-vlm's computation (MRoPE attention,
-  GatedDeltaNet with bfloat16 swiglu) — bit-identical to native mlx-vlm.
+  GatedDeltaNet with the shared norm/output path) — bit-identical to native mlx-vlm.
 
 Both paths read weights from the same modules; no weight duplication.
 
-Implementation inspired by:
-  mlx-lm @ 564281f79328df07c4997b3a6ca00bd929381287
-  mlx-vlm @ 822a843941ea35ddee2849fb0633a80eac1d1d94
+Reference implementations:
+  https://github.com/ml-explore/mlx-lm/blob/aa4f880/mlx_lm/models/qwen3_5.py#L86-L206
+  https://github.com/Blaizzy/mlx-vlm/blob/58e2435/mlx_vlm/models/qwen3_5/language.py#L92-L356
 """
 
 from typing import Any, Optional
@@ -33,7 +33,6 @@ from mlx_lm.models.base import (
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.activations import swiglu
 from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_vlm.models.qwen3_5.language import (
     Qwen3_5RotaryEmbedding,
@@ -216,13 +215,14 @@ class PatchedDecoderLayer(DecoderLayer):
 
         if cache is not None:
             cache[1] = state
+            # Follow mlx-vlm cache advance logic (conditional cache.advance call)
+            # ref: https://github.com/Blaizzy/mlx-vlm/blob/58e2435/mlx_vlm/models/qwen3_5/language.py#L350-L353
+            # mlx-lm is not conditional
+            # ref: https://github.com/ml-explore/mlx-lm/blob/aa4f880/mlx_lm/models/qwen3_5.py#L196-L198
+            if hasattr(cache, "advance"):
+                cache.advance(S)
 
-        # mlx-vlm uses swiglu in bfloat16; mlx-lm's RMSNormGated uses
-        # _precise_swiglu which upcasts to float32. We follow mlx-vlm here
-        # to produce bit-identical output.
-        norm = linear.norm
-        x = mx.fast.rms_norm(out, norm.weight, norm.eps)
-        out = swiglu(z, x)
+        out = linear.norm(out, z)
         return linear.out_proj(out.reshape(B, S, -1))
 
 
