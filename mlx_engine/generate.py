@@ -4,6 +4,10 @@ from mlx_engine.model_kit.batched_model_kit import (
     BatchedGenerationResponse,
     BatchedModelKit,
 )
+from mlx_engine.model_kit.batched_vision_model_kit import (
+    BatchedVisionModelKit,
+    is_mlx_vlm_batched_vision_enabled,
+)
 from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
 from typing import Iterator, List, Optional
 import json
@@ -129,7 +133,7 @@ def load_model(
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
     prefill_step_size: Optional[int] = None,
-) -> ModelKit | VisionModelKit:
+) -> ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit:
     """
     Load a language model or vision-language model from the specified path.
 
@@ -151,9 +155,11 @@ def load_model(
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
 
     Returns:
-        ModelKit | VisionModelKit: An initialized model instance:
+        ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit: An initialized model instance:
             - ModelKit: for text-only models and vision models with vision add-on support
             - VisionModelKit: for vision models that are not yet supported by ModelKit
+            - BatchedModelKit: for text-only continuous batching
+            - BatchedVisionModelKit: for feature-flagged mlx-vlm continuous batching
 
     Raises:
         FileNotFoundError: If config.json is not found in the specified model path
@@ -177,10 +183,23 @@ def load_model(
 
     # Determine which model kit to use based on model capabilities and configuration.
     # The decision tree is:
-    # 1. VisionModelKit: for vision models not yet supported by ModelKit's vision implementation
-    # 2. BatchedModelKit: for models that support continuous batching (can process multiple requests concurrently)
-    # 3. ModelKit: fallback for all other cases (sequential processing)
-    if "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
+    # 1. BatchedVisionModelKit: feature-flagged mlx-vlm continuous batching for VLMs
+    # 2. VisionModelKit: for vision models not yet supported by ModelKit's vision implementation
+    # 3. BatchedModelKit: for models that support continuous batching (can process multiple requests concurrently)
+    # 4. ModelKit: fallback for all other cases (sequential processing)
+    if "vision_config" in config_json and is_mlx_vlm_batched_vision_enabled():
+        if any([kv_bits, kv_group_size, quantized_kv_start]):
+            raise ValueError(
+                "The mlx-vlm batched vision path does not support KV cache quantization yet"
+            )
+        model_kit = BatchedVisionModelKit(
+            model_path,
+            prefill_step_size=prefill_step_size,
+            vocab_only=vocab_only,
+            max_seq_nums=max_seq_nums,
+            trust_remote_code=trust_remote_code,
+        )
+    elif "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
         model_type
     ):
         if any([kv_bits, kv_group_size, quantized_kv_start]):
@@ -265,7 +284,8 @@ def load_model(
 
 
 def load_draft_model(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit, path: str | Path
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    path: str | Path,
 ) -> None:
     if not is_speculative_decoding_supported(model_kit):
         raise SpeculativeDecodingNotSupportedError(
@@ -275,7 +295,8 @@ def load_draft_model(
 
 
 def is_draft_model_compatible(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit, path: str | Path
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    path: str | Path,
 ) -> bool:
     if not is_speculative_decoding_supported(model_kit):
         return False
@@ -283,7 +304,7 @@ def is_draft_model_compatible(
 
 
 def unload_draft_model(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit,
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
 ) -> None:
     if not is_speculative_decoding_supported(model_kit):
         return
@@ -291,7 +312,7 @@ def unload_draft_model(
 
 
 def create_generator(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit,
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
     prompt_tokens: List[int],
     **kwargs,
 ) -> Iterator[GenerationResult]:
@@ -345,7 +366,7 @@ def create_generator(
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
-    if isinstance(model_kit, BatchedModelKit):
+    if isinstance(model_kit, (BatchedModelKit, BatchedVisionModelKit)):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
@@ -606,7 +627,7 @@ def _sequential_generation(
 
 
 def _batched_generation(
-    model_kit: BatchedModelKit,
+    model_kit: BatchedModelKit | BatchedVisionModelKit,
     prompt_tokens: List[int],
     *,
     prompt_progress_reporter: Optional[PromptProgressReporter] = None,
@@ -639,41 +660,13 @@ def _batched_generation(
     if prompt_progress_reporter is None:
         prompt_progress_reporter = DefaultPromptProgressReporter()
 
-    # Set up repetition penalty
-    repetition_penalty_kwargs = setup_repetition_penalty(
-        repetition_penalty, repetition_context_size
-    )
-
-    # Setup logits processors
     tokenizer = model_kit.tokenizer
-    logits_processors = setup_logits_processors(
-        repetition_penalty,
-        repetition_penalty_kwargs,
-        prompt_tokens,
-        input_tokens,
-        None,
-        tokenizer,
-    )
-
-    # Set up sampler
-    sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
-
     # Validate top_logprobs
     top_logprobs = validate_top_logprobs(top_logprobs)
 
     # Keep track of tokens buffered by detokenizer to yield accurate generation results
     token_buffer: List[Token] = []
     top_logprobs_buffer: List[List[Token]] = []
-
-    # Add outlines logits processor if json_schema is provided
-    if json_schema is not None:
-        logits_processors.append(
-            JSONLogitsProcessor(
-                json_schema,
-                OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
-                tensor_library_name="mlx",
-            )
-        )
 
     # Set up stop string processor if non-empty stop_strings are provided
     stop_string_processor = create_stop_string_processor(stop_strings, tokenizer)
@@ -683,15 +676,76 @@ def _batched_generation(
         prompt_progress_reporter, emit_begin=True
     )
 
-    stream = model_kit.generate(
-        prompt_tokens=input_tokens,
-        request_id=request_id,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=logits_processors,
-        prompt_progress_callback=mlx_lm_callback,
-        top_logprobs=top_logprobs,
-    )
+    if isinstance(model_kit, BatchedVisionModelKit):
+        if repetition_penalty not in (None, 0, 0.0):
+            raise ValueError(
+                "The mlx-vlm batched vision path does not support repetition_penalty yet"
+            )
+        if json_schema is not None:
+            raise ValueError(
+                "The mlx-vlm batched vision path does not support json_schema yet"
+            )
+        if speculative_decoding_toggle not in (None, False):
+            raise ValueError(
+                "The mlx-vlm batched vision path does not support speculative decoding"
+            )
+        if num_draft_tokens is not None:
+            raise ValueError(
+                "The mlx-vlm batched vision path does not support speculative decoding"
+            )
+
+        stream = model_kit.generate(
+            prompt_tokens=input_tokens,
+            request_id=request_id,
+            images_b64=images_b64,
+            max_image_size=max_image_size,
+            max_tokens=max_tokens,
+            prompt_progress_callback=mlx_lm_callback,
+            top_logprobs=top_logprobs,
+            temp=temp,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            min_tokens_to_keep=min_tokens_to_keep,
+        )
+    else:
+        # Set up repetition penalty
+        repetition_penalty_kwargs = setup_repetition_penalty(
+            repetition_penalty, repetition_context_size
+        )
+
+        # Setup logits processors
+        logits_processors = setup_logits_processors(
+            repetition_penalty,
+            repetition_penalty_kwargs,
+            prompt_tokens,
+            input_tokens,
+            None,
+            tokenizer,
+        )
+
+        # Set up sampler
+        sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
+
+        # Add outlines logits processor if json_schema is provided
+        if json_schema is not None:
+            logits_processors.append(
+                JSONLogitsProcessor(
+                    json_schema,
+                    OutlinesTransformerTokenizer(model_kit.tokenizer._tokenizer),
+                    tensor_library_name="mlx",
+                )
+            )
+
+        stream = model_kit.generate(
+            prompt_tokens=input_tokens,
+            request_id=request_id,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            prompt_progress_callback=mlx_lm_callback,
+            top_logprobs=top_logprobs,
+        )
 
     while True:
         try:
@@ -772,7 +826,8 @@ def _batched_generation(
 
 
 def stop_generation(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit, request_id: str
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    request_id: str,
 ):
     """
     Register stop request based off of request_id
@@ -781,7 +836,7 @@ def stop_generation(
         logger.error("request_id cannot be empty in stop request")
         return
 
-    if isinstance(model_kit, BatchedModelKit):
+    if isinstance(model_kit, (BatchedModelKit, BatchedVisionModelKit)):
         model_kit.remove(request_id)
         return
 
@@ -789,17 +844,22 @@ def stop_generation(
         logger.warning(f"Could not cancel {request_id=} (request not found)")
 
 
-def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit):
+def unload(
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+):
     model_kit.shutdown()
 
 
-def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
+def tokenize(
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    prompt: str,
+) -> List[int]:
     """
     Convert a text prompt into a list of token IDs using the model's tokenizer.
 
     Args:
-        model_kit (ModelKit | VisionModelKit): The model kit instance containing the tokenizer
-            to use for tokenization
+        model_kit (ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit):
+            The model kit instance containing the tokenizer to use for tokenization
         prompt (str): The raw text prompt to be tokenized
 
     Returns:
