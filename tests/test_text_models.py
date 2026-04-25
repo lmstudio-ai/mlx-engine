@@ -61,6 +61,39 @@ The quick brown fox jumped over the lazy dog. The quick brown fox jumped over th
             "The quick brown fox jumped over the lazy dog.", generated_text
         )
 
+    def test_presence_penalty_applies(self):
+        model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
+        model_kit = load_model(model_path=model_path, max_kv_size=4096)
+        self.addCleanup(lambda *_: unload(model_kit))
+        prompt = """<|im_start|>user
+The quick brown fox jumped over the lazy dog. The quick brown fox jumped over the lazy dog. The quick brown fox jumped over the lazy dog. Repeat what I said.
+<|im_end|>\n<|im_start|>assistant\n"""
+        prompt_tokens = tokenize(model_kit, prompt)
+        generated_text = ""
+
+        def generate() -> None:
+            nonlocal generated_text
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                presence_penalty=2.0,  # strong penalty to prevent repetition
+                presence_context_size=64,
+                seed=0,
+                max_tokens=20,
+                temp=0.0,
+            ):
+                print(result.text, end="", flush=True)
+                generated_text += result.text
+                if result.stop_condition:
+                    break
+            print("\n", flush=True)
+
+        generate()
+        self.assertGreater(len(generated_text), 0, "Model failed to generate any text")
+        self.assertNotIn(
+            "The quick brown fox jumped over the lazy dog.", generated_text
+        )
+
     def test_prompt_caching_happy_path_qwen2_5(self):
         model_path = model_getter("lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit")
         model_kit = load_model(model_path=model_path, max_kv_size=20000)
