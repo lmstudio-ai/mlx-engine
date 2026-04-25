@@ -6,11 +6,11 @@ logits processor configuration, and stop condition detection.
 """
 
 from typing import Optional, List, Tuple
+
+from mlx_lm.sample_utils import make_presence_penalty, make_repetition_penalty, make_sampler
 from mlx_lm.tokenizer_utils import TokenizerWrapper
-from mlx_lm.sample_utils import make_sampler
-from mlx_engine.processors.repetition_penalty_processor import (
-    RepetitionPenaltyProcessor,
-)
+
+from mlx_engine.processors.token_penalty_processor import TokenPenaltyProcessor
 from mlx_engine.stop_string_processor import (
     StopStringProcessor,
     StopStringProcessorResult,
@@ -22,38 +22,41 @@ from outlines.processors.structured import JSONLogitsProcessor
 MAX_TOP_LOGPROBS = 10
 
 
-def setup_repetition_penalty(
-    repetition_penalty: Optional[float], repetition_context_size: Optional[int]
-) -> dict:
-    repetition_penalty_kwargs = {}
-    if repetition_penalty is not None:
-        repetition_penalty_kwargs["repetition_penalty"] = repetition_penalty
-        if repetition_context_size is not None:
-            repetition_penalty_kwargs["repetition_context_size"] = (
-                repetition_context_size
-            )
-    return repetition_penalty_kwargs
-
-
 def setup_logits_processors(
     repetition_penalty: Optional[float],
-    repetition_penalty_kwargs: dict,
+    repetition_context_size: Optional[int],
+    presence_penalty: Optional[float],
+    presence_context_size: Optional[int],
     prompt_tokens: List[int],
     input_tokens: List[int],
     json_schema: Optional[str],
     tokenizer: TokenizerWrapper,
 ) -> List:
     logits_processors = []
+    cached_tokens = []
+
+    if repetition_penalty or presence_penalty:
+        cached_tokens = (
+            prompt_tokens[: -len(input_tokens)] if len(input_tokens) > 0 else prompt_tokens
+        )
 
     if repetition_penalty and repetition_penalty != 0.0:
-        cached_tokens = (
-            prompt_tokens[: -len(input_tokens)]
-            if len(input_tokens) > 0
-            else prompt_tokens
-        )
+        context_size = repetition_context_size if repetition_context_size is not None else 20
         logits_processors.append(
-            RepetitionPenaltyProcessor(
-                token_history=cached_tokens, **repetition_penalty_kwargs
+            TokenPenaltyProcessor(
+                make_repetition_penalty(repetition_penalty, context_size),
+                cached_tokens,
+                context_size,
+            )
+        )
+
+    if presence_penalty and presence_penalty != 0.0:
+        context_size = presence_context_size if presence_context_size is not None else 20
+        logits_processors.append(
+            TokenPenaltyProcessor(
+                make_presence_penalty(presence_penalty, context_size),
+                cached_tokens,
+                context_size,
             )
         )
 

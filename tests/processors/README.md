@@ -5,24 +5,18 @@ For example, we can add a `DumpLogitsProcessor` that writes the logits on each g
 ```diff
 --- a/mlx_engine/generate.py
 +++ b/mlx_engine/generate.py
-@@ -12,6 +12,9 @@ from mlx_engine.processors.outlines_logits_processor import OutlinesLogitsProces
- from mlx_engine.processors.repetition_penalty_processor import (
-     RepetitionPenaltyProcessor,
- )
+@@ -51,6 +51,9 @@ from mlx_engine.utils.generation_helpers import (
 +from tests.processors.dump_logits_processor import (
 +    DumpLogitsProcessor,
 +)
- from mlx_engine.utils.token import Token
- from mlx_engine.utils.eot_tokens import get_eot_token_ids
- from mlx_engine.utils.top_logprobs import summarize_top_logprobs
-@@ -236,6 +239,9 @@ def create_generator(
-                 token_history=cached_tokens, **repetition_penalty_kwargs
-             )
+ from mlx_engine.utils.generation_helpers import (
+     setup_logits_processors,
+     create_sampler,
+@@ -480,6 +480,7 @@ def _sequential_generation(
          )
-+    generate_args["logits_processors"].append(
-+        DumpLogitsProcessor(model_kit.tokenizer.vocab, Path("logits-dump"))
-+    )
 
-     # Set up sampler
-     generate_args["sampler"] = make_sampler(
++        logits_processors.append(DumpLogitsProcessor(model_kit.tokenizer.vocab, Path("logits-dump")))
+         # Set up sampler
+         generate_args["sampler"] = create_sampler(
+             temp, top_p, min_p, min_tokens_to_keep, top_k
 ```

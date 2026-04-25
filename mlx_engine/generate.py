@@ -49,7 +49,6 @@ from mlx_engine.utils.prompt_progress_reporter import (
     StopPromptProcessing,
 )
 from mlx_engine.utils.generation_helpers import (
-    setup_repetition_penalty,
     setup_logits_processors,
     create_sampler,
     validate_top_logprobs,
@@ -320,6 +319,10 @@ def create_generator(
             discourage repetition
         repetition_context_size (Optional[int]): Number of previous tokens to consider for
             repetition penalty. Defaults to 20
+        presence_penalty (Optional[float]): Additive penalty applied to tokens present in the
+            context window, reducing token repetition
+        presence_context_size (Optional[int]): Number of recent tokens to consider for the
+            presence penalty. Defaults to 20
         temp (Optional[float]): Temperature for sampling. Higher values increase randomness
         top_p (Optional[float]): Top-p (nucleus) sampling parameter
         top_k (Optional[int]): Top-k sampling parameter
@@ -402,6 +405,8 @@ def _sequential_generation(
     top_logprobs: Optional[int] = None,
     repetition_penalty: Optional[float] = None,
     repetition_context_size: Optional[int] = 20,
+    presence_penalty: Optional[float] = None,
+    presence_context_size: Optional[int] = 20,
     temp: Optional[float] = None,
     top_p: Optional[float] = None,
     top_k: Optional[int] = None,
@@ -437,11 +442,6 @@ def _sequential_generation(
                 if value is not None:
                     generate_args[attr] = value
 
-        # Set up repetition penalty
-        repetition_penalty_kwargs = setup_repetition_penalty(
-            repetition_penalty, repetition_context_size
-        )
-
         # Set up speculative decoding
         draft_model = determine_draft_model_for_generation(
             model_kit, speculative_decoding_toggle
@@ -470,7 +470,9 @@ def _sequential_generation(
         # Setup logits processors
         logits_processors = setup_logits_processors(
             repetition_penalty,
-            repetition_penalty_kwargs,
+            repetition_context_size,
+            presence_penalty,
+            presence_context_size,
             prompt_tokens,
             input_tokens,
             None,
@@ -616,6 +618,8 @@ def _batched_generation(
     top_logprobs: Optional[int] = None,
     repetition_penalty: Optional[float] = None,
     repetition_context_size: Optional[int] = 20,
+    presence_penalty: Optional[float] = None,
+    presence_context_size: Optional[int] = 20,
     temp: Optional[float] = None,
     top_p: Optional[float] = None,
     top_k: Optional[int] = None,
@@ -639,16 +643,13 @@ def _batched_generation(
     if prompt_progress_reporter is None:
         prompt_progress_reporter = DefaultPromptProgressReporter()
 
-    # Set up repetition penalty
-    repetition_penalty_kwargs = setup_repetition_penalty(
-        repetition_penalty, repetition_context_size
-    )
-
     # Setup logits processors
     tokenizer = model_kit.tokenizer
     logits_processors = setup_logits_processors(
         repetition_penalty,
-        repetition_penalty_kwargs,
+        repetition_context_size,
+        presence_penalty,
+        presence_context_size,
         prompt_tokens,
         input_tokens,
         None,
