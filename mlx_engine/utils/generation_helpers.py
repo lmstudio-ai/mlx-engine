@@ -41,20 +41,22 @@ def setup_logits_processors(
         )
 
     if repetition_penalty and repetition_penalty != 0.0:
+        context_size = repetition_context_size if repetition_context_size is not None else 20
         logits_processors.append(
             TokenPenaltyProcessor(
-                make_repetition_penalty(repetition_penalty, repetition_context_size or 20),
+                make_repetition_penalty(repetition_penalty, context_size),
                 cached_tokens,
-                repetition_context_size or 20,
+                context_size,
             )
         )
 
     if presence_penalty and presence_penalty != 0.0:
+        context_size = presence_context_size if presence_context_size is not None else 20
         logits_processors.append(
             TokenPenaltyProcessor(
-                make_presence_penalty(presence_penalty, presence_context_size or 20),
+                make_presence_penalty(presence_penalty, context_size),
                 cached_tokens,
-                presence_context_size or 20,
+                context_size,
             )
         )
 
