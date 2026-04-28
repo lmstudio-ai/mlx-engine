@@ -4,7 +4,7 @@ import os
 import sys
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
 from queue import Empty as QueueEmpty
@@ -124,12 +124,23 @@ class _FailedRestore:
     error: Exception
 
 
+@dataclass
+class _SchedulerState:
+    batch_generator: Optional[LocalVlmBatchGenerator] = None
+    active: dict[int, dict] = field(default_factory=dict)
+    pending: list[_GenerationRequest] = field(default_factory=list)
+    ready: list[_PreparedInsert] = field(default_factory=list)
+    restoring: dict[str, _GenerationRequest] = field(default_factory=dict)
+    cancelled_restores: set[str] = field(default_factory=set)
+    current_sampling_key: Any = None
+
+
 class BatchedVisionModelKit:
     """
-    Feature-flagged VLM batching backend built on mlx-vlm's BatchGenerator.
+    Feature-flagged VLM batching backend built on a local mlx-vlm-style batcher.
 
     V1 deliberately keeps the scope narrow: a single worker thread owns the
-    mlx-vlm batcher and handles both text-only and basic image requests.
+    local VLM batcher and handles both text-only and basic image requests.
     """
 
     model = None
@@ -146,6 +157,8 @@ class BatchedVisionModelKit:
         max_seq_nums: Optional[int] = None,
         trust_remote_code: bool = False,
     ):
+        # External requests and internal scheduler events share one queue so
+        # restore completions wake the scheduler without a second polling path.
         self._requests = Queue()
         self._backend_exception = None
         self._generation_thread = None
@@ -157,7 +170,6 @@ class BatchedVisionModelKit:
         self._max_seq_nums = max_seq_nums if max_seq_nums and max_seq_nums > 0 else 1
         self._trust_remote_code = trust_remote_code
         self._background_job_queue = None if vocab_only else PriorityQueue()
-        self._prepared_requests = None if vocab_only else Queue()
         self._background_job_sequence = count()
         self._queued_save_jobs = 0
         self._queued_save_jobs_lock = Lock()
@@ -555,10 +567,10 @@ class BatchedVisionModelKit:
                 try:
                     prepared_insert = self._prepare_request_for_insert(job.request)
                 except Exception as exc:
-                    self._prepared_requests.put(_FailedRestore(job.request, exc))
+                    self._requests.put(_FailedRestore(job.request, exc))
                     continue
 
-                self._prepared_requests.put(prepared_insert)
+                self._requests.put(prepared_insert)
                 continue
 
             if isinstance(job, _SaveJob):
@@ -665,38 +677,33 @@ class BatchedVisionModelKit:
     def _cancel_request(
         self,
         request_id: str,
-        batch_generator: Optional[LocalVlmBatchGenerator],
-        active: dict[int, dict],
-        pending: list[_GenerationRequest],
-        restoring: dict[str, _GenerationRequest],
-        ready: list[_PreparedInsert],
-        cancelled_restores: set[str],
+        state: _SchedulerState,
     ) -> bool:
-        for i, request in enumerate(pending):
+        for i, request in enumerate(state.pending):
             if request.request_id == request_id:
-                pending.pop(i)
+                state.pending.pop(i)
                 request.rqueue.put(RequestCancelled())
                 return True
 
-        for i, prepared_insert in enumerate(ready):
+        for i, prepared_insert in enumerate(state.ready):
             if prepared_insert.request.request_id == request_id:
-                ready.pop(i)
+                state.ready.pop(i)
                 prepared_insert.request.rqueue.put(RequestCancelled())
                 return True
 
-        request = restoring.pop(request_id, None)
+        request = state.restoring.pop(request_id, None)
         if request is not None:
-            cancelled_restores.add(request_id)
+            state.cancelled_restores.add(request_id)
             request.rqueue.put(RequestCancelled())
             return True
 
-        for uid, result in list(active.items()):
+        for uid, result in list(state.active.items()):
             if result["request_id"] != request_id:
                 continue
-            if batch_generator is not None:
-                batch_generator.remove(uid)
+            if state.batch_generator is not None:
+                state.batch_generator.remove(uid)
             result["rqueue"].put(RequestCancelled())
-            del active[uid]
+            del state.active[uid]
             return True
 
         return False
@@ -750,131 +757,132 @@ class BatchedVisionModelKit:
             except QueueEmpty:
                 return items
 
-    def _drain_prepared_requests(
+    def _handle_prepared_event(
         self,
-        restoring: dict[str, _GenerationRequest],
-        ready: list[_PreparedInsert],
-        cancelled_restores: set[str],
+        item: _PreparedInsert | _FailedRestore,
+        state: _SchedulerState,
     ) -> None:
-        for item in self._drain_queue(self._prepared_requests, timeout=None):
-            request_id = item.request.request_id
-            restoring.pop(request_id, None)
+        request_id = item.request.request_id
+        state.restoring.pop(request_id, None)
 
-            if request_id in cancelled_restores:
-                cancelled_restores.discard(request_id)
-                continue
+        if request_id in state.cancelled_restores:
+            state.cancelled_restores.discard(request_id)
+            return
 
-            if isinstance(item, _FailedRestore):
-                item.request.rqueue.put(item.error)
-                continue
+        if isinstance(item, _FailedRestore):
+            item.request.rqueue.put(item.error)
+            return
 
-            ready.append(item)
+        state.ready.append(item)
 
     @staticmethod
-    def _reserved_slots(
-        active: dict[int, dict],
-        ready: list[_PreparedInsert],
-        restoring: dict[str, _GenerationRequest],
-    ) -> int:
-        return len(active) + len(ready) + len(restoring)
+    def _reserved_slots(state: _SchedulerState) -> int:
+        return len(state.active) + len(state.ready) + len(state.restoring)
 
-    def _generate(self):
-        batch_generator = None
-        active: dict[int, dict] = {}
-        pending: list[_GenerationRequest] = []
-        ready: list[_PreparedInsert] = []
-        restoring: dict[str, _GenerationRequest] = {}
-        cancelled_restores: set[str] = set()
-        current_sampling_key = None
-
-        while not self._shutdown.is_set():
-            timeout = None if active or ready or restoring else 0.1
-            for item in self._drain_incoming(timeout):
-                if isinstance(item, CancelGenerationRequest):
-                    if not self._cancel_request(
-                        item.request_id,
-                        batch_generator,
-                        active,
-                        pending,
-                        restoring,
-                        ready,
-                        cancelled_restores,
-                    ):
-                        logger.warning(f"Could not cancel request_id={item.request_id}")
-                    continue
-                pending.append(item)
-
-            self._drain_prepared_requests(restoring, ready, cancelled_restores)
-
-            if not active and not ready and not restoring and pending:
-                current_sampling_key = pending[0].sampling_key
-                if batch_generator is not None:
-                    batch_generator.close()
-                batch_generator = self._make_batch_generator(pending[0])
-
-            if batch_generator is not None and len(active) < self._max_seq_nums:
-                next_ready = []
-                for prepared_insert in ready:
-                    if len(active) < self._max_seq_nums:
-                        self._insert_prepared_request(
-                            batch_generator,
-                            prepared_insert,
-                            active,
-                        )
-                    else:
-                        next_ready.append(prepared_insert)
-                ready = next_ready
-
-            if (
-                batch_generator is not None
-                and self._reserved_slots(active, ready, restoring) < self._max_seq_nums
-            ):
-                next_pending = []
-                for request in pending:
-                    if (
-                        self._reserved_slots(active, ready, restoring)
-                        < self._max_seq_nums
-                        and request.sampling_key == current_sampling_key
-                    ):
-                        if self._request_needs_background_prepare(request):
-                            restoring[request.request_id] = request
-                            self._enqueue_background_job(
-                                _RESTORE_JOB_PRIORITY,
-                                _RestoreJob(request),
-                            )
-                        else:
-                            ready.append(self._prepare_request_for_insert(request))
-                    else:
-                        next_pending.append(request)
-                pending = next_pending
-
-            if not active or batch_generator is None:
+    def _drain_scheduler_events(self, state: _SchedulerState, timeout: float | None):
+        for item in self._drain_incoming(timeout):
+            if isinstance(item, CancelGenerationRequest):
+                if not self._cancel_request(item.request_id, state):
+                    logger.warning(f"Could not cancel request_id={item.request_id}")
                 continue
 
-            _, generation_responses = batch_generator.next()
-            for response in generation_responses:
-                result = active.get(response.uid)
-                if result is None:
-                    continue
+            if isinstance(item, (_PreparedInsert, _FailedRestore)):
+                self._handle_prepared_event(item, state)
+                continue
 
-                result["rqueue"].put(self._emit_response(result, response))
-                if response.finish_reason is not None:
-                    result["rqueue"].put(None)
-                    del active[response.uid]
+            state.pending.append(item)
 
-        if batch_generator is not None:
-            batch_generator.close()
+    def _ensure_batch_generator(self, state: _SchedulerState) -> None:
+        if state.active or state.ready or state.restoring or not state.pending:
+            return
 
-        for result in active.values():
+        state.current_sampling_key = state.pending[0].sampling_key
+        if state.batch_generator is not None:
+            state.batch_generator.close()
+        state.batch_generator = self._make_batch_generator(state.pending[0])
+
+    def _insert_ready_requests(self, state: _SchedulerState) -> None:
+        if state.batch_generator is None or len(state.active) >= self._max_seq_nums:
+            return
+
+        next_ready = []
+        for prepared_insert in state.ready:
+            if len(state.active) < self._max_seq_nums:
+                self._insert_prepared_request(
+                    state.batch_generator,
+                    prepared_insert,
+                    state.active,
+                )
+            else:
+                next_ready.append(prepared_insert)
+        state.ready = next_ready
+
+    def _admit_pending_requests(self, state: _SchedulerState) -> None:
+        if (
+            state.batch_generator is None
+            or self._reserved_slots(state) >= self._max_seq_nums
+        ):
+            return
+
+        next_pending = []
+        for request in state.pending:
+            if (
+                self._reserved_slots(state) < self._max_seq_nums
+                and request.sampling_key == state.current_sampling_key
+            ):
+                if self._request_needs_background_prepare(request):
+                    state.restoring[request.request_id] = request
+                    self._enqueue_background_job(
+                        _RESTORE_JOB_PRIORITY,
+                        _RestoreJob(request),
+                    )
+                else:
+                    state.ready.append(self._prepare_request_for_insert(request))
+            else:
+                next_pending.append(request)
+        state.pending = next_pending
+
+    def _step_generation(self, state: _SchedulerState) -> None:
+        if not state.active or state.batch_generator is None:
+            return
+
+        for response in state.batch_generator.next():
+            result = state.active.get(response.uid)
+            if result is None:
+                continue
+
+            result["rqueue"].put(self._emit_response(result, response))
+            if response.finish_reason is not None:
+                result["rqueue"].put(None)
+                del state.active[response.uid]
+
+    def _cancel_scheduler_state(self, state: _SchedulerState) -> None:
+        if state.batch_generator is not None:
+            state.batch_generator.close()
+
+        for result in state.active.values():
             result["rqueue"].put(RequestCancelled("Model shutdown requested"))
-        for request in pending:
+        for request in state.pending:
             request.rqueue.put(RequestCancelled("Model shutdown requested"))
-        for prepared_insert in ready:
+        for prepared_insert in state.ready:
             prepared_insert.request.rqueue.put(
                 RequestCancelled("Model shutdown requested")
             )
-        for request in restoring.values():
+        for request in state.restoring.values():
             request.rqueue.put(RequestCancelled("Model shutdown requested"))
+
+    def _generate(self):
+        state = _SchedulerState()
+
+        while not self._shutdown.is_set():
+            timeout = None if state.active or state.ready else 0.1
+            self._drain_scheduler_events(state, timeout)
+            self._ensure_batch_generator(state)
+            self._insert_ready_requests(state)
+            self._admit_pending_requests(state)
+            self._step_generation(state)
+
+        self._cancel_scheduler_state(state)
 
     def __del__(self):
         self.shutdown()
