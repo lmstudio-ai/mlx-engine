@@ -379,6 +379,7 @@ class PromptProcessingBatch:
         ] = None,
     ):
         self.model = model
+        self._language_model = getattr(model, "language_model", model)
         self.uids = uids
         self.max_tokens = max_tokens
         self.prefill_step_size = prefill_step_size
@@ -459,7 +460,7 @@ class PromptProcessingBatch:
             if 0 < boundary_delta < remaining_tokens:
                 n = min(n, boundary_delta)
 
-        self.model(
+        self._language_model(
             self._input_ids[:, :n],
             cache=self.prompt_cache,
             inputs_embeds=self._inputs_embeds[:, :n],
@@ -512,7 +513,7 @@ class PromptProcessingBatch:
                 )
 
     def generate(self, sampler, stop_criteria, top_logprobs_k=0) -> GenerationBatch:
-        output = self.model(
+        output = self._language_model(
             self._input_ids,
             cache=self.prompt_cache,
             inputs_embeds=self._inputs_embeds,
@@ -784,8 +785,13 @@ class BatchGenerator:
                 raise ValueError("inputs_embeds is required")
 
             batch_size = len(uids)
+            batch_major_kwargs = {"visual_pos_masks", "per_layer_inputs"}
             for key, value in merged_kwargs.items():
-                if isinstance(value, mx.array) and value.ndim > 0:
+                if (
+                    key in batch_major_kwargs
+                    and isinstance(value, mx.array)
+                    and value.ndim > 0
+                ):
                     merged_kwargs[key] = value[:batch_size]
 
             self._prompt_batch = PromptProcessingBatch(

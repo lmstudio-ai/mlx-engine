@@ -1,12 +1,29 @@
 from dataclasses import dataclass
 import hashlib
-import json
-from typing import Any, Optional
+from typing import Any, Final, Literal, Optional, TypeAlias
 
 
 # LMCache defaults to 256-token external chunks, and MLX KV caches allocate in
 # 256-token steps. This is a spill-cache chunk size, not vLLM's KV page size.
 DEFAULT_PREFIX_CHUNK_SIZE = 256
+RecordKind: TypeAlias = Literal["kv_delta", "rotating_delta", "state_checkpoint"]
+RECORD_KIND_KV_DELTA: Final[RecordKind] = "kv_delta"
+RECORD_KIND_ROTATING_DELTA: Final[RecordKind] = "rotating_delta"
+RECORD_KIND_STATE_CHECKPOINT: Final[RecordKind] = "state_checkpoint"
+RECORD_WRITE_ORDER: Final[tuple[RecordKind, ...]] = (
+    RECORD_KIND_KV_DELTA,
+    RECORD_KIND_ROTATING_DELTA,
+    RECORD_KIND_STATE_CHECKPOINT,
+)
+
+
+@dataclass
+class PromptImageSpan:
+    """End-exclusive token span for one image placeholder run in the prompt."""
+
+    start: int
+    end: int
+    image_hash: str
 
 
 @dataclass
@@ -16,29 +33,49 @@ class SpilledPromptState:
 
 
 @dataclass
-class PrefixCacheChunk:
+class PromptPrefixChunk:
+    """Logical identity for one reusable prompt-prefix chunk.
+
+    `key` is the rolling chunk hash. It includes prior chunks plus any image
+    hashes whose placeholder spans are inside this chunk, so appending a later
+    image does not invalidate earlier chunks. Physical safetensor blobs are
+    keyed separately with `make_record_key(key, record_kind)`.
+    `prefix_chunk_keys` is the ordered restore chain through this chunk.
+    """
+
     start: int
     end: int
     key: str
     chunk_hash: str
-    image_hashes: list[str]
+    prefix_chunk_keys: list[str]
 
 
 @dataclass
-class CachedPromptMetadata:
-    prompt_input_ids: list[int]
-    image_hashes: list[str]
-    min_reusable_prefix_len: int
+class PromptCacheChunkMetadata:
+    """Index metadata for one logical prompt-prefix chunk.
+
+    This describes the prefix identity, its ordered chunk ancestry, and the
+    per-layer payload kinds available for the chunk. Physical safetensor records
+    are tracked by `PromptCacheRecordMetadata`.
+    """
+
     chunk_start: int
     chunk_end: int
     chunk_hash: str
-    payload_kinds: list[str]
+    prefix_chunk_keys: list[str]
+    payload_kinds: list[RecordKind]
 
 
 @dataclass
-class CachedPromptRecordMetadata:
+class PromptCacheRecordMetadata:
+    """Index metadata for one physical safetensor record.
+
+    A record stores one payload kind for one chunk, usually covering one or more
+    cache layers. `window_size` is set only for rotating/sliding-window records.
+    """
+
     chunk_key: str
-    record_kind: str
+    record_kind: RecordKind
     layer_indices: list[int]
     window_size: Optional[int] = None
 
@@ -46,7 +83,7 @@ class CachedPromptRecordMetadata:
 @dataclass
 class CachedPrefixMatch:
     key: str
-    metadata: CachedPromptMetadata
+    metadata: PromptCacheChunkMetadata
     matched_prefix_len: int
     chunk_keys: list[str]
 
@@ -54,16 +91,18 @@ class CachedPrefixMatch:
 @dataclass
 class PreparedPromptRecord:
     key: str
-    metadata: CachedPromptRecordMetadata
+    metadata: PromptCacheRecordMetadata
     snapshot_arrays: dict[str, Any]
     snapshot_metadata: dict[str, str]
 
 
 @dataclass
-class PreparedPromptSnapshot:
+class PendingPromptCacheSave:
+    """Prepared cache-boundary save awaiting actor-thread disk commit/discard."""
+
     key: str
-    metadata: CachedPromptMetadata
-    serialized_rope_deltas: Optional[Any]
+    metadata: PromptCacheChunkMetadata
+    rope_deltas: Optional[Any]
     records: list[PreparedPromptRecord]
 
 
@@ -78,75 +117,75 @@ class VlmPromptSpillCacheStats:
     evictions: int
 
 
-def _make_chunk_key(chunk_start: int, chunk_end: int, chunk_hash: str) -> str:
-    payload = json.dumps(
-        {
-            "kind": "prompt_chunk",
-            "chunk_start": chunk_start,
-            "chunk_end": chunk_end,
-            "chunk_hash": chunk_hash,
-        },
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
+def make_record_key(chunk_key: str, record_kind: RecordKind) -> str:
+    return f"record:{chunk_key}:{record_kind}"
 
 
-def make_record_key(chunk_key: str, record_kind: str) -> str:
-    payload = json.dumps(
-        {
-            "kind": "prompt_record",
-            "chunk_key": chunk_key,
-            "record_kind": record_kind,
-        },
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
+def _chunk_image_markers(
+    image_spans: list[PromptImageSpan],
+    chunk_start: int,
+    chunk_end: int,
+) -> str:
+    markers = []
+    for span in image_spans:
+        if chunk_start <= span.start and span.end <= chunk_end:
+            markers.append(
+                f"{span.start - chunk_start}:{span.end - chunk_start}:{span.image_hash}"
+            )
+    return ",".join(markers)
 
 
 def build_prefix_cache_chunks(
     prompt_input_ids: list[int],
-    image_hashes: list[str],
-    min_reusable_prefix_len: int,
+    image_spans: list[PromptImageSpan],
     chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
-) -> list[PrefixCacheChunk]:
-    image_seed = hashlib.sha256(
-        json.dumps(image_hashes, separators=(",", ":")).encode()
-    ).hexdigest()
-    parent_hash = image_seed
+) -> list[PromptPrefixChunk]:
+    parent_hash = hashlib.sha256(b"prompt-prefix-v1").hexdigest()
     chunks = []
+    prefix_chunk_keys: list[str] = []
 
     prompt_len = len(prompt_input_ids)
     chunk_bounds = []
-    if min_reusable_prefix_len > 0:
-        # Vision prompts need the post-image boundary even when it is not aligned
-        # to the text chunk size. Plain text follows fixed full-size chunks.
-        chunk_bounds.append(min(min_reusable_prefix_len, prompt_len))
+    cursor = 0
+    for span in sorted(image_spans, key=lambda item: item.start):
+        while cursor + chunk_size <= span.start:
+            cursor += chunk_size
+            chunk_bounds.append(cursor)
+        if cursor < span.start:
+            # Image spans are atomic, but text before them can still be cached.
+            chunk_bounds.append(span.start)
+        if chunk_bounds and chunk_bounds[-1] == span.start:
+            cursor = span.start
+        cursor = max(cursor, span.end)
+        chunk_bounds.append(cursor)
 
-    chunk_start = chunk_bounds[-1] if chunk_bounds else 0
-    while chunk_start + chunk_size <= prompt_len:
-        chunk_start += chunk_size
-        chunk_bounds.append(chunk_start)
+    while cursor + chunk_size <= prompt_len:
+        cursor += chunk_size
+        chunk_bounds.append(cursor)
 
     previous_chunk_end = 0
     for chunk_end in chunk_bounds:
-        payload = json.dumps(
-            {
-                "parent_hash": parent_hash,
-                "chunk_tokens": prompt_input_ids[previous_chunk_end:chunk_end],
-            },
-            separators=(",", ":"),
+        if chunk_end <= previous_chunk_end:
+            continue
+        chunk_tokens = prompt_input_ids[previous_chunk_end:chunk_end]
+        image_markers = _chunk_image_markers(
+            image_spans,
+            previous_chunk_end,
+            chunk_end,
         )
+        payload = f"{parent_hash}|{','.join(map(str, chunk_tokens))}|{image_markers}"
         parent_hash = hashlib.sha256(payload.encode()).hexdigest()
-        if chunk_end >= min_reusable_prefix_len:
-            chunks.append(
-                PrefixCacheChunk(
-                    start=previous_chunk_end,
-                    end=chunk_end,
-                    key=_make_chunk_key(previous_chunk_end, chunk_end, parent_hash),
-                    chunk_hash=parent_hash,
-                    image_hashes=list(image_hashes),
-                )
+        chunk_key = parent_hash
+        prefix_chunk_keys.append(chunk_key)
+        chunks.append(
+            PromptPrefixChunk(
+                start=previous_chunk_end,
+                end=chunk_end,
+                key=chunk_key,
+                chunk_hash=parent_hash,
+                prefix_chunk_keys=list(prefix_chunk_keys),
             )
+        )
         previous_chunk_end = chunk_end
 
     return chunks
@@ -154,13 +193,11 @@ def build_prefix_cache_chunks(
 
 def build_prefix_cache_boundaries(
     prompt_input_ids: list[int],
-    image_hashes: list[str],
-    min_reusable_prefix_len: int,
+    image_spans: list[PromptImageSpan],
 ) -> list[int]:
     chunks = build_prefix_cache_chunks(
         prompt_input_ids,
-        image_hashes,
-        min_reusable_prefix_len,
+        image_spans,
     )
     max_reusable_prefix_len = len(prompt_input_ids) - 1
     return [chunk.end for chunk in chunks if 0 < chunk.end <= max_reusable_prefix_len]

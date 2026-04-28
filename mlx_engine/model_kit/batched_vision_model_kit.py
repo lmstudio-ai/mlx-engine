@@ -10,8 +10,8 @@ from pathlib import Path
 from queue import Empty as QueueEmpty
 from queue import PriorityQueue
 from queue import Queue
-from threading import Event, Lock, Thread
-from typing import Any, Iterable, Optional
+from threading import Event, Thread
+from typing import Any, Callable, Iterable, Optional
 
 import mlx.core as mx
 import mlx_lm
@@ -30,7 +30,8 @@ from mlx_engine.model_kit.vlm_prompt_cache_coordinator import (
     VlmPromptCacheCoordinator,
 )
 from mlx_engine.model_kit.vlm_prompt_cache_types import (
-    PreparedPromptSnapshot,
+    PendingPromptCacheSave,
+    PromptImageSpan,
 )
 from mlx_engine.model_kit.vlm_prompt_spill_cache import (
     VlmPromptSpillCache,
@@ -50,7 +51,6 @@ MLX_VLM_BATCHED_VISION_ENV_VAR = "MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION"
 MLX_VLM_BATCHED_VISION_DISK_CACHE_ENV_VAR = (
     "MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE"
 )
-DEFAULT_SPILL_SAVE_QUEUE_SIZE = 2
 _RESTORE_JOB_PRIORITY = 0
 _SAVE_JOB_PRIORITY = 1
 _SHUTDOWN_JOB_PRIORITY = -1
@@ -99,8 +99,7 @@ class _GenerationRequest:
 class _PreparedPrompt:
     prompt_input_ids: list[int]
     raw_inputs: Optional[dict[str, Any]]
-    image_hashes: list[str]
-    min_reusable_prefix_len: int
+    image_spans: list[PromptImageSpan]
 
 
 @dataclass
@@ -117,7 +116,7 @@ class _RestoreJob:
 
 @dataclass
 class _SaveJob:
-    prepared_snapshot: PreparedPromptSnapshot
+    pending_save: PendingPromptCacheSave
 
 
 @dataclass
@@ -135,6 +134,93 @@ class _SchedulerState:
     restoring: dict[str, _GenerationRequest] = field(default_factory=dict)
     cancelled_restores: set[str] = field(default_factory=set)
     current_sampling_key: Any = None
+
+
+class _PromptCacheActor:
+    """Runs background restore prep and blocking spill-cache commits."""
+
+    def __init__(
+        self,
+        *,
+        spill_cache: VlmPromptSpillCache | None,
+        scheduler_queue: Queue,
+        prepare_request: Callable[[_GenerationRequest], _PreparedInsert],
+    ):
+        self._spill_cache = spill_cache
+        self._scheduler_queue = scheduler_queue
+        self._prepare_request = prepare_request
+        self._queue = PriorityQueue()
+        self._sequence = count()
+        self._thread = None
+        self._closed = Event()
+
+    def start(self) -> None:
+        self._thread = Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        if self._thread is None:
+            self._close_spill_cache()
+            return
+        self._enqueue(_SHUTDOWN_JOB_PRIORITY, None)
+        self._thread.join()
+
+    def enqueue_restore(self, request: _GenerationRequest) -> None:
+        self._enqueue(_RESTORE_JOB_PRIORITY, _RestoreJob(request))
+
+    def enqueue_save(self, pending_save: PendingPromptCacheSave) -> None:
+        if self._spill_cache is None:
+            return
+        # The scheduler already prepared arrays; the actor handles disk I/O.
+        self._enqueue(_SAVE_JOB_PRIORITY, _SaveJob(pending_save))
+
+    def _enqueue(self, priority: int, job: Any) -> None:
+        self._queue.put((priority, next(self._sequence), job))
+
+    def _close_spill_cache(self) -> None:
+        if self._spill_cache is not None:
+            self._spill_cache.close()
+
+    def _discard_queued_jobs(self) -> None:
+        while True:
+            try:
+                _, _, job = self._queue.get_nowait()
+            except QueueEmpty:
+                return
+
+            if isinstance(job, _SaveJob) and self._spill_cache is not None:
+                # Dropped save jobs must release their pending-save marker.
+                self._spill_cache.discard_pending_save(job.pending_save)
+
+    def _run(self) -> None:
+        while True:
+            _, _, job = self._queue.get()
+            if job is None:
+                self._discard_queued_jobs()
+                self._close_spill_cache()
+                return
+
+            if isinstance(job, _RestoreJob):
+                try:
+                    prepared_insert = self._prepare_request(job.request)
+                except Exception as exc:
+                    self._scheduler_queue.put(_FailedRestore(job.request, exc))
+                    continue
+
+                self._scheduler_queue.put(prepared_insert)
+                continue
+
+            if isinstance(job, _SaveJob):
+                try:
+                    self._spill_cache.commit_pending_save(job.pending_save)
+                except Exception:
+                    logger.error(
+                        "Failed to commit pending prompt cache save:\n%s",
+                        traceback.format_exc(),
+                    )
 
 
 class BatchedVisionModelKit:
@@ -164,21 +250,12 @@ class BatchedVisionModelKit:
         self._requests = Queue()
         self._backend_exception = None
         self._generation_thread = None
-        self._background_job_thread = None
         self._shutdown = Event()
         self.prefill_step_size = prefill_step_size
         self.vocab_only = vocab_only
         self._model_path = model_path
         self._max_seq_nums = max_seq_nums if max_seq_nums and max_seq_nums > 0 else 1
         self._trust_remote_code = trust_remote_code
-        self._background_job_queue = None if vocab_only else PriorityQueue()
-        self._background_job_sequence = count()
-        self._queued_save_jobs = 0
-        self._queued_save_jobs_lock = Lock()
-        self._max_queued_save_jobs = max(
-            DEFAULT_SPILL_SAVE_QUEUE_SIZE,
-            self._max_seq_nums,
-        )
 
         fix_qwen2_5_vl_image_processor(model_path)
         fix_qwen2_vl_preprocessor(model_path)
@@ -197,7 +274,16 @@ class BatchedVisionModelKit:
             if self._prompt_spill_cache is None
             else VlmPromptCacheCoordinator(
                 self._prompt_spill_cache,
-                self._enqueue_prepared_spill_save,
+                self._enqueue_pending_spill_save,
+            )
+        )
+        self._background_actor = (
+            None
+            if vocab_only
+            else _PromptCacheActor(
+                spill_cache=self._prompt_spill_cache,
+                scheduler_queue=self._requests,
+                prepare_request=self._prepare_request_for_insert,
             )
         )
 
@@ -249,10 +335,7 @@ class BatchedVisionModelKit:
         if self.vocab_only:
             return
         mx.synchronize()
-        self._background_job_thread = Thread(
-            target=self._background_job_loop, daemon=True
-        )
-        self._background_job_thread.start()
+        self._background_actor.start()
         self._generation_thread = Thread(
             target=self._generate_with_exception_handling, daemon=True
         )
@@ -330,12 +413,8 @@ class BatchedVisionModelKit:
             self._shutdown.set()
             if self._generation_thread:
                 self._generation_thread.join()
-            if self._background_job_queue is not None:
-                self._enqueue_background_job(_SHUTDOWN_JOB_PRIORITY, None)
-            if self._background_job_thread:
-                self._background_job_thread.join()
-        if self._prompt_spill_cache is not None:
-            self._prompt_spill_cache.close()
+            if self._background_actor is not None:
+                self._background_actor.close()
 
     def is_shutdown(self) -> bool:
         return self._shutdown.is_set()
@@ -413,27 +492,39 @@ class BatchedVisionModelKit:
         digest.update(image.tobytes())
         return digest.hexdigest()
 
-    def _get_min_reusable_prefix_len(
+    def _get_image_spans(
         self, prompt_input_ids: list[int], image_hashes: list[str]
-    ) -> int:
+    ) -> list[PromptImageSpan]:
         if not image_hashes:
-            return 0
+            return []
 
         image_token_index = self._get_image_token_index()
         if image_token_index is None:
-            # Some processors do not expose a stable image sentinel.
-            return len(prompt_input_ids)
+            # Some processors do not expose a stable image sentinel; keep the
+            # cache correct by making the whole prompt image-dependent.
+            return [PromptImageSpan(0, len(prompt_input_ids), "|".join(image_hashes))]
 
-        last_image_token_index = -1
+        token_spans = []
+        span_start = None
         for i, token_id in enumerate(prompt_input_ids):
             if token_id == image_token_index:
-                last_image_token_index = i
+                if span_start is None:
+                    span_start = i
+            elif span_start is not None:
+                token_spans.append((span_start, i))
+                span_start = None
+        if span_start is not None:
+            token_spans.append((span_start, len(prompt_input_ids)))
 
-        if last_image_token_index == -1:
-            # Only reuse the full prompt when we cannot identify the image span.
-            return len(prompt_input_ids)
+        if len(token_spans) != len(image_hashes):
+            # Mismatched processor output is rare, but wrong image reuse is worse
+            # than missing a cache hit.
+            return [PromptImageSpan(0, len(prompt_input_ids), "|".join(image_hashes))]
 
-        return last_image_token_index + 1
+        return [
+            PromptImageSpan(start, end, image_hash)
+            for (start, end), image_hash in zip(token_spans, image_hashes)
+        ]
 
     def _prepare_prompt_inputs(self, request: _GenerationRequest) -> _PreparedPrompt:
         prompt_tokens = request.prompt_tokens
@@ -444,8 +535,7 @@ class BatchedVisionModelKit:
             return _PreparedPrompt(
                 prompt_input_ids=list(prompt_tokens),
                 raw_inputs=None,
-                image_hashes=[],
-                min_reusable_prefix_len=0,
+                image_spans=[],
             )
 
         # Keep image decode and prompt prep on the worker thread for now.
@@ -466,8 +556,7 @@ class BatchedVisionModelKit:
         return _PreparedPrompt(
             prompt_input_ids=prompt_input_ids,
             raw_inputs=raw_inputs,
-            image_hashes=image_hashes,
-            min_reusable_prefix_len=self._get_min_reusable_prefix_len(
+            image_spans=self._get_image_spans(
                 prompt_input_ids,
                 image_hashes,
             ),
@@ -503,9 +592,19 @@ class BatchedVisionModelKit:
 
     def _build_cached_prompt_kwargs(
         self,
-        prompt_input_ids: list[int],
+        prepared_prompt: _PreparedPrompt,
+        cached_prefix_len: int,
         rope_deltas: Optional[Any],
     ) -> dict:
+        prompt_input_ids = prepared_prompt.prompt_input_ids[cached_prefix_len:]
+        if prepared_prompt.raw_inputs is not None:
+            prompt_kwargs = self._build_prompt_kwargs(prepared_prompt)
+            # Keep full-prompt model side state, but prefill only the suffix.
+            prompt_kwargs["inputs_embeds"] = prompt_kwargs["inputs_embeds"][
+                :, cached_prefix_len:
+            ]
+            return prompt_kwargs
+
         input_ids = mx.array(prompt_input_ids, dtype=mx.int32)[None, :]
         embedding_output = self.model.get_input_embeddings(input_ids)
         prompt_kwargs = embedding_output.to_dict()
@@ -524,67 +623,10 @@ class BatchedVisionModelKit:
             return None
         return {"rope_deltas": rope_deltas}
 
-    def _begin_queued_save_job(self) -> bool:
-        with self._queued_save_jobs_lock:
-            if self._queued_save_jobs >= self._max_queued_save_jobs:
-                return False
-            self._queued_save_jobs += 1
-            return True
-
-    def _finish_queued_save_job(self) -> None:
-        with self._queued_save_jobs_lock:
-            if self._queued_save_jobs > 0:
-                self._queued_save_jobs -= 1
-
-    def _enqueue_background_job(self, priority: int, job: Any) -> None:
-        self._background_job_queue.put(
-            (priority, next(self._background_job_sequence), job)
-        )
-
-    def _enqueue_prepared_spill_save(
-        self, prepared_snapshot: PreparedPromptSnapshot
-    ) -> None:
-        if self._background_job_queue is None:
-            self._prompt_spill_cache.commit_prepared_save(prepared_snapshot)
+    def _enqueue_pending_spill_save(self, pending_save: PendingPromptCacheSave) -> None:
+        if self._background_actor is None:
             return
-
-        if not self._begin_queued_save_job():
-            # Spill snapshots are best-effort. If disk falls behind, keep token
-            # generation moving and drop this spill opportunity instead.
-            self._prompt_spill_cache.discard_prepared_save(prepared_snapshot)
-            return
-
-        self._enqueue_background_job(
-            _SAVE_JOB_PRIORITY,
-            _SaveJob(prepared_snapshot),
-        )
-
-    def _background_job_loop(self) -> None:
-        while True:
-            _, _, job = self._background_job_queue.get()
-            if job is None:
-                return
-
-            if isinstance(job, _RestoreJob):
-                try:
-                    prepared_insert = self._prepare_request_for_insert(job.request)
-                except Exception as exc:
-                    self._requests.put(_FailedRestore(job.request, exc))
-                    continue
-
-                self._requests.put(prepared_insert)
-                continue
-
-            if isinstance(job, _SaveJob):
-                try:
-                    self._prompt_spill_cache.commit_prepared_save(job.prepared_snapshot)
-                except Exception:
-                    logger.error(
-                        "Failed to commit prepared prompt spill snapshot:\n%s",
-                        traceback.format_exc(),
-                    )
-                finally:
-                    self._finish_queued_save_job()
+        self._background_actor.enqueue_save(pending_save)
 
     def _prepare_request_for_insert(
         self, request: _GenerationRequest
@@ -595,8 +637,7 @@ class BatchedVisionModelKit:
             if self._prompt_cache_coordinator is None
             else self._prompt_cache_coordinator.restore(
                 prompt_input_ids=prepared_prompt.prompt_input_ids,
-                image_hashes=prepared_prompt.image_hashes,
-                min_reusable_prefix_len=prepared_prompt.min_reusable_prefix_len,
+                image_spans=prepared_prompt.image_spans,
             )
         )
         return _PreparedInsert(
@@ -627,7 +668,8 @@ class BatchedVisionModelKit:
         if restored is not None:
             prompt_input_ids = full_prompt_input_ids[restored.cached_prefix_len :]
             prompt_kwargs = self._build_cached_prompt_kwargs(
-                prompt_input_ids,
+                prepared_prompt,
+                restored.cached_prefix_len,
                 restored.rope_deltas,
             )
             prompt_progress = restored.cached_prefix_len
@@ -644,8 +686,7 @@ class BatchedVisionModelKit:
         if self._prompt_cache_coordinator is not None:
             cache_boundaries = self._prompt_cache_coordinator.boundaries_after(
                 prompt_input_ids=full_prompt_input_ids,
-                image_hashes=prepared_prompt.image_hashes,
-                min_reusable_prefix_len=prepared_prompt.min_reusable_prefix_len,
+                image_spans=prepared_prompt.image_spans,
                 prompt_progress=prompt_progress,
             )
             if cache_boundaries:
@@ -653,8 +694,7 @@ class BatchedVisionModelKit:
                 insert_kwargs["prompt_cache_boundary_callback"] = (
                     self._prompt_cache_coordinator.make_boundary_callback(
                         prompt_input_ids=full_prompt_input_ids,
-                        image_hashes=prepared_prompt.image_hashes,
-                        min_reusable_prefix_len=prepared_prompt.min_reusable_prefix_len,
+                        image_spans=prepared_prompt.image_spans,
                     )
                 )
 
@@ -833,11 +873,11 @@ class BatchedVisionModelKit:
                 and request.sampling_key == state.current_sampling_key
             ):
                 if self._request_needs_background_prepare(request):
-                    state.restoring[request.request_id] = request
-                    self._enqueue_background_job(
-                        _RESTORE_JOB_PRIORITY,
-                        _RestoreJob(request),
-                    )
+                    if self._background_actor is None:
+                        state.ready.append(self._prepare_request_for_insert(request))
+                    else:
+                        state.restoring[request.request_id] = request
+                        self._background_actor.enqueue_restore(request)
                 else:
                     state.ready.append(self._prepare_request_for_insert(request))
             else:
