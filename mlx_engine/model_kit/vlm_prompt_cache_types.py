@@ -6,6 +6,7 @@ from typing import Any, Final, Literal, Optional, TypeAlias
 # LMCache defaults to 256-token external chunks, and MLX KV caches allocate in
 # 256-token steps. This is a spill-cache chunk size, not vLLM's KV page size.
 DEFAULT_PREFIX_CHUNK_SIZE = 256
+PrefixCacheSavePoint: TypeAlias = int
 RecordKind: TypeAlias = Literal["kv_delta", "rotating_delta", "state_checkpoint"]
 RECORD_KIND_KV_DELTA: Final[RecordKind] = "kv_delta"
 RECORD_KIND_ROTATING_DELTA: Final[RecordKind] = "rotating_delta"
@@ -121,18 +122,22 @@ def make_record_key(chunk_key: str, record_kind: RecordKind) -> str:
     return f"record:{chunk_key}:{record_kind}"
 
 
-def _chunk_image_markers(
+def _image_fingerprint_for_chunk(
     image_spans: list[PromptImageSpan],
     chunk_start: int,
     chunk_end: int,
 ) -> str:
-    markers = []
+    """Return image identities contained in this chunk.
+
+    Prompt token ids only contain image placeholders, so the chunk hash must
+    also include the image hash. Image spans are atomic chunks, so position and
+    length are already implied by the chunk's tokens and bounds.
+    """
+    image_hashes = []
     for span in image_spans:
         if chunk_start <= span.start and span.end <= chunk_end:
-            markers.append(
-                f"{span.start - chunk_start}:{span.end - chunk_start}:{span.image_hash}"
-            )
-    return ",".join(markers)
+            image_hashes.append(span.image_hash)
+    return ",".join(image_hashes)
 
 
 def build_prefix_cache_chunks(
@@ -140,7 +145,7 @@ def build_prefix_cache_chunks(
     image_spans: list[PromptImageSpan],
     chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
 ) -> list[PromptPrefixChunk]:
-    parent_hash = hashlib.sha256(b"prompt-prefix-v1").hexdigest()
+    prefix_hash = hashlib.sha256(b"prompt-prefix-v1").hexdigest()
     chunks = []
     prefix_chunk_keys: list[str] = []
 
@@ -168,21 +173,23 @@ def build_prefix_cache_chunks(
         if chunk_end <= previous_chunk_end:
             continue
         chunk_tokens = prompt_input_ids[previous_chunk_end:chunk_end]
-        image_markers = _chunk_image_markers(
+        image_fingerprint = _image_fingerprint_for_chunk(
             image_spans,
             previous_chunk_end,
             chunk_end,
         )
-        payload = f"{parent_hash}|{','.join(map(str, chunk_tokens))}|{image_markers}"
-        parent_hash = hashlib.sha256(payload.encode()).hexdigest()
-        chunk_key = parent_hash
+        payload = (
+            f"{prefix_hash}|{','.join(map(str, chunk_tokens))}|{image_fingerprint}"
+        )
+        prefix_hash = hashlib.sha256(payload.encode()).hexdigest()
+        chunk_key = prefix_hash
         prefix_chunk_keys.append(chunk_key)
         chunks.append(
             PromptPrefixChunk(
                 start=previous_chunk_end,
                 end=chunk_end,
                 key=chunk_key,
-                chunk_hash=parent_hash,
+                chunk_hash=prefix_hash,
                 prefix_chunk_keys=list(prefix_chunk_keys),
             )
         )
@@ -191,10 +198,11 @@ def build_prefix_cache_chunks(
     return chunks
 
 
-def build_prefix_cache_boundaries(
+def build_prefix_cache_save_points(
     prompt_input_ids: list[int],
     image_spans: list[PromptImageSpan],
-) -> list[int]:
+) -> list[PrefixCacheSavePoint]:
+    """Return end-exclusive prompt prefix lengths where cache should be saved."""
     chunks = build_prefix_cache_chunks(
         prompt_input_ids,
         image_spans,

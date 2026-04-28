@@ -5,7 +5,7 @@ from typing import Any, Callable, Optional
 from mlx_engine.model_kit.vlm_prompt_cache_types import (
     PendingPromptCacheSave,
     PromptImageSpan,
-    build_prefix_cache_boundaries,
+    build_prefix_cache_save_points,
     build_prefix_cache_chunks,
 )
 from mlx_engine.model_kit.vlm_prompt_spill_cache import VlmPromptSpillCache
@@ -74,7 +74,7 @@ class VlmPromptCacheCoordinator:
     ) -> list[int]:
         return [
             boundary
-            for boundary in build_prefix_cache_boundaries(
+            for boundary in build_prefix_cache_save_points(
                 prompt_input_ids,
                 image_spans,
             )
