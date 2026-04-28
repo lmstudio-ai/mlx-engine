@@ -1,14 +1,17 @@
+import hashlib
 import logging
 import os
 import sys
 import time
 import traceback
 from dataclasses import dataclass
+from itertools import count
 from pathlib import Path
 from queue import Empty as QueueEmpty
+from queue import PriorityQueue
 from queue import Queue
-from threading import Event, Thread
-from typing import Iterable, Optional
+from threading import Event, Lock, Thread
+from typing import Any, Iterable, Optional
 
 import mlx.core as mx
 import mlx_lm
@@ -19,6 +22,17 @@ from mlx_engine.model_kit.batched_model_kit_types import (
     CancelGenerationRequest,
     RequestCancelled,
 )
+from mlx_engine.model_kit.vlm_batch_generator import (
+    BatchGenerator as LocalVlmBatchGenerator,
+)
+from mlx_engine.model_kit.vlm_prompt_cache_coordinator import (
+    RestoredPromptCache,
+    VlmPromptCacheCoordinator,
+)
+from mlx_engine.model_kit.vlm_prompt_spill_cache import (
+    PreparedPromptSnapshot,
+    VlmPromptSpillCache,
+)
 from mlx_engine.utils.generation_helpers import MAX_TOP_LOGPROBS, create_sampler
 from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
 from mlx_engine.utils.token import Token
@@ -26,17 +40,31 @@ from mlx_engine.vision_model_kit._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
 )
-from mlx_vlm.generate import BatchGenerator
 
 logger = logging.getLogger(__name__)
 
 
 MLX_VLM_BATCHED_VISION_ENV_VAR = "MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION"
+MLX_VLM_BATCHED_VISION_DISK_CACHE_ENV_VAR = (
+    "MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE"
+)
+DEFAULT_SPILL_SAVE_QUEUE_SIZE = 2
+_RESTORE_JOB_PRIORITY = 0
+_SAVE_JOB_PRIORITY = 1
+_SHUTDOWN_JOB_PRIORITY = -1
 
 
 def is_mlx_vlm_batched_vision_enabled() -> bool:
     raw = os.environ.get(MLX_VLM_BATCHED_VISION_ENV_VAR, "")
     return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def is_mlx_vlm_batched_vision_disk_cache_enabled() -> bool:
+    raw = os.environ.get(MLX_VLM_BATCHED_VISION_DISK_CACHE_ENV_VAR, "")
+    return (
+        raw.lower() in {"1", "true", "yes", "on"}
+        and is_mlx_vlm_batched_vision_enabled()
+    )
 
 
 @dataclass
@@ -65,6 +93,37 @@ class _GenerationRequest:
         )
 
 
+@dataclass
+class _PreparedPrompt:
+    prompt_input_ids: list[int]
+    raw_inputs: Optional[dict[str, Any]]
+    image_hashes: list[str]
+    min_reusable_prefix_len: int
+
+
+@dataclass
+class _PreparedInsert:
+    request: _GenerationRequest
+    prepared_prompt: _PreparedPrompt
+    restored: RestoredPromptCache | None
+
+
+@dataclass
+class _RestoreJob:
+    request: _GenerationRequest
+
+
+@dataclass
+class _SaveJob:
+    prepared_snapshot: PreparedPromptSnapshot
+
+
+@dataclass
+class _FailedRestore:
+    request: _GenerationRequest
+    error: Exception
+
+
 class BatchedVisionModelKit:
     """
     Feature-flagged VLM batching backend built on mlx-vlm's BatchGenerator.
@@ -90,12 +149,22 @@ class BatchedVisionModelKit:
         self._requests = Queue()
         self._backend_exception = None
         self._generation_thread = None
+        self._background_job_thread = None
         self._shutdown = Event()
         self.prefill_step_size = prefill_step_size
         self.vocab_only = vocab_only
         self._model_path = model_path
         self._max_seq_nums = max_seq_nums if max_seq_nums and max_seq_nums > 0 else 1
         self._trust_remote_code = trust_remote_code
+        self._background_job_queue = None if vocab_only else PriorityQueue()
+        self._prepared_requests = None if vocab_only else Queue()
+        self._background_job_sequence = count()
+        self._queued_save_jobs = 0
+        self._queued_save_jobs_lock = Lock()
+        self._max_queued_save_jobs = max(
+            DEFAULT_SPILL_SAVE_QUEUE_SIZE,
+            self._max_seq_nums,
+        )
 
         fix_qwen2_5_vl_image_processor(model_path)
         fix_qwen2_vl_preprocessor(model_path)
@@ -104,11 +173,39 @@ class BatchedVisionModelKit:
             model_path, trust_remote_code=trust_remote_code
         )
         self.model_type = self.config.get("model_type")
+        self._prompt_spill_cache = (
+            None
+            if vocab_only or not is_mlx_vlm_batched_vision_disk_cache_enabled()
+            else VlmPromptSpillCache(self.config)
+        )
+        self._prompt_cache_coordinator = (
+            None
+            if self._prompt_spill_cache is None
+            else VlmPromptCacheCoordinator(
+                self._prompt_spill_cache,
+                self._enqueue_prepared_spill_save,
+            )
+        )
 
-        if vocab_only:
-            self._init_tokenizer_only()
-        else:
-            self._init_full_model()
+        # Keep tokenizer/config (and the pure-Python processor) on the caller
+        # thread, but load the MLX-backed model on the scheduler thread. MLX
+        # 0.31.2 tolerates the threaded stream usage we want, but async_eval
+        # still trips if the underlying MLX arrays/modules were created on a
+        # different thread.
+        self._init_tokenizer_only()
+        if not vocab_only:
+            self.processor = mlx_vlm.utils.load_processor(
+                self._model_path,
+                True,
+                eos_token_ids=self._get_eos_token_ids(),
+                trust_remote_code=self._trust_remote_code,
+            )
+            image_processor = mlx_vlm.utils.load_image_processor(
+                self._model_path,
+                trust_remote_code=self._trust_remote_code,
+            )
+            if image_processor is not None:
+                self.processor.image_processor = image_processor
 
     def _get_eos_token_ids(self) -> list[int] | None:
         eos_token_ids_raw = self.config.get("eos_token_id")
@@ -126,27 +223,22 @@ class BatchedVisionModelKit:
         )
         self.detokenizer = self.tokenizer.detokenizer
 
-    def _init_full_model(self) -> None:
-        return_tuple = mlx_vlm.utils.load(
+    def _load_model(self) -> None:
+        self.model, _ = mlx_vlm.utils.load_model(
             self._model_path,
-            processor_config={"trust_remote_code": self._trust_remote_code},
+            lazy=False,
             trust_remote_code=self._trust_remote_code,
         )
-        if len(return_tuple) == 2:
-            self.model, self.processor = return_tuple
-        else:
-            self.model, self.processor, _ = return_tuple
-
-        self.tokenizer = mlx_lm.tokenizer_utils.load(
-            self._model_path, eos_token_ids=self._get_eos_token_ids()
-        )
-        self.detokenizer = self.tokenizer.detokenizer
         mx.clear_cache()
 
     def start(self):
         if self.vocab_only:
             return
         mx.synchronize()
+        self._background_job_thread = Thread(
+            target=self._background_job_loop, daemon=True
+        )
+        self._background_job_thread.start()
         self._generation_thread = Thread(
             target=self._generate_with_exception_handling, daemon=True
         )
@@ -224,6 +316,15 @@ class BatchedVisionModelKit:
             self._shutdown.set()
             if self._generation_thread:
                 self._generation_thread.join()
+            if self._background_job_queue is not None:
+                self._enqueue_background_job(_SHUTDOWN_JOB_PRIORITY, None)
+            if self._background_job_thread:
+                self._background_job_thread.join()
+        if self._prompt_spill_cache is not None:
+            self._prompt_spill_cache.close()
+
+    def is_shutdown(self) -> bool:
+        return self._shutdown.is_set()
 
     def is_cross_prompt_cache_active(self) -> bool:
         return False
@@ -243,6 +344,8 @@ class BatchedVisionModelKit:
 
     def _generate_with_exception_handling(self):
         try:
+            if self.model is None:
+                self._load_model()
             self._generate()
         except Exception:
             err_string = f"Encountered fatal exception in the backend scheduler: {traceback.format_exc()}"
@@ -253,7 +356,9 @@ class BatchedVisionModelKit:
             time.sleep(3)
             sys.exit(1)
 
-    def _make_batch_generator(self, request: _GenerationRequest) -> BatchGenerator:
+    def _make_batch_generator(
+        self, request: _GenerationRequest
+    ) -> LocalVlmBatchGenerator:
         sampler = create_sampler(
             request.temp,
             request.top_p,
@@ -261,7 +366,7 @@ class BatchedVisionModelKit:
             request.min_tokens_to_keep,
             request.top_k,
         )
-        return BatchGenerator(
+        return LocalVlmBatchGenerator(
             getattr(self.model, "language_model", self.model),
             self.processor,
             max_tokens=10000000,
@@ -287,19 +392,49 @@ class BatchedVisionModelKit:
                 return value
         return None
 
-    def _prepare_prompt_kwargs(
-        self, request: _GenerationRequest
-    ) -> tuple[list[int], dict]:
+    def _hash_resized_image(self, image) -> str:
+        digest = hashlib.sha256()
+        digest.update(image.mode.encode())
+        digest.update(f"{image.size[0]}x{image.size[1]}".encode())
+        digest.update(image.tobytes())
+        return digest.hexdigest()
+
+    def _get_min_reusable_prefix_len(
+        self, prompt_input_ids: list[int], image_hashes: list[str]
+    ) -> int:
+        if not image_hashes:
+            return 0
+
+        image_token_index = self._get_image_token_index()
+        if image_token_index is None:
+            # Some processors do not expose a stable image sentinel.
+            return len(prompt_input_ids)
+
+        last_image_token_index = -1
+        for i, token_id in enumerate(prompt_input_ids):
+            if token_id == image_token_index:
+                last_image_token_index = i
+
+        if last_image_token_index == -1:
+            # Only reuse the full prompt when we cannot identify the image span.
+            return len(prompt_input_ids)
+
+        return last_image_token_index + 1
+
+    def _prepare_prompt_inputs(self, request: _GenerationRequest) -> _PreparedPrompt:
         prompt_tokens = request.prompt_tokens
         if len(prompt_tokens) == 0:
             prompt_tokens = self.tokenize(" ")
 
         if not request.images_b64:
-            input_ids = mx.array(prompt_tokens, dtype=mx.int32)[None, :]
-            embedding_output = self.model.get_input_embeddings(input_ids)
-            return input_ids.squeeze(0).tolist(), embedding_output.to_dict()
+            return _PreparedPrompt(
+                prompt_input_ids=list(prompt_tokens),
+                raw_inputs=None,
+                image_hashes=[],
+                min_reusable_prefix_len=0,
+            )
 
-        # Keep image decode and embedding prep on the worker thread for now.
+        # Keep image decode and prompt prep on the worker thread for now.
         prompt = self.tokenizer.decode(prompt_tokens) or " "
         images = custom_resize(
             convert_to_pil(request.images_b64),
@@ -312,6 +447,27 @@ class BatchedVisionModelKit:
             image_token_index=self._get_image_token_index(),
             resize_shape=None,
         )
+        prompt_input_ids = raw_inputs["input_ids"].squeeze(0).tolist()
+        image_hashes = [self._hash_resized_image(image) for image in images]
+        return _PreparedPrompt(
+            prompt_input_ids=prompt_input_ids,
+            raw_inputs=raw_inputs,
+            image_hashes=image_hashes,
+            min_reusable_prefix_len=self._get_min_reusable_prefix_len(
+                prompt_input_ids,
+                image_hashes,
+            ),
+        )
+
+    def _build_prompt_kwargs(self, prepared_prompt: _PreparedPrompt) -> dict:
+        if prepared_prompt.raw_inputs is None:
+            input_ids = mx.array(prepared_prompt.prompt_input_ids, dtype=mx.int32)[
+                None, :
+            ]
+            embedding_output = self.model.get_input_embeddings(input_ids)
+            return embedding_output.to_dict()
+
+        raw_inputs = prepared_prompt.raw_inputs
         input_ids = raw_inputs["input_ids"]
         pixel_values = raw_inputs.get("pixel_values")
         attention_mask = raw_inputs.get("attention_mask")
@@ -326,23 +482,173 @@ class BatchedVisionModelKit:
             mask=attention_mask,
             **data_kwargs,
         )
-        return input_ids.squeeze(0).tolist(), {
+        return {
             **data_kwargs,
             **embedding_output.to_dict(),
         }
 
-    def _insert_request(
+    def _build_cached_prompt_kwargs(
         self,
-        batch_generator: BatchGenerator,
-        request: _GenerationRequest,
+        prompt_input_ids: list[int],
+        rope_deltas: Optional[Any],
+    ) -> dict:
+        input_ids = mx.array(prompt_input_ids, dtype=mx.int32)[None, :]
+        embedding_output = self.model.get_input_embeddings(input_ids)
+        prompt_kwargs = embedding_output.to_dict()
+
+        # Prefix restores carry the tiny RoPE delta side state in memory.
+        if rope_deltas is not None and prompt_kwargs.get("rope_deltas") is None:
+            prompt_kwargs["rope_deltas"] = rope_deltas
+
+        return prompt_kwargs
+
+    @staticmethod
+    def _build_batcher_decode_state(
+        rope_deltas: Optional[Any],
+    ) -> Optional[dict[str, Any]]:
+        if rope_deltas is None:
+            return None
+        return {"rope_deltas": rope_deltas}
+
+    def _begin_queued_save_job(self) -> bool:
+        with self._queued_save_jobs_lock:
+            if self._queued_save_jobs >= self._max_queued_save_jobs:
+                return False
+            self._queued_save_jobs += 1
+            return True
+
+    def _finish_queued_save_job(self) -> None:
+        with self._queued_save_jobs_lock:
+            if self._queued_save_jobs > 0:
+                self._queued_save_jobs -= 1
+
+    def _enqueue_background_job(self, priority: int, job: Any) -> None:
+        self._background_job_queue.put(
+            (priority, next(self._background_job_sequence), job)
+        )
+
+    def _enqueue_prepared_spill_save(
+        self, prepared_snapshot: PreparedPromptSnapshot
+    ) -> None:
+        if self._background_job_queue is None:
+            self._prompt_spill_cache.commit_prepared_save(prepared_snapshot)
+            return
+
+        if not self._begin_queued_save_job():
+            # Spill snapshots are best-effort. If disk falls behind, keep token
+            # generation moving and drop this spill opportunity instead.
+            self._prompt_spill_cache.discard_prepared_save(prepared_snapshot)
+            return
+
+        self._enqueue_background_job(
+            _SAVE_JOB_PRIORITY,
+            _SaveJob(prepared_snapshot),
+        )
+
+    def _background_job_loop(self) -> None:
+        while True:
+            _, _, job = self._background_job_queue.get()
+            if job is None:
+                return
+
+            if isinstance(job, _RestoreJob):
+                try:
+                    prepared_insert = self._prepare_request_for_insert(job.request)
+                except Exception as exc:
+                    self._prepared_requests.put(_FailedRestore(job.request, exc))
+                    continue
+
+                self._prepared_requests.put(prepared_insert)
+                continue
+
+            if isinstance(job, _SaveJob):
+                try:
+                    self._prompt_spill_cache.commit_prepared_save(job.prepared_snapshot)
+                except Exception:
+                    logger.error(
+                        "Failed to commit prepared prompt spill snapshot:\n%s",
+                        traceback.format_exc(),
+                    )
+                finally:
+                    self._finish_queued_save_job()
+
+    def _prepare_request_for_insert(
+        self, request: _GenerationRequest
+    ) -> _PreparedInsert:
+        prepared_prompt = self._prepare_prompt_inputs(request)
+        restored = (
+            None
+            if self._prompt_cache_coordinator is None
+            else self._prompt_cache_coordinator.restore(
+                prompt_input_ids=prepared_prompt.prompt_input_ids,
+                image_hashes=prepared_prompt.image_hashes,
+                min_reusable_prefix_len=prepared_prompt.min_reusable_prefix_len,
+            )
+        )
+        return _PreparedInsert(
+            request=request,
+            prepared_prompt=prepared_prompt,
+            restored=restored,
+        )
+
+    def _request_needs_background_prepare(self, request: _GenerationRequest) -> bool:
+        return bool(request.images_b64) or self._prompt_cache_coordinator is not None
+
+    def _insert_prepared_request(
+        self,
+        batch_generator: LocalVlmBatchGenerator,
+        prepared_insert: _PreparedInsert,
         active: dict[int, dict],
     ) -> None:
-        prompt_input_ids, prompt_kwargs = self._prepare_prompt_kwargs(request)
-        prompt_token_count = len(prompt_input_ids)
-        request.rqueue.put((0, prompt_token_count))
+        request = prepared_insert.request
+        prepared_prompt = prepared_insert.prepared_prompt
+        restored = prepared_insert.restored
+        full_prompt_input_ids = prepared_prompt.prompt_input_ids
+        prompt_token_count = len(full_prompt_input_ids)
+
+        prompt_input_ids = full_prompt_input_ids
+        prompt_kwargs = None
+        insert_kwargs = {}
+        prompt_progress = 0
+        if restored is not None:
+            prompt_input_ids = full_prompt_input_ids[restored.cached_prefix_len :]
+            prompt_kwargs = self._build_cached_prompt_kwargs(
+                prompt_input_ids,
+                restored.rope_deltas,
+            )
+            prompt_progress = restored.cached_prefix_len
+            insert_kwargs = {
+                "caches": [restored.prompt_cache],
+                "all_tokens": [full_prompt_input_ids[: restored.cached_prefix_len]],
+                "decode_states": [
+                    self._build_batcher_decode_state(restored.rope_deltas)
+                ],
+            }
+        else:
+            prompt_kwargs = self._build_prompt_kwargs(prepared_prompt)
+
+        if self._prompt_cache_coordinator is not None:
+            cache_boundaries = self._prompt_cache_coordinator.boundaries_after(
+                prompt_input_ids=full_prompt_input_ids,
+                image_hashes=prepared_prompt.image_hashes,
+                min_reusable_prefix_len=prepared_prompt.min_reusable_prefix_len,
+                prompt_progress=prompt_progress,
+            )
+            if cache_boundaries:
+                insert_kwargs["cache_boundaries"] = [cache_boundaries]
+                insert_kwargs["prompt_cache_boundary_callback"] = (
+                    self._prompt_cache_coordinator.make_boundary_callback(
+                        prompt_input_ids=full_prompt_input_ids,
+                        image_hashes=prepared_prompt.image_hashes,
+                        min_reusable_prefix_len=prepared_prompt.min_reusable_prefix_len,
+                    )
+                )
+
+        request.rqueue.put((prompt_progress, prompt_token_count))
         (uid,) = batch_generator.insert(
             [prompt_input_ids],
             max_tokens=[request.max_tokens],
+            **insert_kwargs,
             prompt_kwargs=[prompt_kwargs],
         )
 
@@ -359,15 +665,30 @@ class BatchedVisionModelKit:
     def _cancel_request(
         self,
         request_id: str,
-        batch_generator: Optional[BatchGenerator],
+        batch_generator: Optional[LocalVlmBatchGenerator],
         active: dict[int, dict],
         pending: list[_GenerationRequest],
+        restoring: dict[str, _GenerationRequest],
+        ready: list[_PreparedInsert],
+        cancelled_restores: set[str],
     ) -> bool:
         for i, request in enumerate(pending):
             if request.request_id == request_id:
                 pending.pop(i)
                 request.rqueue.put(RequestCancelled())
                 return True
+
+        for i, prepared_insert in enumerate(ready):
+            if prepared_insert.request.request_id == request_id:
+                ready.pop(i)
+                prepared_insert.request.rqueue.put(RequestCancelled())
+                return True
+
+        request = restoring.pop(request_id, None)
+        if request is not None:
+            cancelled_restores.add(request_id)
+            request.rqueue.put(RequestCancelled())
+            return True
 
         for uid, result in list(active.items()):
             if result["request_id"] != request_id:
@@ -408,12 +729,16 @@ class BatchedVisionModelKit:
         )
 
     def _drain_incoming(self, timeout: Optional[float]) -> list:
+        return self._drain_queue(self._requests, timeout)
+
+    @staticmethod
+    def _drain_queue(queue: Queue, timeout: Optional[float]) -> list:
         items = []
         try:
             item = (
-                self._requests.get(timeout=timeout)
+                queue.get(timeout=timeout)
                 if timeout is not None
-                else self._requests.get_nowait()
+                else queue.get_nowait()
             )
             items.append(item)
         except QueueEmpty:
@@ -421,41 +746,104 @@ class BatchedVisionModelKit:
 
         while True:
             try:
-                items.append(self._requests.get_nowait())
+                items.append(queue.get_nowait())
             except QueueEmpty:
                 return items
+
+    def _drain_prepared_requests(
+        self,
+        restoring: dict[str, _GenerationRequest],
+        ready: list[_PreparedInsert],
+        cancelled_restores: set[str],
+    ) -> None:
+        for item in self._drain_queue(self._prepared_requests, timeout=None):
+            request_id = item.request.request_id
+            restoring.pop(request_id, None)
+
+            if request_id in cancelled_restores:
+                cancelled_restores.discard(request_id)
+                continue
+
+            if isinstance(item, _FailedRestore):
+                item.request.rqueue.put(item.error)
+                continue
+
+            ready.append(item)
+
+    @staticmethod
+    def _reserved_slots(
+        active: dict[int, dict],
+        ready: list[_PreparedInsert],
+        restoring: dict[str, _GenerationRequest],
+    ) -> int:
+        return len(active) + len(ready) + len(restoring)
 
     def _generate(self):
         batch_generator = None
         active: dict[int, dict] = {}
         pending: list[_GenerationRequest] = []
+        ready: list[_PreparedInsert] = []
+        restoring: dict[str, _GenerationRequest] = {}
+        cancelled_restores: set[str] = set()
         current_sampling_key = None
 
         while not self._shutdown.is_set():
-            timeout = None if active else 0.1
+            timeout = None if active or ready or restoring else 0.1
             for item in self._drain_incoming(timeout):
                 if isinstance(item, CancelGenerationRequest):
                     if not self._cancel_request(
-                        item.request_id, batch_generator, active, pending
+                        item.request_id,
+                        batch_generator,
+                        active,
+                        pending,
+                        restoring,
+                        ready,
+                        cancelled_restores,
                     ):
                         logger.warning(f"Could not cancel request_id={item.request_id}")
                     continue
                 pending.append(item)
 
-            if not active and pending:
+            self._drain_prepared_requests(restoring, ready, cancelled_restores)
+
+            if not active and not ready and not restoring and pending:
                 current_sampling_key = pending[0].sampling_key
                 if batch_generator is not None:
                     batch_generator.close()
                 batch_generator = self._make_batch_generator(pending[0])
 
             if batch_generator is not None and len(active) < self._max_seq_nums:
+                next_ready = []
+                for prepared_insert in ready:
+                    if len(active) < self._max_seq_nums:
+                        self._insert_prepared_request(
+                            batch_generator,
+                            prepared_insert,
+                            active,
+                        )
+                    else:
+                        next_ready.append(prepared_insert)
+                ready = next_ready
+
+            if (
+                batch_generator is not None
+                and self._reserved_slots(active, ready, restoring) < self._max_seq_nums
+            ):
                 next_pending = []
                 for request in pending:
                     if (
-                        len(active) < self._max_seq_nums
+                        self._reserved_slots(active, ready, restoring)
+                        < self._max_seq_nums
                         and request.sampling_key == current_sampling_key
                     ):
-                        self._insert_request(batch_generator, request, active)
+                        if self._request_needs_background_prepare(request):
+                            restoring[request.request_id] = request
+                            self._enqueue_background_job(
+                                _RESTORE_JOB_PRIORITY,
+                                _RestoreJob(request),
+                            )
+                        else:
+                            ready.append(self._prepare_request_for_insert(request))
                     else:
                         next_pending.append(request)
                 pending = next_pending
@@ -480,6 +868,12 @@ class BatchedVisionModelKit:
         for result in active.values():
             result["rqueue"].put(RequestCancelled("Model shutdown requested"))
         for request in pending:
+            request.rqueue.put(RequestCancelled("Model shutdown requested"))
+        for prepared_insert in ready:
+            prepared_insert.request.rqueue.put(
+                RequestCancelled("Model shutdown requested")
+            )
+        for request in restoring.values():
             request.rqueue.put(RequestCancelled("Model shutdown requested"))
 
     def __del__(self):
