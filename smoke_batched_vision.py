@@ -19,7 +19,10 @@ import mlx.core as mx
 from transformers import AutoProcessor
 
 from mlx_engine.generate import create_generator, load_model, tokenize, unload
-from mlx_engine.model_kit.vlm_prompt_cache_coordinator import RestoredPromptCache
+from mlx_engine.model_kit.vlm_prompt_cache_coordinator import (
+    RestoredPromptCache,
+    _image_safe_common_prefix_len,
+)
 from mlx_engine.model_kit.vlm_prompt_cache_types import (
     PromptImageSpan,
     RECORD_KIND_KV_DELTA,
@@ -529,15 +532,38 @@ def wait_for_prefix_snapshot(
     raise RuntimeError("Timed out waiting for a reusable prompt snapshot")
 
 
+def clear_hot_completed_prompt_cache(model_kit) -> None:
+    """Force disk-specific smokes to measure the spill cache, not hot MRU."""
+    coordinator = getattr(model_kit, "_prompt_cache_coordinator", None)
+    if coordinator is None:
+        return
+    with coordinator._hot_entry_lock:
+        coordinator._hot_entry = None
+
+
 def print_spill_cache_stats(prefix: str, prompt_spill_cache) -> None:
     stats = prompt_spill_cache.snapshot_stats()
     print(f"{prefix}_STATS_TOTAL_BYTES", stats.total_bytes)
     print(f"{prefix}_STATS_MAX_BYTES", stats.max_bytes)
     print(f"{prefix}_STATS_ENTRY_COUNT", stats.entry_count)
-    print(f"{prefix}_STATS_PENDING_SAVES", stats.pending_saves)
     print(f"{prefix}_STATS_HITS", stats.hits)
     print(f"{prefix}_STATS_MISSES", stats.misses)
     print(f"{prefix}_STATS_EVICTIONS", stats.evictions)
+
+
+def get_spill_record_size(prompt_spill_cache, record_key: str) -> int:
+    return prompt_spill_cache.snapshot_stats().record_sizes_by_key.get(record_key, 0)
+
+
+def get_spill_chunk_size(prompt_spill_cache, chunk_key: str) -> int:
+    return prompt_spill_cache.snapshot_stats().chunk_sizes_by_key.get(chunk_key, 0)
+
+
+def spill_chunk_records_available(prompt_spill_cache, chunk_key: str) -> bool:
+    return prompt_spill_cache.snapshot_stats().chunk_records_available_by_key.get(
+        chunk_key,
+        False,
+    )
 
 
 def get_stale_optional_record_keys(
@@ -574,14 +600,16 @@ def get_stale_optional_record_keys(
 def wait_for_spill_cache_idle(prompt_spill_cache, *, timeout_s: float):
     deadline = time.perf_counter() + timeout_s
     last_stats = prompt_spill_cache.snapshot_stats()
+    stable_under_cap = False
     while time.perf_counter() < deadline:
         last_stats = prompt_spill_cache.snapshot_stats()
         under_cap = (
             last_stats.max_bytes is None
             or last_stats.total_bytes <= last_stats.max_bytes
         )
-        if last_stats.pending_saves == 0 and under_cap:
+        if under_cap and stable_under_cap:
             return last_stats
+        stable_under_cap = under_cap
         time.sleep(0.05)
 
     raise RuntimeError(f"Spill cache did not become idle: {last_stats!r}")
@@ -800,18 +828,25 @@ def run_prefix(
     )
     validate_result(base_prepared, base_result)
 
-    prefix_match = wait_for_prefix_snapshot(
-        model_kit,
-        prompt_input_ids=extended_prompt_inputs.prompt_input_ids,
-        image_spans=extended_prompt_inputs.image_spans,
-        timeout_s=args.prefix_wait_timeout_s,
-    )
-    expected_prefix_len = prefix_match.matched_prefix_len
     prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    control_prefix_match = prompt_spill_cache.find_longest_prefix(
-        control_prompt_inputs.prompt_input_ids,
-        control_prompt_inputs.image_spans,
+    disk_spill_enabled = (
+        prompt_spill_cache is not None and prompt_spill_cache.can_store_records()
     )
+    if disk_spill_enabled:
+        prefix_match = wait_for_prefix_snapshot(
+            model_kit,
+            prompt_input_ids=extended_prompt_inputs.prompt_input_ids,
+            image_spans=extended_prompt_inputs.image_spans,
+            timeout_s=args.prefix_wait_timeout_s,
+        )
+        expected_prefix_len = prefix_match.matched_prefix_len
+        control_prefix_match = prompt_spill_cache.find_longest_prefix(
+            control_prompt_inputs.prompt_input_ids,
+            control_prompt_inputs.image_spans,
+        )
+    else:
+        expected_prefix_len = 0
+        control_prefix_match = None
     expected_control_progress = (
         0 if control_prefix_match is None else control_prefix_match.matched_prefix_len
     )
@@ -856,15 +891,34 @@ def run_prefix(
         if expect_warm_base
         else expected_prefix_len
     )
-    if extended_trace.begin_prefill_tokens_processed != expected_extended_progress:
+    hot_completed_progress = min(
+        len(base_prompt_inputs.prompt_input_ids),
+        len(extended_prompt_inputs.prompt_input_ids) - 1,
+    )
+    accepted_extended_progress = {expected_extended_progress}
+    if not expect_warm_base:
+        accepted_extended_progress.add(hot_completed_progress)
+    if extended_trace.begin_prefill_tokens_processed not in accepted_extended_progress:
         raise RuntimeError(
             "Extended request did not restore the expected cached prefix: "
-            f"{extended_trace.begin_prefill_tokens_processed} != {expected_extended_progress}"
+            f"{extended_trace.begin_prefill_tokens_processed} not in "
+            f"{sorted(accepted_extended_progress)}"
         )
-    if control_trace.begin_prefill_tokens_processed != expected_control_progress:
+    hot_control_progress = min(
+        _image_safe_common_prefix_len(
+            control_prompt_inputs.prompt_input_ids,
+            control_prompt_inputs.image_spans,
+            extended_prompt_inputs.prompt_input_ids,
+            extended_prompt_inputs.image_spans,
+        ),
+        len(control_prompt_inputs.prompt_input_ids) - 1,
+    )
+    accepted_control_progress = {expected_control_progress, hot_control_progress}
+    if control_trace.begin_prefill_tokens_processed not in accepted_control_progress:
         raise RuntimeError(
             "Control request did not match expected restart state: "
-            f"{control_trace.begin_prefill_tokens_processed} != {expected_control_progress}"
+            f"{control_trace.begin_prefill_tokens_processed} not in "
+            f"{sorted(accepted_control_progress)}"
         )
 
     # BatchedMlxLmReporterAdapter currently hardcodes cached_tokens=0, so use
@@ -873,8 +927,11 @@ def run_prefix(
     print("PREFIX_BASE_EXPECTED_WARM", expect_warm_base)
     print("PREFIX_BASE_PROMPT_TOKENS", len(base_prompt_inputs.prompt_input_ids))
     print("PREFIX_EXTENDED_PROMPT_TOKENS", len(extended_prompt_inputs.prompt_input_ids))
-    print("PREFIX_RESTORED_TOKENS", expected_extended_progress)
+    print("PREFIX_RESTORED_TOKENS", extended_trace.begin_prefill_tokens_processed)
+    print("PREFIX_DISK_RESTORED_TOKENS", expected_prefix_len)
+    print("PREFIX_HOT_RESTORED_TOKENS", hot_completed_progress)
     print("PREFIX_CONTROL_RESTORED_TOKENS", expected_control_progress)
+    print("PREFIX_CONTROL_HOT_RESTORED_TOKENS", hot_control_progress)
     print(
         "BASE_BEGIN",
         base_trace.begin_cached_tokens,
@@ -982,10 +1039,8 @@ def run_multi_prefix(args) -> None:
     ]
     if extended_shared_keys != base_image_keys:
         raise RuntimeError("Appending an image changed earlier prompt chunk keys")
-    if changed_image_chunks[0].key != base_image_chunks[0].key:
-        raise RuntimeError("Changing an image changed the pre-image chunk key")
-    if changed_image_chunks[1].key == base_image_chunks[1].key:
-        raise RuntimeError("Changing an image did not change the image chunk key")
+    if changed_image_chunks[0].key == base_image_chunks[0].key:
+        raise RuntimeError("Changing an image did not change its containing chunk")
 
     prompt_input_ids = list(range(600))
     chunks = build_prefix_cache_chunks(prompt_input_ids, [])
@@ -1043,8 +1098,9 @@ def run_multi_prefix(args) -> None:
         if first_chunk_state_record_key in state_record_keys:
             raise RuntimeError("Record selection kept an old state checkpoint")
 
-        first_state_size = prompt_spill_cache._get_cache_entry_size(
-            first_chunk_state_record_key
+        first_state_size = get_spill_record_size(
+            prompt_spill_cache,
+            first_chunk_state_record_key,
         )
         total_before_eviction = prompt_spill_cache._total_bytes
         prompt_spill_cache._max_cache_bytes = (
@@ -1086,7 +1142,7 @@ def run_multi_prefix(args) -> None:
         if rope_deltas[0, 0].item() != expected_prefix_len:
             raise RuntimeError("RoPE deltas did not use the latest chunk")
 
-        cache_file_sizes = prompt_spill_cache._debug_record_sizes()
+        cache_file_sizes = prompt_spill_cache.snapshot_stats().record_sizes
         print("MULTI_PREFIX_SYNTHETIC", True)
         print("MULTI_PREFIX_CHUNK_KEYS", len(prefix_match.chunk_keys))
         print("MULTI_PREFIX_BOUNDARIES", [chunk.end for chunk in reusable_chunks[:2]])
@@ -1154,8 +1210,9 @@ def run_rotating_suffix(args) -> None:
                 == RECORD_KIND_ROTATING_DELTA
             )
         )
-        first_rotating_size = prompt_spill_cache._get_cache_entry_size(
-            first_chunk_rotating_record_key
+        first_rotating_size = get_spill_record_size(
+            prompt_spill_cache,
+            first_chunk_rotating_record_key,
         )
         total_before_eviction = prompt_spill_cache._total_bytes
         prompt_spill_cache._max_cache_bytes = (
@@ -1234,7 +1291,7 @@ def run_eviction(args) -> None:
             prompt_input_ids,
             prompt_cache=make_synthetic_kv_prompt_cache(first_chunk.end),
         )
-        first_size = prompt_spill_cache._get_chunk_cache_entry_size(first_chunk.key)
+        first_size = get_spill_chunk_size(prompt_spill_cache, first_chunk.key)
         prompt_spill_cache._max_cache_bytes = args.cache_max_bytes or first_size + 64
 
         save_synthetic_chunk(
@@ -1243,8 +1300,14 @@ def run_eviction(args) -> None:
             prompt_input_ids,
             prompt_cache=make_synthetic_kv_prompt_cache(second_chunk.end),
         )
-        first_exists = prompt_spill_cache._chunk_records_exist(first_chunk.key)
-        second_exists = prompt_spill_cache._chunk_records_exist(second_chunk.key)
+        first_exists = spill_chunk_records_available(
+            prompt_spill_cache,
+            first_chunk.key,
+        )
+        second_exists = spill_chunk_records_available(
+            prompt_spill_cache,
+            second_chunk.key,
+        )
         if not first_exists:
             raise RuntimeError("Eviction removed the prefix chunk before its dependent")
         if second_exists:
@@ -1264,7 +1327,7 @@ def run_eviction(args) -> None:
         if kv_keys.shape[2] != first_chunk.end:
             raise RuntimeError("Eviction restored the wrong prefix length")
 
-        cache_files = prompt_spill_cache._debug_record_sizes()
+        cache_files = prompt_spill_cache.snapshot_stats().record_sizes
         print("EVICTION_MAX_BYTES", prompt_spill_cache._max_cache_bytes)
         print("EVICTION_TOTAL_BYTES", prompt_spill_cache._total_bytes)
         print("EVICTION_FILES", len(cache_files))
@@ -1312,6 +1375,7 @@ def run_multi_prefix_e2e(model_kit, processor, args) -> None:
             f"{prefix_match.matched_prefix_len} != {expected_restored_tokens}"
         )
 
+    clear_hot_completed_prompt_cache(model_kit)
     extended_trace = PromptProgressTrace()
     extended_result = run_prepared_request(
         model_kit,
@@ -1425,6 +1489,7 @@ def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
             "Hybrid restore did not include ArraysCache or RotatingKVCache layers"
         )
 
+    clear_hot_completed_prompt_cache(model_kit)
     extended_trace = PromptProgressTrace()
     extended_result = run_prepared_request(
         model_kit,
@@ -1508,15 +1573,15 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
         )
 
     first_key, second_key = two_chunk_match.chunk_keys[:2]
-    first_size = prompt_spill_cache._get_chunk_cache_entry_size(first_key)
-    second_size = prompt_spill_cache._get_chunk_cache_entry_size(second_key)
+    first_size = get_spill_chunk_size(prompt_spill_cache, first_key)
+    second_size = get_spill_chunk_size(prompt_spill_cache, second_key)
     total_before_eviction = prompt_spill_cache._total_bytes
     stale_optional_record_keys = get_stale_optional_record_keys(
         prompt_spill_cache,
         two_chunk_match.chunk_keys,
     )
     stale_optional_size = sum(
-        prompt_spill_cache._get_cache_entry_size(record_key)
+        get_spill_record_size(prompt_spill_cache, record_key)
         for record_key in stale_optional_record_keys
     )
     expected_one_chunk_boundary = reusable_boundaries[0]
@@ -1533,8 +1598,8 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
     prompt_spill_cache._max_cache_bytes = args.cache_max_bytes or default_max_bytes
     prompt_spill_cache._evict_if_needed()
 
-    first_exists = prompt_spill_cache._chunk_records_exist(first_key)
-    second_exists = prompt_spill_cache._chunk_records_exist(second_key)
+    first_exists = spill_chunk_records_available(prompt_spill_cache, first_key)
+    second_exists = spill_chunk_records_available(prompt_spill_cache, second_key)
     if prompt_spill_cache._total_bytes > prompt_spill_cache._max_cache_bytes:
         raise RuntimeError("E2E eviction did not enforce the byte cap")
 
@@ -1557,6 +1622,7 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
         )
     print_spill_cache_stats("EVICTION_E2E_AFTER_EVICT", prompt_spill_cache)
 
+    clear_hot_completed_prompt_cache(model_kit)
     extended_trace = PromptProgressTrace()
     extended_result = run_prepared_request(
         model_kit,
@@ -1574,7 +1640,7 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
             f"!= {expected_post_eviction_boundary}"
         )
 
-    cache_file_sizes = prompt_spill_cache._debug_record_sizes()
+    cache_file_sizes = prompt_spill_cache.snapshot_stats().record_sizes
     print("EVICTION_E2E_SUFFIX", repr(suffix))
     print("EVICTION_E2E_BASE_PROMPT_TOKENS", len(base_prompt_inputs.prompt_input_ids))
     print(
@@ -1655,15 +1721,15 @@ def run_eviction_stress(model_kit, processor, args) -> None:
         )
 
     first_key, second_key = two_chunk_match.chunk_keys[:2]
-    first_size = prompt_spill_cache._get_chunk_cache_entry_size(first_key)
-    second_size = prompt_spill_cache._get_chunk_cache_entry_size(second_key)
+    first_size = get_spill_chunk_size(prompt_spill_cache, first_key)
+    second_size = get_spill_chunk_size(prompt_spill_cache, second_key)
     total_before_eviction = prompt_spill_cache._total_bytes
     stale_optional_record_keys = get_stale_optional_record_keys(
         prompt_spill_cache,
         two_chunk_match.chunk_keys,
     )
     stale_optional_size = sum(
-        prompt_spill_cache._get_cache_entry_size(record_key)
+        get_spill_record_size(prompt_spill_cache, record_key)
         for record_key in stale_optional_record_keys
     )
     default_max_bytes = (
@@ -1699,6 +1765,7 @@ def run_eviction_stress(model_kit, processor, args) -> None:
         )
     print_spill_cache_stats("EVICTION_STRESS_AFTER_EVICT", prompt_spill_cache)
 
+    clear_hot_completed_prompt_cache(model_kit)
     request_count = args.max_seq_nums
     results: dict[str, RequestResult] = {}
     traces: dict[str, PromptProgressTrace] = {}
@@ -1781,7 +1848,7 @@ def run_eviction_stress(model_kit, processor, args) -> None:
     if final_stats.evictions < 1:
         raise RuntimeError("Eviction-stress expected at least one eviction")
 
-    cache_file_sizes = prompt_spill_cache._debug_record_sizes()
+    cache_file_sizes = prompt_spill_cache.snapshot_stats().record_sizes
     print("EVICTION_STRESS_SUFFIX", repr(suffix))
     print(
         "EVICTION_STRESS_BASE_PROMPT_TOKENS", len(base_prompt_inputs.prompt_input_ids)

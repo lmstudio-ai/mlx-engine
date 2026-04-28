@@ -6,7 +6,6 @@ from typing import Any, Final, Literal, Optional, TypeAlias
 # LMCache defaults to 256-token external chunks, and MLX KV caches allocate in
 # 256-token steps. This is a spill-cache chunk size, not vLLM's KV page size.
 DEFAULT_PREFIX_CHUNK_SIZE = 256
-PrefixCacheSavePoint: TypeAlias = int
 RecordKind: TypeAlias = Literal["kv_delta", "rotating_delta", "state_checkpoint"]
 RECORD_KIND_KV_DELTA: Final[RecordKind] = "kv_delta"
 RECORD_KIND_ROTATING_DELTA: Final[RecordKind] = "rotating_delta"
@@ -109,13 +108,18 @@ class PendingPromptCacheSave:
 
 @dataclass
 class VlmPromptSpillCacheStats:
+    """Committed spill-cache accounting used by diagnostics and smokes."""
+
     total_bytes: int
     max_bytes: Optional[int]
     entry_count: int
-    pending_saves: int
     hits: int
     misses: int
     evictions: int
+    record_sizes: list[int]
+    record_sizes_by_key: dict[str, int]
+    chunk_sizes_by_key: dict[str, int]
+    chunk_records_available_by_key: dict[str, bool]
 
 
 def make_record_key(chunk_key: str, record_kind: RecordKind) -> str:
@@ -145,28 +149,14 @@ def build_prefix_cache_chunks(
     image_spans: list[PromptImageSpan],
     chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
 ) -> list[PromptPrefixChunk]:
+    chunk_bounds = _build_prefix_cache_chunk_bounds(
+        len(prompt_input_ids),
+        image_spans,
+        chunk_size,
+    )
     prefix_hash = hashlib.sha256(b"prompt-prefix-v1").hexdigest()
     chunks = []
     prefix_chunk_keys: list[str] = []
-
-    prompt_len = len(prompt_input_ids)
-    chunk_bounds = []
-    cursor = 0
-    for span in sorted(image_spans, key=lambda item: item.start):
-        while cursor + chunk_size <= span.start:
-            cursor += chunk_size
-            chunk_bounds.append(cursor)
-        if cursor < span.start:
-            # Image spans are atomic, but text before them can still be cached.
-            chunk_bounds.append(span.start)
-        if chunk_bounds and chunk_bounds[-1] == span.start:
-            cursor = span.start
-        cursor = max(cursor, span.end)
-        chunk_bounds.append(cursor)
-
-    while cursor + chunk_size <= prompt_len:
-        cursor += chunk_size
-        chunk_bounds.append(cursor)
 
     previous_chunk_end = 0
     for chunk_end in chunk_bounds:
@@ -198,14 +188,47 @@ def build_prefix_cache_chunks(
     return chunks
 
 
-def build_prefix_cache_save_points(
-    prompt_input_ids: list[int],
+def _build_prefix_cache_chunk_bounds(
+    prompt_len: int,
     image_spans: list[PromptImageSpan],
-) -> list[PrefixCacheSavePoint]:
-    """Return end-exclusive prompt prefix lengths where cache should be saved."""
-    chunks = build_prefix_cache_chunks(
-        prompt_input_ids,
-        image_spans,
-    )
-    max_reusable_prefix_len = len(prompt_input_ids) - 1
-    return [chunk.end for chunk in chunks if 0 < chunk.end <= max_reusable_prefix_len]
+    chunk_size: int,
+) -> list[int]:
+    """Return disk-save chunk ends, treating chunk_size as a minimum."""
+    sorted_image_spans = sorted(image_spans, key=lambda item: item.start)
+    chunk_bounds = []
+    cursor = 0
+    while cursor + chunk_size <= prompt_len:
+        chunk_end = cursor + chunk_size
+        for span in sorted_image_spans:
+            if chunk_end <= span.start:
+                break
+            if span.start < chunk_end < span.end:
+                # Keep image placeholders atomic by growing this disk chunk.
+                chunk_end = span.end
+                break
+        chunk_bounds.append(chunk_end)
+        cursor = chunk_end
+
+    return chunk_bounds
+
+
+def build_prefix_cache_save_points_for_length(
+    prompt_len: int,
+    image_spans: list[PromptImageSpan],
+    chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
+) -> list[int]:
+    """Return save points up to a planned prefix length.
+
+    Decode-time save scheduling only needs boundary offsets; the actual token
+    values are hashed later when the snapshot is prepared.
+    """
+    max_reusable_prefix_len = prompt_len - 1
+    return [
+        chunk_end
+        for chunk_end in _build_prefix_cache_chunk_bounds(
+            prompt_len,
+            image_spans,
+            chunk_size,
+        )
+        if 0 < chunk_end <= max_reusable_prefix_len
+    ]

@@ -174,8 +174,6 @@ class VlmPromptSpillCache:
         self._cache_hits = 0
         self._cache_misses = 0
         self._cache_evictions = 0
-        self._pending_save_keys: set[str] = set()
-        self._pending_save_keys_lock = Lock()
 
     def snapshot_stats(self) -> VlmPromptSpillCacheStats:
         with self._metadata_index_lock:
@@ -185,17 +183,34 @@ class VlmPromptSpillCache:
             hits = self._cache_hits
             misses = self._cache_misses
             evictions = self._cache_evictions
-        with self._pending_save_keys_lock:
-            pending_saves = len(self._pending_save_keys)
+            record_sizes_by_key = dict(self._key_sizes)
+            chunk_sizes_by_key = {}
+            chunk_records_available_by_key = {}
+            for chunk_key, metadata in self._metadata_by_key.items():
+                record_keys = self._get_expected_record_keys_for_chunk_locked(
+                    chunk_key,
+                    metadata,
+                )
+                chunk_sizes_by_key[chunk_key] = sum(
+                    record_sizes_by_key.get(record_key, 0) for record_key in record_keys
+                )
+                chunk_records_available_by_key[chunk_key] = bool(record_keys) and all(
+                    record_key in self._record_metadata_by_key
+                    and record_key in self._key_sizes
+                    for record_key in record_keys
+                )
 
         return VlmPromptSpillCacheStats(
             total_bytes=total_bytes,
             max_bytes=max_bytes,
             entry_count=entry_count,
-            pending_saves=pending_saves,
             hits=hits,
             misses=misses,
             evictions=evictions,
+            record_sizes=sorted(record_sizes_by_key.values()),
+            record_sizes_by_key=record_sizes_by_key,
+            chunk_sizes_by_key=chunk_sizes_by_key,
+            chunk_records_available_by_key=chunk_records_available_by_key,
         )
 
     def load_chunk_sequence(self, keys: list[str]) -> Optional[SpilledPromptState]:
@@ -236,9 +251,6 @@ class VlmPromptSpillCache:
     def _load_one_chunk(
         self, key: str, record_keys: list[str]
     ) -> Optional[tuple[PromptCacheChunkMetadata, list[Any], Optional[Any]]]:
-        if self._is_save_pending(key):
-            return None
-
         with self._metadata_index_lock:
             metadata = self._metadata_by_key.get(key)
             rope_deltas = self._rope_deltas_by_key.get(key)
@@ -295,9 +307,6 @@ class VlmPromptSpillCache:
             if chunk.end > max_reusable_prefix_len:
                 break
 
-            if self._is_save_pending(chunk.key):
-                break
-
             with self._metadata_index_lock:
                 metadata = self._metadata_by_key.get(chunk.key)
 
@@ -334,39 +343,30 @@ class VlmPromptSpillCache:
         chunk: PromptPrefixChunk,
         prompt_cache: list[Any],
         rope_deltas: Optional[Any],
-    ) -> Optional[PendingPromptCacheSave]:
+    ) -> PendingPromptCacheSave:
         """Prepare a cache save for the background actor."""
-        key = chunk.key
-        if not self._begin_save(key):
-            return
+        return self._prepare_save_now(
+            chunk=chunk,
+            prompt_cache=prompt_cache,
+            rope_deltas=rope_deltas,
+        )
 
-        try:
-            return self._prepare_save_now(
-                chunk=chunk,
-                prompt_cache=prompt_cache,
-                rope_deltas=rope_deltas,
-            )
-        except Exception:
-            self._finish_save(key)
-            raise
+    def can_store_records(self) -> bool:
+        """Return False when the spill cache is intentionally hot-only."""
+        return self._max_cache_bytes != 0
 
     def commit_pending_save(self, pending_save: PendingPromptCacheSave) -> None:
         """Commit a pending save from the cache actor thread."""
-        try:
-            self._write_pending_save(pending_save)
-            self._index_metadata(pending_save.key, pending_save.metadata)
-            self._index_record_metadata(pending_save.records)
-            self._set_rope_deltas(pending_save.key, pending_save.rope_deltas)
-            # Account newly written records even if an ancestor was evicted.
-            self._touch_pending_save_records(pending_save)
-            self._touch_record_chain(pending_save.metadata.prefix_chunk_keys)
-        finally:
-            self._finish_save(pending_save.key)
-            self._evict_if_needed()
-
-    def discard_pending_save(self, pending_save: PendingPromptCacheSave) -> None:
-        """Drop a queued save without writing it."""
-        self._finish_save(pending_save.key)
+        if not self.can_store_records():
+            return
+        self._write_pending_save(pending_save)
+        self._index_metadata(pending_save.key, pending_save.metadata)
+        self._index_record_metadata(pending_save.records)
+        self._set_rope_deltas(pending_save.key, pending_save.rope_deltas)
+        # Account newly written records even if an ancestor was evicted.
+        self._touch_pending_save_records(pending_save)
+        self._touch_record_chain(pending_save.metadata.prefix_chunk_keys)
+        self._evict_if_needed()
 
     def close(self) -> None:
         """Clear metadata and close the actor-owned anonymous spool."""
@@ -378,21 +378,6 @@ class VlmPromptSpillCache:
             self._lru_keys.clear()
             self._total_bytes = 0
         self._store.close()
-
-    def _begin_save(self, key: str) -> bool:
-        with self._pending_save_keys_lock:
-            if key in self._pending_save_keys:
-                return False
-            self._pending_save_keys.add(key)
-            return True
-
-    def _finish_save(self, key: str) -> None:
-        with self._pending_save_keys_lock:
-            self._pending_save_keys.discard(key)
-
-    def _is_save_pending(self, key: str) -> bool:
-        with self._pending_save_keys_lock:
-            return key in self._pending_save_keys
 
     def _restore_record_keys_for_chunk_chain(
         self, chunk_keys: list[str]
@@ -505,21 +490,23 @@ class VlmPromptSpillCache:
         )
 
     def _write_pending_save(self, pending_save: PendingPromptCacheSave) -> None:
-        saved_record_keys = []
+        inserted_record_keys = []
 
         try:
             # The cache actor can block here after the scheduler thread has
             # already kicked off async_eval during prepare_save().
             for record in pending_save.records:
                 mx.eval(list(record.snapshot_arrays.values()))
+                existed = self._store.exists(record.key)
                 self._store.put(
                     record.key,
                     record.snapshot_arrays,
                     record.snapshot_metadata,
                 )
-                saved_record_keys.append(record.key)
+                if not existed:
+                    inserted_record_keys.append(record.key)
         except Exception:
-            for record_key in saved_record_keys:
+            for record_key in inserted_record_keys:
                 self._store.delete(record_key)
             raise
 
@@ -531,10 +518,6 @@ class VlmPromptSpillCache:
         with self._metadata_index_lock:
             for record in records:
                 self._record_metadata_by_key[record.key] = record.metadata
-
-    def _remove_record_metadata(self, key: str) -> None:
-        with self._metadata_index_lock:
-            self._record_metadata_by_key.pop(key, None)
 
     def _set_rope_deltas(self, key: str, rope_deltas: Optional[Any]) -> None:
         with self._metadata_index_lock:
@@ -549,7 +532,7 @@ class VlmPromptSpillCache:
             return _default_max_cache_bytes(base_dir, model_config)
 
         max_cache_bytes = int(raw)
-        return None if max_cache_bytes <= 0 else max_cache_bytes
+        return max(0, max_cache_bytes)
 
     def _touch_cache_entry_locked(self, key: str) -> None:
         total_size = self._get_cache_entry_size(key)
@@ -639,37 +622,6 @@ class VlmPromptSpillCache:
             metadata,
         )
 
-    def _get_chunk_cache_entry_size(self, chunk_key: str) -> int:
-        return sum(
-            self._get_cache_entry_size(record_key)
-            for record_key in self._get_expected_record_keys_for_chunk(chunk_key)
-        )
-
-    def _chunk_records_exist(self, chunk_key: str) -> bool:
-        with self._metadata_index_lock:
-            return self._chunk_records_available_locked(chunk_key)
-
-    def _chunk_records_available_locked(self, chunk_key: str) -> bool:
-        metadata = self._metadata_by_key.get(chunk_key)
-        if metadata is None:
-            return False
-
-        record_keys = self._get_expected_record_keys_for_chunk_locked(
-            chunk_key,
-            metadata,
-        )
-        if not record_keys:
-            return False
-
-        return all(
-            record_key in self._record_metadata_by_key
-            and self._store.exists(record_key)
-            for record_key in record_keys
-        )
-
-    def _debug_record_sizes(self) -> list[int]:
-        return self._store.record_sizes()
-
     def _evict_if_needed(self) -> None:
         if self._max_cache_bytes is None:
             return
@@ -687,9 +639,6 @@ class VlmPromptSpillCache:
 
     def _select_eviction_key_locked(self) -> Optional[str]:
         for key in self._lru_keys:
-            if self._is_save_pending(key):
-                continue
-
             return key
 
         return None
@@ -703,11 +652,10 @@ class VlmPromptSpillCache:
         )
 
     def _evict_key(self, key: str) -> None:
-        self._store.delete(key)
-
         with self._metadata_index_lock:
             self._total_bytes -= self._key_sizes.pop(key, 0)
             self._lru_keys.pop(key, None)
+            self._record_metadata_by_key.pop(key, None)
             self._cache_evictions += 1
 
-        self._remove_record_metadata(key)
+        self._store.delete(key)

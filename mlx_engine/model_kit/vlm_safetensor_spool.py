@@ -126,9 +126,6 @@ class AnonymousSafetensorSpool:
         ref = self._records.get(key)
         return ref.length if ref is not None else 0
 
-    def record_sizes(self) -> list[int]:
-        return sorted(ref.length for ref in self._records.values())
-
     def delete(self, key: str) -> None:
         ref = self._records.pop(key, None)
         if ref is None:

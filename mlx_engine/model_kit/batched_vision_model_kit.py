@@ -187,13 +187,11 @@ class _PromptCacheActor:
     def _discard_queued_jobs(self) -> None:
         while True:
             try:
-                _, _, job = self._queue.get_nowait()
+                # Dropped save jobs only hold immutable arrays; draining the
+                # queue releases them without touching actor-owned cache state.
+                self._queue.get_nowait()
             except QueueEmpty:
                 return
-
-            if isinstance(job, _SaveJob) and self._spill_cache is not None:
-                # Dropped save jobs must release their pending-save marker.
-                self._spill_cache.discard_pending_save(job.pending_save)
 
     def _run(self) -> None:
         while True:
@@ -688,6 +686,7 @@ class BatchedVisionModelKit:
                 prompt_input_ids=full_prompt_input_ids,
                 image_spans=prepared_prompt.image_spans,
                 prompt_progress=prompt_progress,
+                max_prefix_len=prompt_token_count + request.max_tokens,
             )
             if cache_boundaries:
                 insert_kwargs["cache_boundaries"] = [cache_boundaries]
@@ -714,6 +713,7 @@ class BatchedVisionModelKit:
             "detokenizer": detokenizer,
             "top_logprobs": request.top_logprobs,
             "request_id": request.request_id,
+            "image_spans": prepared_prompt.image_spans,
         }
 
     def _cancel_request(
@@ -895,6 +895,21 @@ class BatchedVisionModelKit:
 
             result["rqueue"].put(self._emit_response(result, response))
             if response.finish_reason is not None:
+                if (
+                    self._prompt_cache_coordinator is not None
+                    and response.prompt_cache is not None
+                    and response.all_tokens is not None
+                ):
+                    self._prompt_cache_coordinator.remember_completed(
+                        prompt_input_ids=response.all_tokens,
+                        image_spans=result["image_spans"],
+                        prompt_cache=response.prompt_cache,
+                        rope_deltas=(
+                            None
+                            if response.decode_state is None
+                            else response.decode_state.get("rope_deltas")
+                        ),
+                    )
                 result["rqueue"].put(None)
                 del state.active[response.uid]
 
