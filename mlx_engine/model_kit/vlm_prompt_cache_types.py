@@ -111,7 +111,7 @@ class VlmPromptSpillCacheStats:
     """Committed spill-cache accounting used by diagnostics and smokes."""
 
     total_bytes: int
-    max_bytes: Optional[int]
+    max_bytes: int
     entry_count: int
     hits: int
     misses: int
@@ -124,6 +124,18 @@ class VlmPromptSpillCacheStats:
 
 def make_record_key(chunk_key: str, record_kind: RecordKind) -> str:
     return f"record:{chunk_key}:{record_kind}"
+
+
+def record_kind_for_prompt_cache(cache: Any) -> RecordKind:
+    """Classify one live prompt-cache layer into its disk record kind."""
+    cache_type = type(cache).__name__
+    if cache_type == "KVCache":
+        # mlx-vlm re-exports mlx-lm cache classes; keep this name-based so local
+        # forks do not need identical module identities.
+        return RECORD_KIND_KV_DELTA
+    if cache_type == "RotatingKVCache" and getattr(cache, "keep", 0) == 0:
+        return RECORD_KIND_ROTATING_DELTA
+    return RECORD_KIND_STATE_CHECKPOINT
 
 
 def _image_fingerprint_for_chunk(

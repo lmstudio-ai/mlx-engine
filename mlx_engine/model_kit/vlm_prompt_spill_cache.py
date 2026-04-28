@@ -2,11 +2,14 @@ from collections import OrderedDict
 import json
 import os
 from pathlib import Path
-import shutil
 from threading import Lock
 from typing import Any, Optional
 
 import mlx.core as mx
+from mlx_engine.model_kit.vlm_prompt_cache_disk_budget import (
+    final_spill_cache_cap_bytes,
+    provisional_spill_cache_cap_bytes,
+)
 from mlx_engine.model_kit.vlm_prompt_cache_payload import (
     assemble_prompt_cache_chunks,
     materialize_prompt_state,
@@ -41,109 +44,11 @@ MLX_VLM_BATCHED_VISION_DISK_CACHE_DIR_ENV_VAR = (
 DEFAULT_MLX_VLM_BATCHED_VISION_DISK_CACHE_DIR = Path(
     "/tmp/mlx-engine-vlm-batched-vision-cache"
 )
-MLX_VLM_BATCHED_VISION_DISK_CACHE_MAX_BYTES_ENV_VAR = (
-    "MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_MAX_BYTES"
-)
-DEFAULT_MLX_VLM_BATCHED_VISION_DISK_CACHE_FALLBACK_MAX_BYTES = 8 * 1024 * 1024 * 1024
-DEFAULT_MLX_VLM_BATCHED_VISION_DISK_CACHE_HARD_CEILING_BYTES = 64 * 1024 * 1024 * 1024
-DEFAULT_KV_CACHE_DTYPE_BYTES = 2
 _RECORD_TOUCH_ORDER: tuple[RecordKind, ...] = (
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_KV_DELTA,
 )
-
-
-def _config_value(config: Any, key: str, default: Any = None) -> Any:
-    if isinstance(config, dict):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
-def _config_int(config: Any, key: str, default: Optional[int] = None) -> Optional[int]:
-    value = _config_value(config, key)
-    if value is None:
-        return default
-    return int(value)
-
-
-def _text_config(model_config: Any) -> Any:
-    return _config_value(model_config, "text_config", model_config)
-
-
-def _kv_cache_dtype_bytes(config: Any) -> int:
-    dtype = str(
-        _config_value(config, "torch_dtype") or _config_value(config, "dtype") or ""
-    ).lower()
-    if "64" in dtype:
-        return 8
-    if "32" in dtype:
-        return 4
-    return DEFAULT_KV_CACHE_DTYPE_BYTES
-
-
-def _estimate_model_kv_cache_max_bytes(model_config: Any) -> Optional[int]:
-    if model_config is None:
-        return None
-
-    config = _text_config(model_config)
-    max_positions = _config_int(config, "max_position_embeddings")
-    hidden_size = _config_int(config, "hidden_size")
-    num_attention_heads = _config_int(config, "num_attention_heads")
-    num_kv_heads = _config_int(config, "num_key_value_heads", num_attention_heads)
-    head_dim = _config_int(config, "head_dim")
-    if head_dim is None and hidden_size is not None and num_attention_heads:
-        head_dim = hidden_size // num_attention_heads
-
-    num_layers = _config_int(config, "num_hidden_layers") or _config_int(
-        config, "num_layers"
-    )
-    layer_types = list(_config_value(config, "layer_types", []) or [])
-    if num_layers is None:
-        num_layers = len(layer_types)
-    if not layer_types and num_layers is not None:
-        layer_types = ["full_attention"] * num_layers
-
-    shared_kv_layers = _config_int(config, "num_kv_shared_layers", 0) or 0
-    cache_layer_count = max(0, (num_layers or len(layer_types)) - shared_kv_layers)
-    layer_types = layer_types[:cache_layer_count]
-
-    if not max_positions or not num_kv_heads or not head_dim or not layer_types:
-        return None
-
-    dtype_bytes = _kv_cache_dtype_bytes(config)
-    total_bytes = 0
-    for layer_type in layer_types:
-        if layer_type == "linear_attention":
-            continue
-
-        layer_seq_len = max_positions
-        layer_head_dim = head_dim
-        layer_kv_heads = num_kv_heads
-        if layer_type == "sliding_attention":
-            layer_seq_len = _config_int(config, "sliding_window", max_positions)
-        elif layer_type == "full_attention":
-            layer_head_dim = _config_int(config, "global_head_dim", head_dim)
-            layer_kv_heads = _config_int(
-                config, "num_global_key_value_heads", num_kv_heads
-            )
-
-        total_bytes += 2 * layer_seq_len * layer_kv_heads * layer_head_dim * dtype_bytes
-
-    return total_bytes or None
-
-
-def _default_max_cache_bytes(cache_dir: Path, model_config: Any) -> int:
-    half_free_disk = shutil.disk_usage(cache_dir).free // 2
-    model_kv_bytes = (
-        _estimate_model_kv_cache_max_bytes(model_config)
-        or DEFAULT_MLX_VLM_BATCHED_VISION_DISK_CACHE_FALLBACK_MAX_BYTES
-    )
-    return min(
-        half_free_disk,
-        model_kv_bytes,
-        DEFAULT_MLX_VLM_BATCHED_VISION_DISK_CACHE_HARD_CEILING_BYTES,
-    )
 
 
 class VlmPromptSpillCache:
@@ -154,7 +59,7 @@ class VlmPromptSpillCache:
     spool during shutdown.
     """
 
-    def __init__(self, model_config: Any = None):
+    def __init__(self, max_kv_size: int | None = None):
         base_dir = Path(
             os.environ.get(
                 MLX_VLM_BATCHED_VISION_DISK_CACHE_DIR_ENV_VAR,
@@ -162,6 +67,9 @@ class VlmPromptSpillCache:
             )
         )
         base_dir.mkdir(parents=True, exist_ok=True)
+        self._base_dir = base_dir
+        self._max_kv_size = max_kv_size
+        self._empirical_cap_set = False
         self._store = AnonymousSafetensorSpool(base_dir)
         self._metadata_index_lock = Lock()
         self._metadata_by_key: dict[str, PromptCacheChunkMetadata] = {}
@@ -170,7 +78,7 @@ class VlmPromptSpillCache:
         self._key_sizes: dict[str, int] = {}
         self._lru_keys: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
-        self._max_cache_bytes = self._read_max_cache_bytes(base_dir, model_config)
+        self._max_cache_bytes = provisional_spill_cache_cap_bytes(base_dir)
         self._cache_hits = 0
         self._cache_misses = 0
         self._cache_evictions = 0
@@ -355,6 +263,24 @@ class VlmPromptSpillCache:
         """Return False when the spill cache is intentionally hot-only."""
         return self._max_cache_bytes != 0
 
+    def finalize_cap_from_completed_cache(self, prompt_cache: list[Any]) -> None:
+        """Empirically size the spool cap once from a real completed cache."""
+        max_cache_bytes = final_spill_cache_cap_bytes(
+            self._base_dir,
+            prompt_cache,
+            self._max_kv_size,
+        )
+        if max_cache_bytes is None:
+            return
+
+        with self._metadata_index_lock:
+            if self._empirical_cap_set:
+                return
+            self._max_cache_bytes = max_cache_bytes
+            self._empirical_cap_set = True
+
+        self._evict_if_needed()
+
     def commit_pending_save(self, pending_save: PendingPromptCacheSave) -> None:
         """Commit a pending save from the cache actor thread."""
         if not self.can_store_records():
@@ -526,14 +452,6 @@ class VlmPromptSpillCache:
             else:
                 self._rope_deltas_by_key[key] = rope_deltas
 
-    def _read_max_cache_bytes(self, base_dir: Path, model_config: Any) -> Optional[int]:
-        raw = os.environ.get(MLX_VLM_BATCHED_VISION_DISK_CACHE_MAX_BYTES_ENV_VAR, "")
-        if raw == "":
-            return _default_max_cache_bytes(base_dir, model_config)
-
-        max_cache_bytes = int(raw)
-        return max(0, max_cache_bytes)
-
     def _touch_cache_entry_locked(self, key: str) -> None:
         total_size = self._get_cache_entry_size(key)
         if total_size == 0:
@@ -623,9 +541,6 @@ class VlmPromptSpillCache:
         )
 
     def _evict_if_needed(self) -> None:
-        if self._max_cache_bytes is None:
-            return
-
         while True:
             with self._metadata_index_lock:
                 if self._total_bytes <= self._max_cache_bytes:

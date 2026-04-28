@@ -6,19 +6,10 @@ from mlx_engine.model_kit.vlm_prompt_cache_types import (
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
     RecordKind,
+    record_kind_for_prompt_cache,
 )
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 from mlx.utils import tree_flatten
-
-
-def is_kv_cache(cache: Any) -> bool:
-    # mlx-vlm re-exports mlx-lm cache classes; keep this name-based so local
-    # forks do not need identical module identities.
-    return type(cache).__name__ == "KVCache"
-
-
-def is_rotating_kv_cache(cache: Any) -> bool:
-    return type(cache).__name__ == "RotatingKVCache" and getattr(cache, "keep", 0) == 0
 
 
 def slice_kv_cache(cache: Any, chunk_start: int, chunk_end: int) -> KVCache:
@@ -59,16 +50,15 @@ def prepare_prompt_cache_payload(
     payload_cache = []
     payload_kinds = []
     for cache in prompt_cache:
-        if is_kv_cache(cache):
+        record_kind = record_kind_for_prompt_cache(cache)
+        if record_kind == RECORD_KIND_KV_DELTA:
             payload_cache.append(slice_kv_cache(cache, chunk_start, chunk_end))
-            payload_kinds.append(RECORD_KIND_KV_DELTA)
-        elif is_rotating_kv_cache(cache):
+        elif record_kind == RECORD_KIND_ROTATING_DELTA:
             payload_cache.append(slice_rotating_kv_cache(cache, chunk_start, chunk_end))
-            payload_kinds.append(RECORD_KIND_ROTATING_DELTA)
         else:
             # Opaque array-state caches stay as exact boundary checkpoints for V1.
             payload_cache.append(cache)
-            payload_kinds.append(RECORD_KIND_STATE_CHECKPOINT)
+        payload_kinds.append(record_kind)
 
     return payload_cache, payload_kinds
 

@@ -196,6 +196,7 @@ def load_model(
             model_path,
             prefill_step_size=prefill_step_size,
             vocab_only=vocab_only,
+            max_kv_size=max_kv_size,
             max_seq_nums=max_seq_nums,
             trust_remote_code=trust_remote_code,
         )

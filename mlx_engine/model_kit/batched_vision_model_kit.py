@@ -240,6 +240,7 @@ class BatchedVisionModelKit:
         model_path: Path,
         prefill_step_size: int,
         vocab_only: bool = False,
+        max_kv_size: Optional[int] = None,
         max_seq_nums: Optional[int] = None,
         trust_remote_code: bool = False,
     ):
@@ -265,7 +266,7 @@ class BatchedVisionModelKit:
         self._prompt_spill_cache = (
             None
             if vocab_only or not is_mlx_vlm_batched_vision_disk_cache_enabled()
-            else VlmPromptSpillCache(self.config)
+            else VlmPromptSpillCache(max_kv_size=max_kv_size)
         )
         self._prompt_cache_coordinator = (
             None
@@ -900,6 +901,9 @@ class BatchedVisionModelKit:
                     and response.prompt_cache is not None
                     and response.all_tokens is not None
                 ):
+                    self._prompt_spill_cache.finalize_cap_from_completed_cache(
+                        response.prompt_cache
+                    )
                     self._prompt_cache_coordinator.remember_completed(
                         prompt_input_ids=response.all_tokens,
                         image_spans=result["image_spans"],

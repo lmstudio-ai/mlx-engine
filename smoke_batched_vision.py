@@ -2060,21 +2060,12 @@ def main():
         cache_dir.mkdir(parents=True, exist_ok=True)
         os.environ["MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE"] = "1"
         os.environ["MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_DIR"] = str(cache_dir)
-        if args.cache_max_bytes is None:
-            os.environ.pop(
-                "MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_MAX_BYTES", None
-            )
-        else:
-            os.environ["MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_MAX_BYTES"] = str(
-                args.cache_max_bytes
-            )
         print("CACHE_DIR", str(cache_dir))
         if args.cache_max_bytes is not None:
             print("CACHE_MAX_BYTES", args.cache_max_bytes)
     else:
         os.environ.pop("MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE", None)
         os.environ.pop("MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_DIR", None)
-        os.environ.pop("MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_MAX_BYTES", None)
 
     if args.mode == "multi-prefix":
         run_multi_prefix(args)
