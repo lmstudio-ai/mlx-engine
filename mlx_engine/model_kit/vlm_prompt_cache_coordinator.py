@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from mlx_engine.model_kit.vlm_prompt_spill_cache import (
+from mlx_engine.model_kit.vlm_prompt_cache_types import (
     PreparedPromptSnapshot,
-    VlmPromptSpillCache,
     build_prefix_cache_boundaries,
     build_prefix_cache_chunks,
 )
+from mlx_engine.model_kit.vlm_prompt_spill_cache import VlmPromptSpillCache
 
 
 @dataclass

@@ -1,18 +1,13 @@
 from collections import OrderedDict
-import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
-from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Optional
 
 import mlx.core as mx
 from mlx_engine.model_kit.vlm_prompt_cache_payload import (
-    PAYLOAD_KIND_BOUNDARY as PAYLOAD_KIND_BOUNDARY,
-    PAYLOAD_KIND_KV_DELTA as PAYLOAD_KIND_KV_DELTA,
-    RECORD_KIND_KV_DELTA as RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_WRITE_ORDER,
@@ -21,6 +16,19 @@ from mlx_engine.model_kit.vlm_prompt_cache_payload import (
     materialize_prompt_state,
     prepare_prompt_cache_payload,
     serialize_rope_deltas,
+)
+from mlx_engine.model_kit.vlm_prompt_cache_planner import PromptCacheDependencyPlanner
+from mlx_engine.model_kit.vlm_prompt_cache_types import (
+    CachedPrefixMatch,
+    CachedPromptMetadata,
+    CachedPromptRecordMetadata,
+    PrefixCacheChunk,
+    PreparedPromptRecord,
+    PreparedPromptSnapshot,
+    SpilledPromptState,
+    VlmPromptSpillCacheStats,
+    build_prefix_cache_chunks,
+    make_record_key,
 )
 from mlx_engine.model_kit.vlm_safetensor_spool import TempSafetensorSpool
 from mlx.utils import tree_flatten
@@ -37,79 +45,7 @@ MLX_VLM_BATCHED_VISION_DISK_CACHE_MAX_BYTES_ENV_VAR = (
 )
 DEFAULT_MLX_VLM_BATCHED_VISION_DISK_CACHE_FALLBACK_MAX_BYTES = 8 * 1024 * 1024 * 1024
 DEFAULT_MLX_VLM_BATCHED_VISION_DISK_CACHE_HARD_CEILING_BYTES = 64 * 1024 * 1024 * 1024
-# LMCache defaults to 256-token external chunks, and MLX KV caches allocate in
-# 256-token steps. This is a spill-cache chunk size, not vLLM's KV page size.
-DEFAULT_PREFIX_CHUNK_SIZE = 256
 DEFAULT_KV_CACHE_DTYPE_BYTES = 2
-
-
-@dataclass
-class SpilledPromptState:
-    prompt_cache: list[Any]
-    rope_deltas: Optional[Any]
-
-
-@dataclass
-class PrefixCacheChunk:
-    start: int
-    end: int
-    key: str
-    chunk_hash: str
-    image_hashes: list[str]
-
-
-@dataclass
-class CachedPromptMetadata:
-    prompt_input_ids: list[int]
-    image_hashes: list[str]
-    min_reusable_prefix_len: int
-    chunk_start: int
-    chunk_end: int
-    chunk_hash: str
-    payload_kinds: list[str]
-
-
-@dataclass
-class CachedPromptRecordMetadata:
-    chunk_key: str
-    record_kind: str
-    layer_indices: list[int]
-    window_size: Optional[int] = None
-
-
-@dataclass
-class CachedPrefixMatch:
-    key: str
-    metadata: CachedPromptMetadata
-    matched_prefix_len: int
-    chunk_keys: list[str]
-
-
-@dataclass
-class PreparedPromptRecord:
-    key: str
-    metadata: CachedPromptRecordMetadata
-    snapshot_arrays: dict[str, Any]
-    snapshot_metadata: dict[str, str]
-
-
-@dataclass
-class PreparedPromptSnapshot:
-    key: str
-    metadata: CachedPromptMetadata
-    serialized_rope_deltas: Optional[Any]
-    records: list[PreparedPromptRecord]
-
-
-@dataclass
-class VlmPromptSpillCacheStats:
-    total_bytes: int
-    max_bytes: Optional[int]
-    entry_count: int
-    pending_saves: int
-    hits: int
-    misses: int
-    evictions: int
 
 
 def _config_value(config: Any, key: str, default: Any = None) -> Any:
@@ -204,106 +140,6 @@ def _default_max_cache_bytes(cache_dir: Path, model_config: Any) -> int:
     )
 
 
-def _build_chunk_metadata(
-    prompt_input_ids: list[int],
-    image_hashes: list[str],
-    min_reusable_prefix_len: int,
-    chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
-) -> list[PrefixCacheChunk]:
-    image_seed = hashlib.sha256(
-        json.dumps(image_hashes, separators=(",", ":")).encode()
-    ).hexdigest()
-    parent_hash = image_seed
-    chunks = []
-
-    prompt_len = len(prompt_input_ids)
-    chunk_bounds = []
-    if min_reusable_prefix_len > 0:
-        # Vision prompts need the post-image boundary even when it is not aligned
-        # to the text chunk size. Plain text follows fixed full-size chunks.
-        chunk_bounds.append(min(min_reusable_prefix_len, prompt_len))
-
-    chunk_start = chunk_bounds[-1] if chunk_bounds else 0
-    while chunk_start + chunk_size <= prompt_len:
-        chunk_start += chunk_size
-        chunk_bounds.append(chunk_start)
-
-    previous_chunk_end = 0
-    for chunk_end in chunk_bounds:
-        payload = json.dumps(
-            {
-                "parent_hash": parent_hash,
-                "chunk_tokens": prompt_input_ids[previous_chunk_end:chunk_end],
-            },
-            separators=(",", ":"),
-        )
-        parent_hash = hashlib.sha256(payload.encode()).hexdigest()
-        if chunk_end >= min_reusable_prefix_len:
-            chunks.append(
-                PrefixCacheChunk(
-                    start=previous_chunk_end,
-                    end=chunk_end,
-                    key=_make_chunk_key(previous_chunk_end, chunk_end, parent_hash),
-                    chunk_hash=parent_hash,
-                    image_hashes=list(image_hashes),
-                )
-            )
-        previous_chunk_end = chunk_end
-
-    return chunks
-
-
-def _make_chunk_key(chunk_start: int, chunk_end: int, chunk_hash: str) -> str:
-    payload = json.dumps(
-        {
-            "kind": "prompt_chunk",
-            "chunk_start": chunk_start,
-            "chunk_end": chunk_end,
-            "chunk_hash": chunk_hash,
-        },
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def _make_record_key(chunk_key: str, record_kind: str) -> str:
-    payload = json.dumps(
-        {
-            "kind": "prompt_record",
-            "chunk_key": chunk_key,
-            "record_kind": record_kind,
-        },
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def build_prefix_cache_chunks(
-    prompt_input_ids: list[int],
-    image_hashes: list[str],
-    min_reusable_prefix_len: int,
-) -> list[PrefixCacheChunk]:
-    return _build_chunk_metadata(
-        prompt_input_ids,
-        image_hashes,
-        min_reusable_prefix_len,
-    )
-
-
-def build_prefix_cache_boundaries(
-    prompt_input_ids: list[int],
-    image_hashes: list[str],
-    min_reusable_prefix_len: int,
-) -> list[int]:
-    chunks = build_prefix_cache_chunks(
-        prompt_input_ids,
-        image_hashes,
-        min_reusable_prefix_len,
-    )
-    max_reusable_prefix_len = len(prompt_input_ids) - 1
-    return [chunk.end for chunk in chunks if 0 < chunk.end <= max_reusable_prefix_len]
-
-
 class VlmPromptSpillCache:
     def __init__(self, model_config: Any = None):
         base_dir = Path(
@@ -317,6 +153,11 @@ class VlmPromptSpillCache:
         self._metadata_index_lock = Lock()
         self._metadata_by_key: dict[str, CachedPromptMetadata] = {}
         self._record_metadata_by_key: dict[str, CachedPromptRecordMetadata] = {}
+        self._dependency_planner = PromptCacheDependencyPlanner(
+            metadata_by_key=self._metadata_by_key,
+            record_metadata_by_key=self._record_metadata_by_key,
+            record_exists=self._store.exists,
+        )
         self._serialized_rope_deltas_by_key: dict[str, Optional[Any]] = {}
         self._key_sizes: dict[str, int] = {}
         self._lru_keys: OrderedDict[str, None] = OrderedDict()
@@ -565,59 +406,7 @@ class VlmPromptSpillCache:
     def _record_keys_for_chunk_sequence_locked(
         self, chunk_keys: list[str]
     ) -> Optional[dict[str, list[str]]]:
-        final_metadata = self._metadata_by_key.get(chunk_keys[-1])
-        if final_metadata is None:
-            return None
-
-        final_chunk_end = final_metadata.chunk_end
-        final_chunk_key = chunk_keys[-1]
-        rotating_window_size = self._rotating_window_size_for_sequence_locked(
-            chunk_keys
-        )
-        record_keys_by_chunk_key = {}
-        for chunk_key in chunk_keys:
-            chunk_metadata = self._metadata_by_key.get(chunk_key)
-            if chunk_metadata is None:
-                return None
-
-            record_keys = []
-            for record_kind in RECORD_WRITE_ORDER:
-                if record_kind not in chunk_metadata.payload_kinds:
-                    continue
-                if (
-                    record_kind == RECORD_KIND_STATE_CHECKPOINT
-                    and chunk_key != final_chunk_key
-                ):
-                    continue
-                if record_kind == RECORD_KIND_ROTATING_DELTA:
-                    if rotating_window_size is None:
-                        return None
-                    window_start = final_chunk_end - rotating_window_size
-                    if chunk_metadata.chunk_end <= window_start:
-                        continue
-
-                record_key = _make_record_key(chunk_key, record_kind)
-                if (
-                    record_key not in self._record_metadata_by_key
-                    or not self._store.exists(record_key)
-                ):
-                    return None
-                record_keys.append(record_key)
-            record_keys_by_chunk_key[chunk_key] = record_keys
-
-        return record_keys_by_chunk_key
-
-    def _rotating_window_size_for_sequence_locked(
-        self, chunk_keys: list[str]
-    ) -> Optional[int]:
-        window_size = None
-        for chunk_key in chunk_keys:
-            record_key = _make_record_key(chunk_key, RECORD_KIND_ROTATING_DELTA)
-            record_metadata = self._record_metadata_by_key.get(record_key)
-            if record_metadata is not None and record_metadata.window_size is not None:
-                window_size = max(window_size or 0, record_metadata.window_size)
-
-        return window_size
+        return self._dependency_planner.record_keys_for_chunk_sequence(chunk_keys)
 
     def _prepare_save_now(
         self,
@@ -681,7 +470,7 @@ class VlmPromptSpillCache:
         record_cache: list[Any],
         prompt_input_ids: list[int],
     ) -> PreparedPromptRecord:
-        record_key = _make_record_key(chunk_key, record_kind)
+        record_key = make_record_key(chunk_key, record_kind)
         window_size = (
             record_cache[0].max_size
             if record_kind == RECORD_KIND_ROTATING_DELTA
@@ -804,11 +593,7 @@ class VlmPromptSpillCache:
     def _get_chunk_record_keys_locked(
         self, chunk_key: str, metadata: CachedPromptMetadata
     ) -> list[str]:
-        return [
-            _make_record_key(chunk_key, record_kind)
-            for record_kind in RECORD_WRITE_ORDER
-            if record_kind in metadata.payload_kinds
-        ]
+        return self._dependency_planner.chunk_record_keys(chunk_key, metadata)
 
     def _get_chunk_cache_entry_size(self, chunk_key: str) -> int:
         return sum(
@@ -836,14 +621,7 @@ class VlmPromptSpillCache:
         )
 
     def _chunk_has_live_records_locked(self, chunk_key: str) -> bool:
-        metadata = self._metadata_by_key.get(chunk_key)
-        if metadata is None:
-            return False
-
-        return any(
-            record_key in self._record_metadata_by_key
-            for record_key in self._get_chunk_record_keys_locked(chunk_key, metadata)
-        )
+        return self._dependency_planner.chunk_has_live_records(chunk_key)
 
     def _debug_record_sizes(self) -> list[int]:
         return self._store.record_sizes()
@@ -877,8 +655,11 @@ class VlmPromptSpillCache:
                 return key
 
             chunk_metadata = self._metadata_by_key.get(record_metadata.chunk_key)
-            if chunk_metadata is not None and self._has_dependent_chunks_locked(
-                record_metadata.chunk_key, chunk_metadata
+            if (
+                chunk_metadata is not None
+                and self._dependency_planner.has_dependent_chunks(
+                    record_metadata.chunk_key, chunk_metadata
+                )
             ):
                 continue
 
@@ -901,120 +682,12 @@ class VlmPromptSpillCache:
             chunk_metadata = self._metadata_by_key.get(record_metadata.chunk_key)
             if chunk_metadata is None:
                 continue
-            stale = (
-                self._is_stale_rotating_record_locked(
-                    record_metadata,
-                    chunk_metadata,
-                )
-                if record_metadata.record_kind == RECORD_KIND_ROTATING_DELTA
-                else self._is_stale_state_checkpoint_record_locked(
-                    record_metadata,
-                    chunk_metadata,
-                )
-            )
-            if stale:
+            if self._dependency_planner.is_stale_optional_record(
+                record_metadata, chunk_metadata
+            ):
                 return key
 
         return None
-
-    def _is_stale_rotating_record_locked(
-        self,
-        record_metadata: CachedPromptRecordMetadata,
-        metadata: CachedPromptMetadata,
-    ) -> bool:
-        if record_metadata.window_size is None:
-            return False
-
-        for candidate_key, candidate_metadata in self._metadata_by_key.items():
-            if (
-                candidate_key == record_metadata.chunk_key
-                or candidate_metadata.chunk_end <= metadata.chunk_end
-                or candidate_metadata.image_hashes != metadata.image_hashes
-                or not self._chunk_has_live_records_locked(candidate_key)
-                or candidate_metadata.prompt_input_ids[: metadata.chunk_end]
-                != metadata.prompt_input_ids
-            ):
-                continue
-
-            window_start = candidate_metadata.chunk_end - record_metadata.window_size
-            if metadata.chunk_end > window_start:
-                continue
-
-            candidate_chunk_keys = [
-                chunk.key
-                for chunk in build_prefix_cache_chunks(
-                    candidate_metadata.prompt_input_ids,
-                    candidate_metadata.image_hashes,
-                    candidate_metadata.min_reusable_prefix_len,
-                )
-                if chunk.end <= candidate_metadata.chunk_end
-            ]
-            if (
-                candidate_chunk_keys
-                and candidate_chunk_keys[-1] == candidate_key
-                and self._record_keys_for_chunk_sequence_locked(candidate_chunk_keys)
-                is not None
-            ):
-                return True
-
-        return False
-
-    def _is_stale_state_checkpoint_record_locked(
-        self,
-        record_metadata: CachedPromptRecordMetadata,
-        metadata: CachedPromptMetadata,
-    ) -> bool:
-        for candidate_key, candidate_metadata in self._metadata_by_key.items():
-            if (
-                candidate_key == record_metadata.chunk_key
-                or candidate_metadata.chunk_end <= metadata.chunk_end
-                or candidate_metadata.image_hashes != metadata.image_hashes
-                or not self._chunk_has_live_records_locked(candidate_key)
-                or candidate_metadata.prompt_input_ids[: metadata.chunk_end]
-                != metadata.prompt_input_ids
-            ):
-                continue
-
-            candidate_chunk_keys = [
-                chunk.key
-                for chunk in build_prefix_cache_chunks(
-                    candidate_metadata.prompt_input_ids,
-                    candidate_metadata.image_hashes,
-                    candidate_metadata.min_reusable_prefix_len,
-                )
-                if chunk.end <= candidate_metadata.chunk_end
-            ]
-            if (
-                candidate_chunk_keys
-                and candidate_chunk_keys[-1] == candidate_key
-                and self._record_keys_for_chunk_sequence_locked(candidate_chunk_keys)
-                is not None
-            ):
-                return True
-
-        return False
-
-    def _has_dependent_chunks_locked(
-        self,
-        chunk_key: str,
-        metadata: CachedPromptMetadata,
-    ) -> bool:
-        for candidate_key, candidate_metadata in self._metadata_by_key.items():
-            if (
-                candidate_key == chunk_key
-                or candidate_metadata.chunk_end <= metadata.chunk_end
-                or candidate_metadata.image_hashes != metadata.image_hashes
-                or not self._chunk_has_live_records_locked(candidate_key)
-            ):
-                continue
-
-            if (
-                candidate_metadata.prompt_input_ids[: metadata.chunk_end]
-                == metadata.prompt_input_ids
-            ):
-                return True
-
-        return False
 
     def _evict_key(self, key: str) -> None:
         self._store.delete(key)

@@ -29,8 +29,10 @@ from mlx_engine.model_kit.vlm_prompt_cache_coordinator import (
     RestoredPromptCache,
     VlmPromptCacheCoordinator,
 )
-from mlx_engine.model_kit.vlm_prompt_spill_cache import (
+from mlx_engine.model_kit.vlm_prompt_cache_types import (
     PreparedPromptSnapshot,
+)
+from mlx_engine.model_kit.vlm_prompt_spill_cache import (
     VlmPromptSpillCache,
 )
 from mlx_engine.utils.generation_helpers import MAX_TOP_LOGPROBS, create_sampler

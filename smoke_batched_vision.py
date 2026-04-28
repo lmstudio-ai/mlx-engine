@@ -20,13 +20,17 @@ from transformers import AutoProcessor
 
 from mlx_engine.generate import create_generator, load_model, tokenize, unload
 from mlx_engine.model_kit.vlm_prompt_cache_coordinator import RestoredPromptCache
-from mlx_engine.model_kit.vlm_prompt_spill_cache import (
+from mlx_engine.model_kit.vlm_prompt_cache_payload import (
     PAYLOAD_KIND_BOUNDARY,
     PAYLOAD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
-    VlmPromptSpillCache,
+)
+from mlx_engine.model_kit.vlm_prompt_cache_types import (
     build_prefix_cache_chunks,
+)
+from mlx_engine.model_kit.vlm_prompt_spill_cache import (
+    VlmPromptSpillCache,
 )
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_lm.models.cache import (
