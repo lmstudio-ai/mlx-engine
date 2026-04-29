@@ -75,7 +75,7 @@ class VlmPromptCacheCoordinator:
         return RestoredPromptCache(
             cached_prefix_len=cached_state.cached_prefix_len,
             prompt_cache=cached_state.prompt_cache,
-            rope_deltas=cached_state.rope_deltas,
+            rope_deltas=None,
         )
 
     def boundaries_after(
@@ -109,7 +109,7 @@ class VlmPromptCacheCoordinator:
             _uid: int,
             prefix_len: int,
             prompt_cache: list[Any],
-            decode_state: Optional[dict[str, Any]],
+            _decode_state: Optional[dict[str, Any]],
             prompt_input_ids: Optional[list[int]] = None,
         ) -> None:
             if not self._spill_cache.can_store_records():
@@ -120,24 +120,22 @@ class VlmPromptCacheCoordinator:
                 if prompt_input_ids is None
                 else list(prompt_input_ids)
             )
-            chunks_by_end = {
-                chunk.end: chunk
-                for chunk in build_prefix_cache_chunks(
-                    snapshot_input_ids,
-                    image_spans,
-                )
-            }
-            chunk = chunks_by_end.get(prefix_len)
-            if prefix_len <= 0 or chunk is None:
+            chunks = build_prefix_cache_chunks(
+                snapshot_input_ids,
+                image_spans,
+            )
+            chunk_idx = next(
+                (idx for idx, chunk in enumerate(chunks) if chunk.end == prefix_len),
+                None,
+            )
+            if prefix_len <= 0 or chunk_idx is None:
                 return
 
-            rope_deltas = (
-                None if decode_state is None else decode_state.get("rope_deltas")
-            )
+            chunk = chunks[chunk_idx]
             pending_save = self._spill_cache.prepare_save(
                 chunk=chunk,
+                prefix_chunks=chunks[: chunk_idx + 1],
                 prompt_cache=prompt_cache,
-                rope_deltas=rope_deltas,
             )
             self._enqueue_pending_save(pending_save)
 

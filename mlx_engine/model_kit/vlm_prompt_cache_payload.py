@@ -1,7 +1,9 @@
-from typing import Any, Optional
+from typing import Any
 
 import mlx.core as mx
 from mlx_engine.model_kit.vlm_prompt_cache_types import (
+    PromptCacheLayout,
+    PromptPrefixChunk,
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
@@ -92,7 +94,8 @@ def concat_rotating_delta_caches(
 
 def assemble_prompt_cache_chunks(
     chunk_prompt_caches: list[list[Any]],
-    chunk_metadata: list[Any],
+    chunks: list[PromptPrefixChunk],
+    layout: PromptCacheLayout,
 ) -> list[Any]:
     """Rebuild one prompt cache from a loadable prefix chunk sequence."""
     if len(chunk_prompt_caches) == 1:
@@ -102,7 +105,7 @@ def assemble_prompt_cache_chunks(
     layer_count = len(chunk_prompt_caches[-1])
     for layer_idx in range(layer_count):
         layer_chunks = [prompt_cache[layer_idx] for prompt_cache in chunk_prompt_caches]
-        record_kind = chunk_metadata[-1].payload_kinds[layer_idx]
+        record_kind = layout.layer_kinds[layer_idx]
         if record_kind == RECORD_KIND_KV_DELTA:
             # Full-attention layers keep every chunk in prefix order.
             assembled.append(concat_kv_delta_caches(layer_chunks))
@@ -111,7 +114,7 @@ def assemble_prompt_cache_chunks(
             assembled.append(
                 concat_rotating_delta_caches(
                     [cache for cache in layer_chunks if cache is not None],
-                    chunk_metadata[-1].chunk_end,
+                    chunks[-1].end,
                 )
             )
         elif record_kind == RECORD_KIND_STATE_CHECKPOINT:
@@ -125,14 +128,7 @@ def assemble_prompt_cache_chunks(
     return assembled
 
 
-def materialize_prompt_state(
-    prompt_cache: list[Any],
-    rope_deltas: Optional[Any],
-) -> None:
-    eval_targets = [
-        value for _, value in tree_flatten([cache.state for cache in prompt_cache])
-    ]
-    if rope_deltas is not None:
-        eval_targets.append(rope_deltas)
-    if eval_targets:
-        mx.eval(eval_targets)
+def materialize_prompt_state(prompt_cache: list[Any]) -> None:
+    mx.eval(
+        [value for _, value in tree_flatten([cache.state for cache in prompt_cache])]
+    )

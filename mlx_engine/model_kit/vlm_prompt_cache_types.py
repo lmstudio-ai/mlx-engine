@@ -30,7 +30,6 @@ class PromptImageSpan:
 class SpilledPromptState:
     cached_prefix_len: int
     prompt_cache: list[Any]
-    rope_deltas: Optional[Any]
 
 
 @dataclass
@@ -41,26 +40,21 @@ class PromptPrefixChunk:
     hashes whose placeholder spans are inside this chunk, so appending a later
     image does not invalidate earlier chunks. Physical safetensor blobs are
     keyed separately with `make_record_key(key, record_kind)`.
-    `prefix_chunk_keys` is the ordered restore chain through this chunk.
     """
 
     start: int
     end: int
     key: str
     chunk_hash: str
-    prefix_chunk_keys: list[str]
 
 
 @dataclass
-class PromptCacheChunkMetadata:
-    """Index metadata for one logical prompt-prefix chunk.
+class PromptCacheLayout:
+    """Stable prompt-cache layer layout for one model load."""
 
-    Physical safetensor records are tracked by `PromptCacheRecordMetadata`.
-    """
-
-    chunk_end: int
-    prefix_chunk_keys: list[str]
-    payload_kinds: list[RecordKind]
+    layer_kinds: list[RecordKind]
+    layer_indices_by_kind: dict[RecordKind, list[int]]
+    rotating_window_size: Optional[int] = None
 
 
 @dataclass
@@ -68,13 +62,12 @@ class PromptCacheRecordMetadata:
     """Index metadata for one physical safetensor record.
 
     A record stores one payload kind for one chunk, usually covering one or more
-    cache layers. `window_size` is set only for rotating/sliding-window records.
+    cache layers.
     """
 
     chunk_key: str
     record_kind: RecordKind
     layer_indices: list[int]
-    window_size: Optional[int] = None
 
 
 @dataclass
@@ -89,9 +82,8 @@ class PreparedPromptRecord:
 class PendingPromptCacheSave:
     """Prepared cache-boundary save awaiting actor-thread disk commit/discard."""
 
-    key: str
-    metadata: PromptCacheChunkMetadata
-    rope_deltas: Optional[Any]
+    prefix_chunks: list[PromptPrefixChunk]
+    cache_layout: PromptCacheLayout
     records: list[PreparedPromptRecord]
 
 
@@ -161,7 +153,6 @@ def build_prefix_cache_chunks(
     )
     prefix_hash = hashlib.sha256(b"prompt-prefix-v1").hexdigest()
     chunks = []
-    prefix_chunk_keys: list[str] = []
 
     previous_chunk_end = 0
     for chunk_end in chunk_bounds:
@@ -178,14 +169,12 @@ def build_prefix_cache_chunks(
         )
         prefix_hash = hashlib.sha256(payload.encode()).hexdigest()
         chunk_key = prefix_hash
-        prefix_chunk_keys.append(chunk_key)
         chunks.append(
             PromptPrefixChunk(
                 start=previous_chunk_end,
                 end=chunk_end,
                 key=chunk_key,
                 chunk_hash=prefix_hash,
-                prefix_chunk_keys=list(prefix_chunk_keys),
             )
         )
         previous_chunk_end = chunk_end

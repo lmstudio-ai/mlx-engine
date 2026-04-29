@@ -46,6 +46,9 @@ from mlx_lm.models.cache import (
 DEFAULT_MODEL_PATH = Path(
     "~/.lmstudio/models/lmstudio-community/gemma-4-E2B-it-MLX-4bit"
 ).expanduser()
+DEFAULT_QWEN35_MODEL_PATH = Path(
+    "~/.lmstudio/models/lmstudio-community/Qwen3.5-2B-MLX-4bit"
+).expanduser()
 DEFAULT_IMAGE_PATH = Path(__file__).resolve().parent / "demo-data" / "toucan.jpeg"
 DEFAULT_SECONDARY_IMAGE_PATH = (
     Path(__file__).resolve().parent / "demo-data" / "chameleon.webp"
@@ -144,6 +147,8 @@ def parse_args():
             "rotating-suffix",
             "multi-prefix-e2e",
             "hybrid-cache-e2e",
+            "arrays-cache-e2e",
+            "arrays-cache-branch-e2e",
             "eviction",
             "eviction-e2e",
             "eviction-stress",
@@ -376,6 +381,13 @@ def is_strict_prefix(prefix: list[int], values: list[int]) -> bool:
     return len(prefix) < len(values) and values[: len(prefix)] == prefix
 
 
+def common_token_prefix_len(left: list[int], right: list[int]) -> int:
+    for idx, (left_token, right_token) in enumerate(zip(left, right)):
+        if left_token != right_token:
+            return idx
+    return min(len(left), len(right))
+
+
 def build_prefix_requests(
     model_kit,
     processor,
@@ -502,6 +514,96 @@ def build_multi_prefix_e2e_requests(
     raise RuntimeError("Could not build a compact two-chunk e2e prompt")
 
 
+def build_arrays_cache_branch_e2e_requests(
+    model_kit,
+    processor,
+    *,
+    min_restored_tokens: int,
+) -> tuple[PreparedRequest, PreparedRequest, object, object, int, int, list[int]]:
+    user_seed = "Read this previous assistant answer before continuing."
+    unit = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu. "
+    full_user = "Continue from the full answer and reply with one word."
+    branch_user = "Now branch from that midpoint and answer with one word."
+
+    for repeat_count in range(64, 240, 8):
+        words = (unit * repeat_count).split()
+        assistant_text = " ".join(words)
+        assistant_prefix = " ".join(words[: len(words) // 2])
+
+        base_prompt_text = processor.apply_chat_template(
+            [
+                {"role": "user", "content": user_seed},
+                {"role": "assistant", "content": assistant_text},
+                {"role": "user", "content": full_user},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        branch_prompt_text = processor.apply_chat_template(
+            [
+                {"role": "user", "content": user_seed},
+                {"role": "assistant", "content": assistant_prefix},
+                {"role": "user", "content": branch_user},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        base_prepared = prepare_request_from_prompt_text(
+            model_kit,
+            prompt_text=base_prompt_text,
+            spec=RequestSpec(
+                name="arrays-cache-branch-base",
+                prompt="",
+                expected_any=(),
+                max_tokens=1,
+            ),
+            request_id="arrays-cache-branch-base",
+        )
+        branch_prepared = prepare_request_from_prompt_text(
+            model_kit,
+            prompt_text=branch_prompt_text,
+            spec=RequestSpec(
+                name="arrays-cache-branch-followup",
+                prompt="",
+                expected_any=(),
+                max_tokens=1,
+            ),
+            request_id="arrays-cache-branch-followup",
+        )
+        base_prompt_inputs = prepare_prompt_inputs(model_kit, base_prepared)
+        branch_prompt_inputs = prepare_prompt_inputs(model_kit, branch_prepared)
+        common_prefix_len = common_token_prefix_len(
+            base_prompt_inputs.prompt_input_ids,
+            branch_prompt_inputs.prompt_input_ids,
+        )
+        reusable_boundaries = [
+            chunk.end
+            for chunk in build_prefix_cache_chunks(
+                base_prompt_inputs.prompt_input_ids,
+                base_prompt_inputs.image_spans,
+            )
+            if (
+                chunk.end <= common_prefix_len
+                and chunk.end < len(branch_prompt_inputs.prompt_input_ids)
+            )
+        ]
+        if reusable_boundaries and reusable_boundaries[-1] >= min_restored_tokens:
+            return (
+                base_prepared,
+                branch_prepared,
+                base_prompt_inputs,
+                branch_prompt_inputs,
+                common_prefix_len,
+                reusable_boundaries[-1],
+                reusable_boundaries,
+            )
+        if len(base_prompt_inputs.prompt_input_ids) > 1600:
+            break
+
+    raise RuntimeError("Could not build a branch prompt with a reusable half-prefix")
+
+
 def wait_for_prefix_snapshot(
     model_kit,
     *,
@@ -528,23 +630,52 @@ def wait_for_prefix_snapshot(
     raise RuntimeError("Timed out waiting for a reusable prompt snapshot")
 
 
+def wait_for_restore_plan(
+    model_kit,
+    *,
+    prompt_input_ids: list[int],
+    image_spans: list,
+    expected_prefix_len: int,
+    timeout_s: float,
+):
+    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
+    if prompt_spill_cache is None:
+        raise RuntimeError("Prefix mode requires the batched vision spill cache")
+
+    deadline = time.perf_counter() + timeout_s
+    last_seen_prefix = None
+    while time.perf_counter() < deadline:
+        match = find_restore_records(
+            prompt_spill_cache,
+            prompt_input_ids,
+            image_spans,
+        )
+        if (
+            match is not None
+            and restore_cached_prefix_len(match) == expected_prefix_len
+        ):
+            return match
+        if match is not None:
+            last_seen_prefix = restore_cached_prefix_len(match)
+        time.sleep(0.05)
+
+    raise RuntimeError(
+        "Timed out waiting for restore plan at "
+        f"{expected_prefix_len}; last_seen={last_seen_prefix}"
+    )
+
+
 def find_restore_records(prompt_spill_cache, prompt_input_ids: list[int], image_spans):
     max_reusable_prefix_len = len(prompt_input_ids) - 1
     if max_reusable_prefix_len <= 0:
         return None
 
-    candidate_chunk_keys = []
-    for chunk in build_prefix_cache_chunks(prompt_input_ids, image_spans):
-        if chunk.end > max_reusable_prefix_len:
-            break
-
-        metadata = prompt_spill_cache._metadata_by_key.get(chunk.key)
-        if metadata is None or metadata.chunk_end != chunk.end:
-            break
-
-        candidate_chunk_keys.append(chunk.key)
-
-    return prompt_spill_cache._find_best_effort_restore_records(candidate_chunk_keys)
+    candidate_chunks = [
+        chunk
+        for chunk in build_prefix_cache_chunks(prompt_input_ids, image_spans)
+        if chunk.end <= max_reusable_prefix_len
+    ]
+    return prompt_spill_cache._find_longest_loadable_records(candidate_chunks)
 
 
 def restore_cached_prefix_len(restore_records) -> int:
@@ -552,7 +683,7 @@ def restore_cached_prefix_len(restore_records) -> int:
 
 
 def restore_chunk_keys(restore_records) -> list[str]:
-    return restore_records[1]
+    return [chunk.key for chunk in restore_records[1]]
 
 
 def load_restore_records(prompt_spill_cache, restore_records):
@@ -594,27 +725,28 @@ def spill_chunk_records_available(prompt_spill_cache, chunk_key: str) -> bool:
 
 
 def expected_spill_record_keys(prompt_spill_cache, chunk_key: str) -> list[str]:
-    metadata = prompt_spill_cache._metadata_by_key.get(chunk_key)
-    if metadata is None:
-        return []
     return [
         make_record_key(chunk_key, record_kind)
         for record_kind in RECORD_WRITE_ORDER
-        if record_kind in metadata.payload_kinds
+        if make_record_key(chunk_key, record_kind)
+        in prompt_spill_cache._record_metadata_by_key
     ]
 
 
-def restore_spill_record_keys(prompt_spill_cache, chunk_keys: list[str]):
+def restore_spill_record_keys(prompt_spill_cache, restore_records):
     return prompt_spill_cache._cache_index_view().restore_record_keys_for_chunk_chain(
-        chunk_keys
+        restore_records[1]
     )
 
 
 def get_stale_optional_record_keys(
     prompt_spill_cache,
-    chunk_keys: list[str],
+    restore_records,
 ) -> list[str]:
-    record_keys_by_chunk = restore_spill_record_keys(prompt_spill_cache, chunk_keys)
+    record_keys_by_chunk = restore_spill_record_keys(
+        prompt_spill_cache,
+        restore_records,
+    )
     if record_keys_by_chunk is None:
         return []
 
@@ -624,7 +756,7 @@ def get_stale_optional_record_keys(
         for record_key in record_keys
     }
     stale_record_keys = []
-    for chunk_key in chunk_keys:
+    for chunk_key in restore_chunk_keys(restore_records):
         for record_key in expected_spill_record_keys(prompt_spill_cache, chunk_key):
             record_metadata = prompt_spill_cache._record_metadata_by_key.get(record_key)
             if (
@@ -1042,10 +1174,12 @@ def save_synthetic_chunk(
     *,
     prompt_cache=None,
 ) -> None:
+    chunks = build_prefix_cache_chunks(prompt_input_ids, [])
+    chunk_idx = next(idx for idx, item in enumerate(chunks) if item.key == chunk.key)
     pending_save = prompt_spill_cache.prepare_save(
         chunk=chunk,
+        prefix_chunks=chunks[: chunk_idx + 1],
         prompt_cache=prompt_cache or make_synthetic_prompt_cache(chunk.end),
-        rope_deltas=mx.array([[chunk.end]], dtype=mx.int32),
     )
     if pending_save is None:
         raise RuntimeError(f"Could not prepare chunk save at {chunk.end}")
@@ -1112,7 +1246,7 @@ def run_multi_prefix(args) -> None:
 
         record_keys_by_chunk = restore_spill_record_keys(
             prompt_spill_cache,
-            restore_chunk_keys(prefix_match),
+            prefix_match,
         )
         if record_keys_by_chunk is None:
             raise RuntimeError("Synthetic record selection failed")
@@ -1172,8 +1306,7 @@ def run_multi_prefix(args) -> None:
 
         kv_keys, kv_values = spilled_state.prompt_cache[0].state
         arrays_value = spilled_state.prompt_cache[1][0]
-        rope_deltas = spilled_state.rope_deltas
-        mx.eval(kv_keys, kv_values, arrays_value, rope_deltas)
+        mx.eval(kv_keys, kv_values, arrays_value)
         if kv_keys.shape[2] != expected_prefix_len:
             raise RuntimeError(
                 f"Assembled KV length {kv_keys.shape[2]} != {expected_prefix_len}"
@@ -1184,8 +1317,6 @@ def run_multi_prefix(args) -> None:
             raise RuntimeError("Assembled KV values did not preserve chunk order")
         if arrays_value[0, 0].item() != expected_prefix_len:
             raise RuntimeError("Boundary cache layer did not use the latest chunk")
-        if rope_deltas[0, 0].item() != expected_prefix_len:
-            raise RuntimeError("RoPE deltas did not use the latest chunk")
 
         cache_file_sizes = prompt_spill_cache.snapshot_stats().record_sizes
         print("MULTI_PREFIX_SYNTHETIC", True)
@@ -1229,7 +1360,7 @@ def run_rotating_suffix(args) -> None:
 
         record_keys_by_chunk = restore_spill_record_keys(
             prompt_spill_cache,
-            restore_chunk_keys(prefix_match),
+            prefix_match,
         )
         if record_keys_by_chunk is None:
             raise RuntimeError("Rotating record selection failed")
@@ -1286,7 +1417,7 @@ def run_rotating_suffix(args) -> None:
             )
         record_keys_by_chunk = restore_spill_record_keys(
             prompt_spill_cache,
-            restore_chunk_keys(prefix_match),
+            prefix_match,
         )
         if record_keys_by_chunk is None:
             raise RuntimeError("Rotating record selection failed after eviction")
@@ -1363,8 +1494,8 @@ def run_eviction(args) -> None:
         if prompt_spill_cache._total_bytes > prompt_spill_cache._max_cache_bytes:
             raise RuntimeError("Eviction did not enforce the byte cap")
 
-        best_effort_restore = prompt_spill_cache._find_best_effort_restore_records(
-            second_chunk.prefix_chunk_keys
+        best_effort_restore = prompt_spill_cache._find_longest_loadable_records(
+            reusable_chunks[:2]
         )
         if best_effort_restore is None:
             raise RuntimeError("Eviction best-effort restore missed")
@@ -1484,7 +1615,13 @@ def run_multi_prefix_e2e(model_kit, processor, args) -> None:
     print("MULTI_PREFIX_E2E_OK")
 
 
-def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
+def run_hybrid_cache_e2e(
+    model_kit,
+    processor,
+    args,
+    *,
+    required_cache_class: str | None = None,
+) -> None:
     (
         base_prepared,
         extended_prepared,
@@ -1520,16 +1657,15 @@ def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
             f"{restore_cached_prefix_len(prefix_match)} != {expected_restored_tokens}"
         )
 
-    chunk_metadata = [
-        prompt_spill_cache._metadata_by_key[key]
-        for key in restore_chunk_keys(prefix_match)
-    ]
-    per_chunk_payload_counts = [
-        dict(Counter(metadata.payload_kinds)) for metadata in chunk_metadata
-    ]
-    total_payload_counts = Counter(
-        kind for metadata in chunk_metadata for kind in metadata.payload_kinds
-    )
+    per_chunk_payload_counts = []
+    total_payload_counts = Counter()
+    for chunk_key in restore_chunk_keys(prefix_match):
+        chunk_payload_counts = Counter()
+        for record_key in expected_spill_record_keys(prompt_spill_cache, chunk_key):
+            metadata = prompt_spill_cache._record_metadata_by_key[record_key]
+            chunk_payload_counts[metadata.record_kind] += len(metadata.layer_indices)
+        per_chunk_payload_counts.append(dict(chunk_payload_counts))
+        total_payload_counts.update(chunk_payload_counts)
     if total_payload_counts[RECORD_KIND_KV_DELTA] == 0:
         raise RuntimeError("Hybrid cache did not save any KV delta payloads")
     if (
@@ -1551,6 +1687,13 @@ def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
     ):
         raise RuntimeError(
             "Hybrid restore did not include ArraysCache or RotatingKVCache layers"
+        )
+    if (
+        required_cache_class is not None
+        and required_cache_class not in restored_cache_counts
+    ):
+        raise RuntimeError(
+            f"Hybrid restore did not include required {required_cache_class} layers"
         )
 
     clear_hot_completed_prompt_cache(model_kit)
@@ -1600,6 +1743,94 @@ def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
     print("HYBRID_CACHE_E2E_OK")
 
 
+def run_arrays_cache_branch_e2e(model_kit, processor, args) -> None:
+    (
+        base_prepared,
+        branch_prepared,
+        base_prompt_inputs,
+        branch_prompt_inputs,
+        common_prefix_len,
+        expected_restored_tokens,
+        reusable_boundaries,
+    ) = build_arrays_cache_branch_e2e_requests(
+        model_kit,
+        processor,
+        min_restored_tokens=512 if args.cache_max_bytes is not None else 256,
+    )
+    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
+    if prompt_spill_cache is None:
+        raise RuntimeError("arrays-cache-branch-e2e mode requires the spill cache")
+    if args.cache_max_bytes is not None:
+        prompt_spill_cache._max_cache_bytes = args.cache_max_bytes
+        prompt_spill_cache._empirical_cap_set = True
+
+    base_trace = PromptProgressTrace()
+    base_result = run_prepared_request(
+        model_kit,
+        base_prepared,
+        prompt_progress_reporter=TracePromptProgressReporter(base_trace),
+    )
+    if base_result.stop_reason is None:
+        raise RuntimeError("Branch base request completed without a stop reason")
+
+    prefix_match = wait_for_restore_plan(
+        model_kit,
+        prompt_input_ids=branch_prompt_inputs.prompt_input_ids,
+        image_spans=branch_prompt_inputs.image_spans,
+        expected_prefix_len=expected_restored_tokens,
+        timeout_s=args.prefix_wait_timeout_s,
+    )
+    planned_record_kind_counts = Counter(
+        prompt_spill_cache._record_metadata_by_key[record_key].record_kind
+        for record_keys in prefix_match[2].values()
+        for record_key in record_keys
+    )
+    if planned_record_kind_counts[RECORD_KIND_STATE_CHECKPOINT] == 0:
+        raise RuntimeError("Branch restore plan did not require ArraysCache checkpoint")
+
+    clear_hot_completed_prompt_cache(model_kit)
+    branch_trace = PromptProgressTrace()
+    branch_result = run_prepared_request(
+        model_kit,
+        branch_prepared,
+        prompt_progress_reporter=TracePromptProgressReporter(branch_trace),
+    )
+    if branch_result.stop_reason is None:
+        raise RuntimeError("Branch follow-up completed without a stop reason")
+    if branch_trace.begin_prefill_tokens_processed != expected_restored_tokens:
+        raise RuntimeError(
+            "Branch follow-up did not resume from the nearest cached boundary: "
+            f"{branch_trace.begin_prefill_tokens_processed} "
+            f"!= {expected_restored_tokens}"
+        )
+
+    print("ARRAYS_BRANCH_BASE_PROMPT_TOKENS", len(base_prompt_inputs.prompt_input_ids))
+    print(
+        "ARRAYS_BRANCH_FOLLOWUP_PROMPT_TOKENS",
+        len(branch_prompt_inputs.prompt_input_ids),
+    )
+    print("ARRAYS_BRANCH_COMMON_PREFIX_TOKENS", common_prefix_len)
+    print("ARRAYS_BRANCH_BOUNDARIES", reusable_boundaries)
+    print("ARRAYS_BRANCH_RESTORED_TOKENS", expected_restored_tokens)
+    print("ARRAYS_BRANCH_RESTORE_RECORD_KIND_COUNTS", dict(planned_record_kind_counts))
+    print(
+        "ARRAYS_BRANCH_BASE_BEGIN",
+        base_trace.begin_cached_tokens,
+        base_trace.begin_total_prompt_tokens,
+        base_trace.begin_prefill_tokens_processed,
+    )
+    print(
+        "ARRAYS_BRANCH_FOLLOWUP_BEGIN",
+        branch_trace.begin_cached_tokens,
+        branch_trace.begin_total_prompt_tokens,
+        branch_trace.begin_prefill_tokens_processed,
+    )
+    print("ARRAYS_BRANCH_BASE_TEXT", repr(truncate_text(base_result.text)))
+    print("ARRAYS_BRANCH_FOLLOWUP_TEXT", repr(truncate_text(branch_result.text)))
+    print_spill_cache_stats("ARRAYS_BRANCH", prompt_spill_cache)
+    print("ARRAYS_CACHE_BRANCH_E2E_OK")
+
+
 def run_eviction_e2e(model_kit, processor, args) -> None:
     (
         base_prepared,
@@ -1642,7 +1873,7 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
     total_before_eviction = prompt_spill_cache._total_bytes
     stale_optional_record_keys = get_stale_optional_record_keys(
         prompt_spill_cache,
-        restore_chunk_keys(two_chunk_match),
+        two_chunk_match,
     )
     stale_optional_size = sum(
         get_spill_record_size(prompt_spill_cache, record_key)
@@ -1795,7 +2026,7 @@ def run_eviction_stress(model_kit, processor, args) -> None:
     total_before_eviction = prompt_spill_cache._total_bytes
     stale_optional_record_keys = get_stale_optional_record_keys(
         prompt_spill_cache,
-        restore_chunk_keys(two_chunk_match),
+        two_chunk_match,
     )
     stale_optional_size = sum(
         get_spill_record_size(prompt_spill_cache, record_key)
@@ -2053,7 +2284,7 @@ def run_cross_thread_restore(
         return RestoredPromptCache(
             cached_prefix_len=restore_cached_prefix_len(prefix_match),
             prompt_cache=spilled_state.prompt_cache,
-            rope_deltas=spilled_state.rope_deltas,
+            rope_deltas=None,
         )
 
     prompt_cache_coordinator.restore = restore_override
@@ -2094,6 +2325,12 @@ def run_cross_thread_restore(
 
 def main():
     args = parse_args()
+    if (
+        args.mode in {"arrays-cache-e2e", "arrays-cache-branch-e2e"}
+        and args.model == DEFAULT_MODEL_PATH
+    ):
+        args.model = DEFAULT_QWEN35_MODEL_PATH
+
     model_path = args.model.expanduser().resolve()
     image_path = args.image.expanduser().resolve()
     secondary_image_path = args.secondary_image.expanduser().resolve()
@@ -2104,6 +2341,8 @@ def main():
         "rotating-suffix",
         "multi-prefix-e2e",
         "hybrid-cache-e2e",
+        "arrays-cache-e2e",
+        "arrays-cache-branch-e2e",
         "eviction",
         "eviction-e2e",
         "eviction-stress",
@@ -2182,6 +2421,16 @@ def main():
             run_multi_prefix_e2e(model_kit, processor, args)
         elif args.mode == "hybrid-cache-e2e":
             run_hybrid_cache_e2e(model_kit, processor, args)
+        elif args.mode == "arrays-cache-e2e":
+            run_hybrid_cache_e2e(
+                model_kit,
+                processor,
+                args,
+                required_cache_class="ArraysCache",
+            )
+            print("ARRAYS_CACHE_E2E_OK")
+        elif args.mode == "arrays-cache-branch-e2e":
+            run_arrays_cache_branch_e2e(model_kit, processor, args)
         elif args.mode == "eviction-e2e":
             run_eviction_e2e(model_kit, processor, args)
         elif args.mode == "eviction-stress":

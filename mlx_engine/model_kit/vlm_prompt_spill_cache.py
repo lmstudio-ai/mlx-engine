@@ -14,7 +14,7 @@ from mlx_engine.model_kit.vlm_prompt_cache_payload import (
 )
 from mlx_engine.model_kit.vlm_prompt_cache_index import PromptCacheIndexView
 from mlx_engine.model_kit.vlm_prompt_cache_types import (
-    PromptCacheChunkMetadata,
+    PromptCacheLayout,
     PromptImageSpan,
     PromptCacheRecordMetadata,
     PromptPrefixChunk,
@@ -34,11 +34,30 @@ from mlx_engine.model_kit.vlm_safetensor_spool import AnonymousSafetensorSpool
 from mlx.utils import tree_flatten
 
 
-_RECORD_TOUCH_ORDER: tuple[RecordKind, ...] = (
+_RECORD_SAVE_PRIORITY: tuple[RecordKind, ...] = (
     RECORD_KIND_STATE_CHECKPOINT,
-    RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_KV_DELTA,
+    RECORD_KIND_ROTATING_DELTA,
 )
+
+
+def _make_prompt_cache_layout(
+    payload_cache: list[Any],
+    payload_kinds: list[RecordKind],
+) -> PromptCacheLayout:
+    layer_indices_by_kind: dict[RecordKind, list[int]] = {}
+    rotating_window_size = None
+    for layer_idx, record_kind in enumerate(payload_kinds):
+        layer_indices_by_kind.setdefault(record_kind, []).append(layer_idx)
+        if record_kind == RECORD_KIND_ROTATING_DELTA:
+            window_size = int(payload_cache[layer_idx].max_size)
+            rotating_window_size = max(rotating_window_size or 0, window_size)
+
+    return PromptCacheLayout(
+        layer_kinds=list(payload_kinds),
+        layer_indices_by_kind=layer_indices_by_kind,
+        rotating_window_size=rotating_window_size,
+    )
 
 
 class VlmPromptSpillCache:
@@ -60,9 +79,8 @@ class VlmPromptSpillCache:
         self._max_kv_size = max_kv_size
         self._store = AnonymousSafetensorSpool(base_dir)
         self._empirical_cap_set = False
-        self._metadata_by_key: dict[str, PromptCacheChunkMetadata] = {}
+        self._layout: PromptCacheLayout | None = None
         self._record_metadata_by_key: dict[str, PromptCacheRecordMetadata] = {}
-        self._rope_deltas_by_key: dict[str, Optional[Any]] = {}
         self._key_sizes: dict[str, int] = {}
         self._lru_keys: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
@@ -80,22 +98,23 @@ class VlmPromptSpillCache:
         misses = self._cache_misses
         evictions = self._cache_evictions
         record_sizes_by_key = dict(self._key_sizes)
-        metadata_by_key = dict(self._metadata_by_key)
         record_metadata_by_key = dict(self._record_metadata_by_key)
         chunk_sizes_by_key = {}
         chunk_records_available_by_key = {}
-        for chunk_key, metadata in metadata_by_key.items():
+        chunk_keys = sorted(
+            {metadata.chunk_key for metadata in record_metadata_by_key.values()}
+        )
+        for chunk_key in chunk_keys:
             record_keys = [
-                make_record_key(chunk_key, record_kind)
-                for record_kind in RECORD_WRITE_ORDER
-                if record_kind in metadata.payload_kinds
+                record_key
+                for record_key, metadata in record_metadata_by_key.items()
+                if metadata.chunk_key == chunk_key
             ]
             chunk_sizes_by_key[chunk_key] = sum(
                 record_sizes_by_key.get(record_key, 0) for record_key in record_keys
             )
             chunk_records_available_by_key[chunk_key] = bool(record_keys) and all(
-                record_key in record_metadata_by_key
-                and record_key in record_sizes_by_key
+                record_key in record_sizes_by_key and self._store.exists(record_key)
                 for record_key in record_keys
             )
 
@@ -136,22 +155,17 @@ class VlmPromptSpillCache:
         ]
         if not eligible_chunks:
             return None
-
-        candidate_chunk_keys = []
-        for chunk in eligible_chunks:
-            # Chunk keys encode prompt tokens plus image identities up to here.
-            metadata = self._metadata_by_key.get(chunk.key)
-
-            # Prefix matching must stop at the first missing/divergent chunk.
-            if metadata is None or metadata.chunk_end != chunk.end:
-                break
-
-            candidate_chunk_keys.append(chunk.key)
+        if self._layout is None:
+            self._record_prefix_lookup(
+                hit_chunks=0,
+                miss_chunks=len(eligible_chunks),
+            )
+            return None
 
         # A later SWA boundary may be restorable even if an earlier boundary is
         # missing old rotating records, so availability selection happens once
         # over the full matching chain.
-        restore_records = self._find_best_effort_restore_records(candidate_chunk_keys)
+        restore_records = self._find_longest_loadable_records(eligible_chunks)
         hit_chunks = 0 if restore_records is None else len(restore_records[1])
         self._record_prefix_lookup(
             hit_chunks=0,
@@ -160,67 +174,66 @@ class VlmPromptSpillCache:
         if restore_records is None:
             return None
 
-        cached_prefix_len, chunk_keys, record_keys_by_chunk_key = restore_records
+        cached_prefix_len, chunks, record_keys_by_chunk_key = restore_records
         return self._load_restore_records(
             cached_prefix_len,
-            chunk_keys,
+            chunks,
             record_keys_by_chunk_key,
         )
 
     def _load_restore_records(
         self,
         cached_prefix_len: int,
-        chunk_keys: list[str],
+        chunks: list[PromptPrefixChunk],
         record_keys_by_chunk_key: dict[str, list[str]],
     ) -> SpilledPromptState:
         """Load a selected prompt-cache restore chain."""
+        layout = self._layout
+        assert layout is not None
+
         chunk_prompt_caches = []
-        chunk_metadata = []
-        rope_deltas = None
 
         # Load each chunk's physical records into sparse per-layer cache lists.
-        for key in chunk_keys:
-            metadata, prompt_cache, rope_deltas = self._load_one_chunk(
-                key,
-                record_keys_by_chunk_key[key],
+        for chunk in chunks:
+            prompt_cache = self._load_one_chunk(
+                record_keys_by_chunk_key[chunk.key],
+                layout,
             )
-            chunk_metadata.append(metadata)
             chunk_prompt_caches.append(prompt_cache)
 
         prompt_cache = assemble_prompt_cache_chunks(
             chunk_prompt_caches,
-            chunk_metadata,
+            chunks,
+            layout,
         )
         # Disk restores run on the prompt-cache actor; decode consumes the cache
         # on the scheduler thread. Force assembled arrays now so no lazy graph
         # keeps a thread-local MLX stream from the restore worker.
-        materialize_prompt_state(prompt_cache, rope_deltas)
+        materialize_prompt_state(prompt_cache)
 
         # Restore access refreshes exactly the records used by this chain.
         for record_key in self._ordered_record_keys_for_touch(
-            chunk_keys,
+            [chunk.key for chunk in chunks],
             record_keys_by_chunk_key,
         ):
             self._touch_cache_entry(record_key)
         # Count chunks only after the restore has actually materialized.
         self._record_prefix_lookup(
-            hit_chunks=len(chunk_keys),
+            hit_chunks=len(chunks),
             miss_chunks=0,
         )
 
         return SpilledPromptState(
             cached_prefix_len=cached_prefix_len,
             prompt_cache=prompt_cache,
-            rope_deltas=rope_deltas,
         )
 
     def _load_one_chunk(
-        self, key: str, record_keys: list[str]
-    ) -> tuple[PromptCacheChunkMetadata, list[Any], Optional[Any]]:
-        metadata = self._metadata_by_key[key]
-        rope_deltas = self._rope_deltas_by_key.get(key)
-
-        prompt_cache: list[Any] = [None] * len(metadata.payload_kinds)
+        self,
+        record_keys: list[str],
+        layout: PromptCacheLayout,
+    ) -> list[Any]:
+        prompt_cache: list[Any] = [None] * len(layout.layer_kinds)
         for record_key in record_keys:
             record_prompt_cache = self._store.load_prompt_cache(record_key)
             record_metadata = self._record_metadata_by_key[record_key]
@@ -230,25 +243,23 @@ class VlmPromptSpillCache:
             ):
                 prompt_cache[layer_idx] = cache
 
-        return metadata, prompt_cache, rope_deltas
+        return prompt_cache
 
-    def _find_best_effort_restore_records(
+    def _find_longest_loadable_records(
         self,
-        chunk_keys: list[str],
-    ) -> Optional[tuple[int, list[str], dict[str, list[str]]]]:
+        chunks: list[PromptPrefixChunk],
+    ) -> Optional[tuple[int, list[PromptPrefixChunk], dict[str, list[str]]]]:
         """Return the longest currently loadable records for an ordered chain."""
         index_view = self._cache_index_view()
         # Loadability is non-monotonic for SWA/state records, so scan downward.
-        for end_idx in range(len(chunk_keys), 0, -1):
-            candidate_chunk_keys = chunk_keys[:end_idx]
+        for end_idx in range(len(chunks), 0, -1):
+            candidate_chunks = chunks[:end_idx]
             record_keys_by_chunk_key = index_view.restore_record_keys_for_chunk_chain(
-                candidate_chunk_keys
+                candidate_chunks
             )
             if record_keys_by_chunk_key is not None:
-                cached_prefix_len = self._metadata_by_key[
-                    candidate_chunk_keys[-1]
-                ].chunk_end
-                return cached_prefix_len, candidate_chunk_keys, record_keys_by_chunk_key
+                cached_prefix_len = candidate_chunks[-1].end
+                return cached_prefix_len, candidate_chunks, record_keys_by_chunk_key
 
         return None
 
@@ -280,12 +291,8 @@ class VlmPromptSpillCache:
         """Commit a pending save from the cache actor thread."""
         if not self.can_store_records():
             return
-        # Chunks may be partial; restore planning checks physical record presence.
-        self._metadata_by_key[pending_save.key] = pending_save.metadata
-        if pending_save.rope_deltas is None:
-            self._rope_deltas_by_key.pop(pending_save.key, None)
-        else:
-            self._rope_deltas_by_key[pending_save.key] = pending_save.rope_deltas
+        if self._layout is None:
+            self._layout = pending_save.cache_layout
 
         try:
             for record in pending_save.records:
@@ -306,12 +313,12 @@ class VlmPromptSpillCache:
 
             chain_record_keys = (
                 self._cache_index_view().restore_record_keys_for_chunk_chain(
-                    pending_save.metadata.prefix_chunk_keys
+                    pending_save.prefix_chunks
                 )
             )
             if chain_record_keys is not None:
                 for record_key in self._ordered_record_keys_for_touch(
-                    pending_save.metadata.prefix_chunk_keys,
+                    [chunk.key for chunk in pending_save.prefix_chunks],
                     chain_record_keys,
                 ):
                     self._touch_cache_entry(record_key)
@@ -320,9 +327,8 @@ class VlmPromptSpillCache:
 
     def close(self) -> None:
         """Clear metadata and close the actor-owned anonymous spool."""
-        self._metadata_by_key.clear()
+        self._layout = None
         self._record_metadata_by_key.clear()
-        self._rope_deltas_by_key.clear()
         self._key_sizes.clear()
         self._lru_keys.clear()
         self._total_bytes = 0
@@ -332,8 +338,8 @@ class VlmPromptSpillCache:
         self,
         *,
         chunk: PromptPrefixChunk,
+        prefix_chunks: list[PromptPrefixChunk],
         prompt_cache: list[Any],
-        rope_deltas: Optional[Any],
     ) -> PendingPromptCacheSave:
         """Prepare a cache save for the background actor."""
         payload_cache, payload_kinds = prepare_prompt_cache_payload(
@@ -341,18 +347,10 @@ class VlmPromptSpillCache:
             chunk.start,
             chunk.end,
         )
-        metadata = PromptCacheChunkMetadata(
-            chunk_end=chunk.end,
-            prefix_chunk_keys=list(chunk.prefix_chunk_keys),
-            payload_kinds=payload_kinds,
-        )
+        layout = _make_prompt_cache_layout(payload_cache, payload_kinds)
         records = []
         for record_kind in RECORD_WRITE_ORDER:
-            layer_indices = [
-                idx
-                for idx, payload_kind in enumerate(payload_kinds)
-                if payload_kind == record_kind
-            ]
+            layer_indices = layout.layer_indices_by_kind.get(record_kind, [])
             if not layer_indices:
                 continue
 
@@ -366,9 +364,8 @@ class VlmPromptSpillCache:
             )
 
         return PendingPromptCacheSave(
-            key=chunk.key,
-            metadata=metadata,
-            rope_deltas=rope_deltas,
+            prefix_chunks=prefix_chunks,
+            cache_layout=layout,
             records=records,
         )
 
@@ -381,11 +378,6 @@ class VlmPromptSpillCache:
         record_cache: list[Any],
     ) -> PreparedPromptRecord:
         record_key = make_record_key(chunk_key, record_kind)
-        window_size = (
-            record_cache[0].max_size
-            if record_kind == RECORD_KIND_ROTATING_DELTA
-            else None
-        )
         cache_data = [cache.state for cache in record_cache]
         cache_meta_states = [cache.meta_state for cache in record_cache]
         cache_arrays = dict(tree_flatten(cache_data))
@@ -411,7 +403,6 @@ class VlmPromptSpillCache:
                 chunk_key=chunk_key,
                 record_kind=record_kind,
                 layer_indices=layer_indices,
-                window_size=window_size,
             ),
             snapshot_arrays=snapshot_arrays,
             safetensor_metadata=safetensor_metadata,
@@ -438,8 +429,8 @@ class VlmPromptSpillCache:
                 self._record_metadata_by_key[record_key].record_kind: record_key
                 for record_key in record_keys
             }
-            # Within one chunk, optional records should age before full KV.
-            for record_kind in _RECORD_TOUCH_ORDER:
+            # Touch low priority first so high priority records stay newest in LRU.
+            for record_kind in reversed(_RECORD_SAVE_PRIORITY):
                 record_key = record_keys_by_kind.get(record_kind)
                 if record_key is not None:
                     ordered_record_keys.append(record_key)
@@ -451,22 +442,19 @@ class VlmPromptSpillCache:
         self._cache_misses += miss_chunks
 
     def _evict_if_needed(self) -> None:
-        evicted = False
         while self._total_bytes > self._max_cache_bytes:
             key_to_evict = next(iter(self._lru_keys), None)
             if key_to_evict is None:
                 break
 
             self._evict_key(key_to_evict)
-            evicted = True
-
-        if evicted:
-            self._prune_unreferenced_chunk_metadata()
 
     def _cache_index_view(self) -> PromptCacheIndexView:
         """Return a short-lived read-only view over committed indexes."""
+        layout = self._layout
+        assert layout is not None
         return PromptCacheIndexView(
-            metadata_by_key=self._metadata_by_key,
+            layout=layout,
             record_metadata_by_key=self._record_metadata_by_key,
             record_exists=self._store.exists,
         )
@@ -478,25 +466,3 @@ class VlmPromptSpillCache:
         self._cache_evictions += 1
 
         self._store.delete(key)
-
-    def _prune_unreferenced_chunk_metadata(self) -> None:
-        """Drop chunk metadata that no remaining record can restore through."""
-        referenced_chunk_keys = set()
-        direct_record_chunk_keys = set()
-        for record_metadata in self._record_metadata_by_key.values():
-            chunk_key = record_metadata.chunk_key
-            direct_record_chunk_keys.add(chunk_key)
-            chunk_metadata = self._metadata_by_key.get(chunk_key)
-            if chunk_metadata is None:
-                referenced_chunk_keys.add(chunk_key)
-            else:
-                referenced_chunk_keys.update(chunk_metadata.prefix_chunk_keys)
-
-        for chunk_key in list(self._metadata_by_key):
-            if chunk_key not in referenced_chunk_keys:
-                self._metadata_by_key.pop(chunk_key, None)
-                self._rope_deltas_by_key.pop(chunk_key, None)
-
-        for chunk_key in list(self._rope_deltas_by_key):
-            if chunk_key not in direct_record_chunk_keys:
-                self._rope_deltas_by_key.pop(chunk_key, None)
