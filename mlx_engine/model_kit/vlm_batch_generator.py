@@ -31,10 +31,12 @@ from mlx_vlm.generate import (
 # should not mutate mlx-vlm's module-global generation stream.
 generation_stream = mx.new_thread_local_stream(mx.default_device())
 
+PromptCacheSaveCallback = Callable[[list[Any], list[int]], None]
 
-def _append_next_cache_boundary(boundaries: list[int], boundary: int) -> None:
-    if not boundaries:
-        boundaries.append(boundary + DEFAULT_PREFIX_CHUNK_SIZE)
+
+def _append_next_cache_save_point(save_points: list[int], save_point: int) -> None:
+    if not save_points:
+        save_points.append(save_point + DEFAULT_PREFIX_CHUNK_SIZE)
 
 
 def _merge_caches(caches: list[list[Any]]) -> list[Any]:
@@ -114,13 +116,8 @@ class GenerationBatch:
         top_logprobs_k: int = 0,
         all_tokens: Optional[list[list[int]]] = None,
         decode_state: Optional[dict[str, Any]] = None,
-        cache_boundaries: Optional[list[list[int]]] = None,
-        prompt_cache_boundary_callback: Optional[
-            Callable[
-                [int, int, list[Any], Optional[dict[str, Any]], Optional[list[int]]],
-                None,
-            ]
-        ] = None,
+        cache_save_points: Optional[list[list[int]]] = None,
+        prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
         self.model = model
         self._language_model = getattr(model, "language_model", model)
@@ -144,12 +141,12 @@ class GenerationBatch:
             if all_tokens is not None
             else [[] for _ in uids]
         )
-        self._cache_boundaries = (
-            [list(boundaries) for boundaries in cache_boundaries]
-            if cache_boundaries is not None
+        self._cache_save_points = (
+            [list(save_points) for save_points in cache_save_points]
+            if cache_save_points is not None
             else [[] for _ in uids]
         )
-        self._cache_boundary_callbacks = [prompt_cache_boundary_callback for _ in uids]
+        self._cache_save_callbacks = [prompt_cache_save_callback for _ in uids]
         if decode_state is not None:
             self._rope_deltas = _normalize_rope_deltas(decode_state.get("rope_deltas"))
 
@@ -277,18 +274,16 @@ class GenerationBatch:
             self._rope_deltas = mx.concatenate([self._rope_deltas, other._rope_deltas])
 
         self.tokens.extend(other.tokens)
-        self._cache_boundaries.extend(other._cache_boundaries)
-        self._cache_boundary_callbacks.extend(other._cache_boundary_callbacks)
+        self._cache_save_points.extend(other._cache_save_points)
+        self._cache_save_callbacks.extend(other._cache_save_callbacks)
 
     def filter(self, keep: list[int]):
         self.uids = [self.uids[idx] for idx in keep]
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
         self._num_tokens = [self._num_tokens[idx] for idx in keep]
         self.tokens = [self.tokens[idx] for idx in keep]
-        self._cache_boundaries = [self._cache_boundaries[idx] for idx in keep]
-        self._cache_boundary_callbacks = [
-            self._cache_boundary_callbacks[idx] for idx in keep
-        ]
+        self._cache_save_points = [self._cache_save_points[idx] for idx in keep]
+        self._cache_save_callbacks = [self._cache_save_callbacks[idx] for idx in keep]
 
         if not keep:
             self.prompt_cache.clear()
@@ -314,24 +309,18 @@ class GenerationBatch:
         if self._rope_deltas is not None:
             self._rope_deltas = self._rope_deltas[keep_arr]
 
-    def _emit_boundary_snapshot(self, idx: int) -> None:
-        callback = self._cache_boundary_callbacks[idx]
+    def _emit_cache_save_snapshot(self, idx: int) -> None:
+        callback = self._cache_save_callbacks[idx]
         if callback is None:
             return
 
         current_len = len(self.tokens[idx])
-        boundaries = self._cache_boundaries[idx]
-        while boundaries and boundaries[0] <= current_len:
-            boundary = boundaries.pop(0)
-            if boundary == current_len:
-                callback(
-                    self.uids[idx],
-                    boundary,
-                    self.extract_cache(idx),
-                    self.extract_decode_state(idx),
-                    list(self.tokens[idx]),
-                )
-                _append_next_cache_boundary(boundaries, boundary)
+        save_points = self._cache_save_points[idx]
+        while save_points and save_points[0] <= current_len:
+            save_point = save_points.pop(0)
+            if save_point == current_len:
+                callback(self.extract_cache(idx), list(self.tokens[idx]))
+                _append_next_cache_save_point(save_points, save_point)
 
     def next(self) -> list[Response]:
         if not self.uids:
@@ -354,7 +343,7 @@ class GenerationBatch:
             if finish_reason is None:
                 keep.append(i)
 
-            self._emit_boundary_snapshot(i)
+            self._emit_cache_save_snapshot(i)
 
             top_lp = None
             if top_idx_list is not None:
@@ -400,8 +389,8 @@ class GenerationBatch:
         batch._next_top_lp = None
         batch._rope_deltas = None
         batch.tokens = []
-        batch._cache_boundaries = []
-        batch._cache_boundary_callbacks = []
+        batch._cache_save_points = []
+        batch._cache_save_callbacks = []
         return batch
 
 
@@ -421,13 +410,8 @@ class PromptProcessingBatch:
         caches: Optional[list[Optional[list[Any]]]] = None,
         all_tokens: Optional[list[list[int]]] = None,
         decode_states: Optional[list[Optional[dict[str, Any]]]] = None,
-        cache_boundaries: Optional[list[list[int]]] = None,
-        prompt_cache_boundary_callback: Optional[
-            Callable[
-                [int, int, list[Any], Optional[dict[str, Any]], Optional[list[int]]],
-                None,
-            ]
-        ] = None,
+        cache_save_points: Optional[list[list[int]]] = None,
+        prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
         self.model = model
         self._language_model = getattr(model, "language_model", model)
@@ -450,12 +434,12 @@ class PromptProcessingBatch:
             else [[] for _ in uids]
         )
         self._processed_prefix_lengths = [len(tokens) for tokens in self._all_tokens]
-        self._cache_boundaries = (
-            [list(boundaries) for boundaries in cache_boundaries]
-            if cache_boundaries is not None
+        self._cache_save_points = (
+            [list(save_points) for save_points in cache_save_points]
+            if cache_save_points is not None
             else [[] for _ in uids]
         )
-        self._prompt_cache_boundary_callback = prompt_cache_boundary_callback
+        self._prompt_cache_save_callback = prompt_cache_save_callback
         self._rope_deltas = (
             _merge_rope_deltas_from_decode_states(decode_states)
             if decode_states is not None
@@ -490,10 +474,10 @@ class PromptProcessingBatch:
         if remaining_tokens <= 1:
             return False
 
-        next_boundary = self._next_cache_boundary()
+        next_save_point = self._next_cache_save_point()
         if (
-            next_boundary is not None
-            and next_boundary < self._processed_prefix_lengths[0] + remaining_tokens
+            next_save_point is not None
+            and next_save_point < self._processed_prefix_lengths[0] + remaining_tokens
         ):
             return True
 
@@ -505,11 +489,11 @@ class PromptProcessingBatch:
 
         remaining_tokens = self._inputs_embeds.shape[1]
         n = min(self.prefill_step_size, remaining_tokens - 1)
-        next_boundary = self._next_cache_boundary()
-        if next_boundary is not None:
-            boundary_delta = next_boundary - self._processed_prefix_lengths[0]
-            if 0 < boundary_delta < remaining_tokens:
-                n = min(n, boundary_delta)
+        next_save_point = self._next_cache_save_point()
+        if next_save_point is not None:
+            save_point_delta = next_save_point - self._processed_prefix_lengths[0]
+            if 0 < save_point_delta < remaining_tokens:
+                n = min(n, save_point_delta)
 
         self._language_model(
             self._input_ids[:, :n],
@@ -524,53 +508,43 @@ class PromptProcessingBatch:
         self._processed_prefix_lengths = [
             processed + n for processed in self._processed_prefix_lengths
         ]
-        self._emit_boundary_snapshots()
+        self._emit_cache_save_snapshots()
         mx.clear_cache()
         return n
 
-    def _next_cache_boundary(self) -> Optional[int]:
-        if len(self.uids) != 1 or not self._cache_boundaries:
+    def _next_cache_save_point(self) -> Optional[int]:
+        if len(self.uids) != 1 or not self._cache_save_points:
             return None
 
         processed = self._processed_prefix_lengths[0]
-        for boundary in self._cache_boundaries[0]:
-            if boundary > processed:
-                return boundary
+        for save_point in self._cache_save_points[0]:
+            if save_point > processed:
+                return save_point
         return None
 
-    def _current_decode_state(self) -> Optional[dict[str, Any]]:
-        language_model = getattr(self.model, "language_model", self.model)
-        rope_deltas = _normalize_rope_deltas(
-            getattr(language_model, "_rope_deltas", None)
-        )
-        if rope_deltas is None:
-            return None
-        return {"rope_deltas": rope_deltas}
-
-    def _emit_boundary_snapshots(self) -> None:
-        if self._prompt_cache_boundary_callback is None or len(self.uids) != 1:
+    def _emit_cache_save_snapshots(self) -> None:
+        # V1 prompt-stage cache saves are single-request because mlx-engine
+        # creates this batcher with prefill_batch_size=1.
+        if self._prompt_cache_save_callback is None or len(self.uids) != 1:
             return
 
         processed = self._processed_prefix_lengths[0]
-        boundaries = self._cache_boundaries[0]
-        while boundaries and boundaries[0] <= processed:
-            boundary = boundaries.pop(0)
-            if boundary == processed:
+        save_points = self._cache_save_points[0]
+        while save_points and save_points[0] <= processed:
+            save_point = save_points.pop(0)
+            if save_point == processed:
                 suffix_len = processed - len(self._all_tokens[0])
                 snapshot_tokens = (
                     self._all_tokens[0] + self._prompt_token_ids[0][:suffix_len]
                 )
-                self._prompt_cache_boundary_callback(
-                    self.uids[0],
-                    boundary,
+                self._prompt_cache_save_callback(
                     [
                         cache.extract(0) if hasattr(cache, "extract") else cache
                         for cache in self.prompt_cache
                     ],
-                    self._current_decode_state(),
                     snapshot_tokens,
                 )
-                _append_next_cache_boundary(boundaries, boundary)
+                _append_next_cache_save_point(save_points, save_point)
 
     def generate(self, sampler, stop_criteria, top_logprobs_k=0) -> GenerationBatch:
         output = self._language_model(
@@ -586,7 +560,7 @@ class PromptProcessingBatch:
                 self._prompt_token_ids,
             )
         ]
-        self._emit_boundary_snapshots()
+        self._emit_cache_save_snapshots()
         logits = output.logits if hasattr(output, "logits") else output
         logits = logits[:, -1, :]
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
@@ -612,10 +586,10 @@ class PromptProcessingBatch:
                 if self._rope_deltas is not None
                 else None
             ),
-            cache_boundaries=[
-                list(boundaries) for boundaries in self._cache_boundaries
+            cache_save_points=[
+                list(save_points) for save_points in self._cache_save_points
             ],
-            prompt_cache_boundary_callback=self._prompt_cache_boundary_callback,
+            prompt_cache_save_callback=self._prompt_cache_save_callback,
         )
         gen_batch._next_lps = logprobs[mx.arange(first_tokens.shape[0]), first_tokens]
 
@@ -710,13 +684,8 @@ class BatchGenerator:
         all_tokens: Optional[list[list[int]]] = None,
         decode_states: Optional[list[Optional[dict[str, Any]]]] = None,
         prompt_kwargs: Optional[list[dict]] = None,
-        cache_boundaries: Optional[list[list[int]]] = None,
-        prompt_cache_boundary_callback: Optional[
-            Callable[
-                [int, int, list[Any], Optional[dict[str, Any]], Optional[list[int]]],
-                None,
-            ]
-        ] = None,
+        cache_save_points: Optional[list[list[int]]] = None,
+        prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
         # Keep the mlx-lm-style decode_states interface, but the only supported
         # payload today is {"rope_deltas": ...}.
@@ -731,8 +700,8 @@ class BatchGenerator:
             decode_states = [None] * len(prompts)
         if prompt_kwargs is None:
             prompt_kwargs = [{}] * len(prompts)
-        if cache_boundaries is None:
-            cache_boundaries = [[] for _ in prompts]
+        if cache_save_points is None:
+            cache_save_points = [[] for _ in prompts]
 
         uids = []
         for p, m, c, at, ds, kw, cb in zip(
@@ -742,7 +711,7 @@ class BatchGenerator:
             all_tokens,
             decode_states,
             prompt_kwargs,
-            cache_boundaries,
+            cache_save_points,
         ):
             self._unprocessed_sequences.append(
                 (
@@ -754,7 +723,7 @@ class BatchGenerator:
                     ds,
                     kw,
                     cb,
-                    prompt_cache_boundary_callback,
+                    prompt_cache_save_callback,
                 )
             )
             uids.append(self.uid_count)
@@ -841,8 +810,8 @@ class BatchGenerator:
             all_tokens_list = [s[4] for s in sequences]
             decode_states_list = [s[5] for s in sequences]
             prompt_kwargs_list = [s[6] for s in sequences]
-            cache_boundaries_list = [s[7] for s in sequences]
-            prompt_cache_boundary_callback = sequences[0][8]
+            cache_save_points_list = [s[7] for s in sequences]
+            prompt_cache_save_callback = sequences[0][8]
 
             inputs_embeds = None
             merged_kwargs = {}
@@ -883,8 +852,8 @@ class BatchGenerator:
                 caches=caches_list,
                 all_tokens=all_tokens_list,
                 decode_states=decode_states_list,
-                cache_boundaries=cache_boundaries_list,
-                prompt_cache_boundary_callback=prompt_cache_boundary_callback,
+                cache_save_points=cache_save_points_list,
+                prompt_cache_save_callback=prompt_cache_save_callback,
             )
             self._prompt_tokens_counter += self._prompt_batch.total_prompt_tokens
 

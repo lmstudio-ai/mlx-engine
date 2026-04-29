@@ -125,7 +125,7 @@ class VlmPromptCacheCoordinator:
         save_points.append(last_save_point + DEFAULT_PREFIX_CHUNK_SIZE)
         return save_points
 
-    def make_boundary_callback(
+    def make_save_callback(
         self,
         *,
         image_spans: list[PromptImageSpan],
@@ -133,10 +133,7 @@ class VlmPromptCacheCoordinator:
         image_spans = list(image_spans)
 
         def _callback(
-            _uid: int,
-            _prefix_len: int,
             prompt_cache: list[Any],
-            _decode_state: Optional[dict[str, Any]],
             snapshot_input_ids: list[int],
         ) -> None:
             if not self._spill_cache.can_store_records():
