@@ -19,7 +19,10 @@ RECORD_WRITE_ORDER: Final[tuple[RecordKind, ...]] = (
 
 @dataclass
 class PromptImageSpan:
-    """End-exclusive token span for one image placeholder run in the prompt."""
+    """End-exclusive token span for one image placeholder run.
+
+    Span lists are sorted by start and non-overlapping.
+    """
 
     start: int
     end: int
@@ -204,25 +207,3 @@ def _build_prefix_cache_chunk_bounds(
         cursor = chunk_end
 
     return chunk_bounds
-
-
-def build_prefix_cache_save_points_for_length(
-    prompt_len: int,
-    image_spans: list[PromptImageSpan],
-    chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
-) -> list[int]:
-    """Return save points up to a planned prefix length.
-
-    Decode-time save scheduling only needs boundary offsets; the actual token
-    values are hashed later when the snapshot is prepared.
-    """
-    max_reusable_prefix_len = prompt_len - 1
-    return [
-        chunk_end
-        for chunk_end in _build_prefix_cache_chunk_bounds(
-            prompt_len,
-            image_spans,
-            chunk_size,
-        )
-        if 0 < chunk_end <= max_reusable_prefix_len
-    ]

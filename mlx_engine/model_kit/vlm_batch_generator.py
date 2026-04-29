@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional, Union
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx_engine.model_kit.vlm_prompt_cache_types import DEFAULT_PREFIX_CHUNK_SIZE
 from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
     DEFAULT_KV_GROUP_SIZE,
@@ -29,6 +30,11 @@ from mlx_vlm.generate import (
 # The local batcher owns generation on the mlx-engine scheduler thread, so it
 # should not mutate mlx-vlm's module-global generation stream.
 generation_stream = mx.new_thread_local_stream(mx.default_device())
+
+
+def _append_next_cache_boundary(boundaries: list[int], boundary: int) -> None:
+    if not boundaries:
+        boundaries.append(boundary + DEFAULT_PREFIX_CHUNK_SIZE)
 
 
 def _merge_caches(caches: list[list[Any]]) -> list[Any]:
@@ -325,6 +331,7 @@ class GenerationBatch:
                     self.extract_decode_state(idx),
                     list(self.tokens[idx]),
                 )
+                _append_next_cache_boundary(boundaries, boundary)
 
     def next(self) -> list[Response]:
         if not self.uids:
@@ -549,6 +556,10 @@ class PromptProcessingBatch:
         while boundaries and boundaries[0] <= processed:
             boundary = boundaries.pop(0)
             if boundary == processed:
+                suffix_len = processed - len(self._all_tokens[0])
+                snapshot_tokens = (
+                    self._all_tokens[0] + self._prompt_token_ids[0][:suffix_len]
+                )
                 self._prompt_cache_boundary_callback(
                     self.uids[0],
                     boundary,
@@ -557,8 +568,9 @@ class PromptProcessingBatch:
                         for cache in self.prompt_cache
                     ],
                     self._current_decode_state(),
-                    None,
+                    snapshot_tokens,
                 )
+                _append_next_cache_boundary(boundaries, boundary)
 
     def generate(self, sampler, stop_criteria, top_logprobs_k=0) -> GenerationBatch:
         output = self._language_model(

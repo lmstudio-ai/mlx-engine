@@ -34,7 +34,7 @@ from mlx_engine.model_kit.vlm_safetensor_spool import AnonymousSafetensorSpool
 from mlx.utils import tree_flatten
 
 
-_RECORD_SAVE_PRIORITY: tuple[RecordKind, ...] = (
+_RECORD_RETENTION_PRIORITY: tuple[RecordKind, ...] = (
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
@@ -429,8 +429,8 @@ class VlmPromptSpillCache:
                 self._record_metadata_by_key[record_key].record_kind: record_key
                 for record_key in record_keys
             }
-            # Touch low priority first so high priority records stay newest in LRU.
-            for record_kind in reversed(_RECORD_SAVE_PRIORITY):
+            # Touch low retention priority first so important records stay newest.
+            for record_kind in reversed(_RECORD_RETENTION_PRIORITY):
                 record_key = record_keys_by_kind.get(record_kind)
                 if record_key is not None:
                     ordered_record_keys.append(record_key)

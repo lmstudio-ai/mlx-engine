@@ -149,6 +149,7 @@ def parse_args():
             "hybrid-cache-e2e",
             "arrays-cache-e2e",
             "arrays-cache-branch-e2e",
+            "qwen-rope-e2e",
             "eviction",
             "eviction-e2e",
             "eviction-stress",
@@ -394,6 +395,7 @@ def build_prefix_requests(
     *,
     prompt: str,
     primary_image_b64: str,
+    max_tokens: int = 24,
 ) -> tuple[PreparedRequest, PreparedRequest, object, object, str]:
     base_prompt_text = build_prompt(processor, prompt, primary_image_b64)
     base_prepared = prepare_request_from_prompt_text(
@@ -404,7 +406,7 @@ def build_prefix_requests(
             prompt=prompt,
             expected_any=("bird", "toucan"),
             image_b64=primary_image_b64,
-            max_tokens=24,
+            max_tokens=max_tokens,
         ),
         request_id="prefix-base",
     )
@@ -428,7 +430,7 @@ def build_prefix_requests(
                 prompt=prompt,
                 expected_any=(),
                 image_b64=primary_image_b64,
-                max_tokens=24,
+                max_tokens=max_tokens,
             ),
             request_id="prefix-extended",
         )
@@ -1079,14 +1081,12 @@ def run_prefix(
             f"{extended_trace.begin_prefill_tokens_processed} not in "
             f"{sorted(accepted_extended_progress)}"
         )
-    hot_control_progress = min(
-        _image_safe_common_prefix_len(
-            control_prompt_inputs.prompt_input_ids,
-            control_prompt_inputs.image_spans,
-            extended_prompt_inputs.prompt_input_ids,
-            extended_prompt_inputs.image_spans,
-        ),
-        len(control_prompt_inputs.prompt_input_ids) - 1,
+    hot_control_progress = _image_safe_common_prefix_len(
+        control_prompt_inputs.prompt_input_ids,
+        control_prompt_inputs.image_spans,
+        extended_prompt_inputs.prompt_input_ids,
+        extended_prompt_inputs.image_spans,
+        max_prefix_len=len(control_prompt_inputs.prompt_input_ids) - 1,
     )
     accepted_control_progress = {expected_control_progress, hot_control_progress}
     if control_trace.begin_prefill_tokens_processed not in accepted_control_progress:
@@ -1218,6 +1218,25 @@ def run_multi_prefix(args) -> None:
         raise RuntimeError("Appending an image changed earlier prompt chunk keys")
     if changed_image_chunks[0].key == base_image_chunks[0].key:
         raise RuntimeError("Changing an image did not change its containing chunk")
+    image_reuse_prefix_len = _image_safe_common_prefix_len(
+        extended_image_prompt,
+        [
+            PromptImageSpan(20, 23, "image-a"),
+            PromptImageSpan(
+                len(base_image_prompt),
+                len(base_image_prompt) + 2,
+                "image-b",
+            ),
+        ],
+        base_image_prompt,
+        [PromptImageSpan(20, 23, "image-a")],
+        max_prefix_len=len(base_image_prompt),
+    )
+    if image_reuse_prefix_len != len(base_image_prompt):
+        raise RuntimeError(
+            "Hot image-prefix reuse did not preserve the matching image prefix: "
+            f"{image_reuse_prefix_len} != {len(base_image_prompt)}"
+        )
 
     prompt_input_ids = list(range(600))
     chunks = build_prefix_cache_chunks(prompt_input_ids, [])
@@ -1831,6 +1850,159 @@ def run_arrays_cache_branch_e2e(model_kit, processor, args) -> None:
     print("ARRAYS_CACHE_BRANCH_E2E_OK")
 
 
+def _qwen_language_model(model_kit):
+    language_model = getattr(model_kit.model, "language_model", None)
+    if language_model is None or not hasattr(language_model, "_rope_deltas"):
+        raise RuntimeError("Loaded model does not expose Qwen-style rope state")
+    return language_model
+
+
+def _clear_qwen_rope_state(model_kit) -> None:
+    language_model = _qwen_language_model(model_kit)
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+
+
+def run_qwen_rope_e2e(
+    model_kit,
+    processor,
+    *,
+    primary_image_b64: str,
+    args,
+) -> None:
+    filler = "alpha beta gamma delta epsilon zeta eta theta. " * 32
+    (
+        base_prepared,
+        extended_prepared,
+        base_prompt_inputs,
+        extended_prompt_inputs,
+        _suffix,
+    ) = build_prefix_requests(
+        model_kit,
+        processor,
+        prompt=f"{args.prompt} {filler}",
+        primary_image_b64=primary_image_b64,
+        max_tokens=min(args.max_tokens, 4),
+    )
+    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
+    if prompt_spill_cache is None:
+        raise RuntimeError("qwen-rope-e2e mode requires the batched spill cache")
+    if not [
+        chunk
+        for chunk in build_prefix_cache_chunks(
+            base_prompt_inputs.prompt_input_ids,
+            base_prompt_inputs.image_spans,
+        )
+        if chunk.end < len(base_prompt_inputs.prompt_input_ids)
+    ]:
+        raise RuntimeError("Qwen rope prompt did not produce a restorable chunk")
+
+    base_result = run_prepared_request(model_kit, base_prepared)
+    if base_result.stop_reason is None:
+        raise RuntimeError("Qwen rope base request completed without a stop reason")
+
+    prefix_match = wait_for_prefix_snapshot(
+        model_kit,
+        prompt_input_ids=extended_prompt_inputs.prompt_input_ids,
+        image_spans=extended_prompt_inputs.image_spans,
+        timeout_s=args.prefix_wait_timeout_s,
+    )
+    expected_restored_tokens = restore_cached_prefix_len(prefix_match)
+
+    clear_hot_completed_prompt_cache(model_kit)
+    _clear_qwen_rope_state(model_kit)
+
+    coordinator = getattr(model_kit, "_prompt_cache_coordinator", None)
+    if coordinator is None:
+        raise RuntimeError("qwen-rope-e2e mode requires the cache coordinator")
+    language_model = _qwen_language_model(model_kit)
+    original_restore = coordinator.restore
+    original_get_input_embeddings = model_kit.model.get_input_embeddings
+    restore_probe = {}
+    embedding_probe = {}
+
+    def restore_wrapper(*, prompt_input_ids: list[int], image_spans: list):
+        restored = original_restore(
+            prompt_input_ids=prompt_input_ids,
+            image_spans=image_spans,
+        )
+        if prompt_input_ids == extended_prompt_inputs.prompt_input_ids:
+            restore_probe["called"] = True
+            restore_probe["cached_prefix_len"] = (
+                None if restored is None else restored.cached_prefix_len
+            )
+            restore_probe["rope_deltas_is_none"] = (
+                restored is not None and restored.rope_deltas is None
+            )
+        return restored
+
+    def get_input_embeddings_wrapper(*args_, **kwargs):
+        input_ids = args_[0] if args_ else kwargs.get("input_ids")
+        pixel_values = args_[1] if len(args_) > 1 else kwargs.get("pixel_values")
+        before_rope_deltas = language_model._rope_deltas
+        result = original_get_input_embeddings(*args_, **kwargs)
+        after_rope_deltas = language_model._rope_deltas
+        if pixel_values is not None and input_ids is not None:
+            input_id_list = input_ids.squeeze(0).tolist()
+            if input_id_list == extended_prompt_inputs.prompt_input_ids:
+                embedding_probe["before_was_none"] = before_rope_deltas is None
+                embedding_probe["after_is_not_none"] = after_rope_deltas is not None
+                if after_rope_deltas is not None:
+                    mx.eval(after_rope_deltas)
+                    embedding_probe["shape"] = tuple(after_rope_deltas.shape)
+        return result
+
+    coordinator.restore = restore_wrapper
+    model_kit.model.get_input_embeddings = get_input_embeddings_wrapper
+    extended_trace = PromptProgressTrace()
+    try:
+        extended_result = run_prepared_request(
+            model_kit,
+            extended_prepared,
+            prompt_progress_reporter=TracePromptProgressReporter(extended_trace),
+        )
+    finally:
+        coordinator.restore = original_restore
+        model_kit.model.get_input_embeddings = original_get_input_embeddings
+
+    if extended_result.stop_reason is None:
+        raise RuntimeError("Qwen rope restored request completed without a stop reason")
+    if restore_probe.get("cached_prefix_len") != expected_restored_tokens:
+        raise RuntimeError(
+            "Qwen rope restore did not use the expected disk prefix: "
+            f"{restore_probe.get('cached_prefix_len')} != {expected_restored_tokens}"
+        )
+    if not restore_probe.get("rope_deltas_is_none"):
+        raise RuntimeError("Qwen disk restore unexpectedly carried rope_deltas")
+    if not embedding_probe.get("before_was_none"):
+        raise RuntimeError("Qwen rope state was not cleared before recompute")
+    if not embedding_probe.get("after_is_not_none"):
+        raise RuntimeError("Qwen get_input_embeddings did not recompute rope_deltas")
+    if extended_trace.begin_prefill_tokens_processed != expected_restored_tokens:
+        raise RuntimeError(
+            "Qwen rope request did not resume from the expected cached prefix: "
+            f"{extended_trace.begin_prefill_tokens_processed} "
+            f"!= {expected_restored_tokens}"
+        )
+
+    print("QWEN_ROPE_BASE_PROMPT_TOKENS", len(base_prompt_inputs.prompt_input_ids))
+    print(
+        "QWEN_ROPE_EXTENDED_PROMPT_TOKENS",
+        len(extended_prompt_inputs.prompt_input_ids),
+    )
+    print("QWEN_ROPE_RESTORED_TOKENS", expected_restored_tokens)
+    print("QWEN_ROPE_RESTORE_DELTAS_NONE", restore_probe["rope_deltas_is_none"])
+    print("QWEN_ROPE_RECOMPUTED_SHAPE", embedding_probe["shape"])
+    print(
+        "QWEN_ROPE_BEGIN",
+        extended_trace.begin_cached_tokens,
+        extended_trace.begin_total_prompt_tokens,
+        extended_trace.begin_prefill_tokens_processed,
+    )
+    print("QWEN_ROPE_TEXT", repr(truncate_text(extended_result.text)))
+    print("QWEN_ROPE_E2E_OK")
+
+
 def run_eviction_e2e(model_kit, processor, args) -> None:
     (
         base_prepared,
@@ -2326,7 +2498,12 @@ def run_cross_thread_restore(
 def main():
     args = parse_args()
     if (
-        args.mode in {"arrays-cache-e2e", "arrays-cache-branch-e2e"}
+        args.mode
+        in {
+            "arrays-cache-e2e",
+            "arrays-cache-branch-e2e",
+            "qwen-rope-e2e",
+        }
         and args.model == DEFAULT_MODEL_PATH
     ):
         args.model = DEFAULT_QWEN35_MODEL_PATH
@@ -2343,6 +2520,7 @@ def main():
         "hybrid-cache-e2e",
         "arrays-cache-e2e",
         "arrays-cache-branch-e2e",
+        "qwen-rope-e2e",
         "eviction",
         "eviction-e2e",
         "eviction-stress",
@@ -2431,6 +2609,13 @@ def main():
             print("ARRAYS_CACHE_E2E_OK")
         elif args.mode == "arrays-cache-branch-e2e":
             run_arrays_cache_branch_e2e(model_kit, processor, args)
+        elif args.mode == "qwen-rope-e2e":
+            run_qwen_rope_e2e(
+                model_kit,
+                processor,
+                primary_image_b64=primary_image_b64,
+                args=args,
+            )
         elif args.mode == "eviction-e2e":
             run_eviction_e2e(model_kit, processor, args)
         elif args.mode == "eviction-stress":

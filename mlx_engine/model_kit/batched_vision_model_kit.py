@@ -705,17 +705,15 @@ class BatchedVisionModelKit:
             prompt_kwargs = self._build_prompt_kwargs(prepared_prompt)
 
         if self._prompt_cache_coordinator is not None:
-            cache_boundaries = self._prompt_cache_coordinator.boundaries_after(
+            cache_save_points = self._prompt_cache_coordinator.save_points_after(
                 prompt_input_ids=full_prompt_input_ids,
                 image_spans=prepared_prompt.image_spans,
                 prompt_progress=prompt_progress,
-                max_prefix_len=prompt_token_count + request.max_tokens,
             )
-            if cache_boundaries:
-                insert_kwargs["cache_boundaries"] = [cache_boundaries]
+            if cache_save_points:
+                insert_kwargs["cache_boundaries"] = [cache_save_points]
                 insert_kwargs["prompt_cache_boundary_callback"] = (
                     self._prompt_cache_coordinator.make_boundary_callback(
-                        prompt_input_ids=full_prompt_input_ids,
                         image_spans=prepared_prompt.image_spans,
                     )
                 )
