@@ -28,6 +28,7 @@ class PromptImageSpan:
 
 @dataclass
 class SpilledPromptState:
+    cached_prefix_len: int
     prompt_cache: list[Any]
     rope_deltas: Optional[Any]
 
@@ -54,14 +55,10 @@ class PromptPrefixChunk:
 class PromptCacheChunkMetadata:
     """Index metadata for one logical prompt-prefix chunk.
 
-    This describes the prefix identity, its ordered chunk ancestry, and the
-    per-layer payload kinds available for the chunk. Physical safetensor records
-    are tracked by `PromptCacheRecordMetadata`.
+    Physical safetensor records are tracked by `PromptCacheRecordMetadata`.
     """
 
-    chunk_start: int
     chunk_end: int
-    chunk_hash: str
     prefix_chunk_keys: list[str]
     payload_kinds: list[RecordKind]
 
@@ -81,19 +78,11 @@ class PromptCacheRecordMetadata:
 
 
 @dataclass
-class CachedPrefixMatch:
-    key: str
-    metadata: PromptCacheChunkMetadata
-    matched_prefix_len: int
-    chunk_keys: list[str]
-
-
-@dataclass
 class PreparedPromptRecord:
     key: str
     metadata: PromptCacheRecordMetadata
     snapshot_arrays: dict[str, Any]
-    snapshot_metadata: dict[str, str]
+    safetensor_metadata: dict[str, str]
 
 
 @dataclass
@@ -108,7 +97,11 @@ class PendingPromptCacheSave:
 
 @dataclass
 class VlmPromptSpillCacheStats:
-    """Committed spill-cache accounting used by diagnostics and smokes."""
+    """Committed spill-cache accounting used by diagnostics and smokes.
+
+    `hits` count restored chunks. `misses` count eligible chunks that could
+    not be restored.
+    """
 
     total_bytes: int
     max_bytes: int

@@ -2,7 +2,6 @@ import argparse
 import base64
 import os
 import random
-import tempfile
 import threading
 import time
 from collections import Counter
@@ -28,7 +27,9 @@ from mlx_engine.model_kit.vlm_prompt_cache_types import (
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
+    RECORD_WRITE_ORDER,
     build_prefix_cache_chunks,
+    make_record_key,
 )
 from mlx_engine.model_kit.vlm_prompt_spill_cache import (
     VlmPromptSpillCache,
@@ -221,12 +222,6 @@ def parse_args():
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True to model loading and processor loading",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=None,
-        help="Disk-cache directory to use when disk cache is enabled",
     )
     parser.add_argument(
         "--disk-cache",
@@ -521,15 +516,47 @@ def wait_for_prefix_snapshot(
 
     deadline = time.perf_counter() + timeout_s
     while time.perf_counter() < deadline:
-        match = prompt_spill_cache.find_longest_prefix(
+        match = find_restore_records(
+            prompt_spill_cache,
             prompt_input_ids,
             image_spans,
         )
-        if match is not None and len(match.chunk_keys) >= min_chunk_keys:
+        if match is not None and len(restore_chunk_keys(match)) >= min_chunk_keys:
             return match
         time.sleep(0.05)
 
     raise RuntimeError("Timed out waiting for a reusable prompt snapshot")
+
+
+def find_restore_records(prompt_spill_cache, prompt_input_ids: list[int], image_spans):
+    max_reusable_prefix_len = len(prompt_input_ids) - 1
+    if max_reusable_prefix_len <= 0:
+        return None
+
+    candidate_chunk_keys = []
+    for chunk in build_prefix_cache_chunks(prompt_input_ids, image_spans):
+        if chunk.end > max_reusable_prefix_len:
+            break
+
+        metadata = prompt_spill_cache._metadata_by_key.get(chunk.key)
+        if metadata is None or metadata.chunk_end != chunk.end:
+            break
+
+        candidate_chunk_keys.append(chunk.key)
+
+    return prompt_spill_cache._find_best_effort_restore_records(candidate_chunk_keys)
+
+
+def restore_cached_prefix_len(restore_records) -> int:
+    return restore_records[0]
+
+
+def restore_chunk_keys(restore_records) -> list[str]:
+    return restore_records[1]
+
+
+def load_restore_records(prompt_spill_cache, restore_records):
+    return prompt_spill_cache._load_restore_records(*restore_records)
 
 
 def clear_hot_completed_prompt_cache(model_kit) -> None:
@@ -566,13 +593,28 @@ def spill_chunk_records_available(prompt_spill_cache, chunk_key: str) -> bool:
     )
 
 
+def expected_spill_record_keys(prompt_spill_cache, chunk_key: str) -> list[str]:
+    metadata = prompt_spill_cache._metadata_by_key.get(chunk_key)
+    if metadata is None:
+        return []
+    return [
+        make_record_key(chunk_key, record_kind)
+        for record_kind in RECORD_WRITE_ORDER
+        if record_kind in metadata.payload_kinds
+    ]
+
+
+def restore_spill_record_keys(prompt_spill_cache, chunk_keys: list[str]):
+    return prompt_spill_cache._cache_index_view().restore_record_keys_for_chunk_chain(
+        chunk_keys
+    )
+
+
 def get_stale_optional_record_keys(
     prompt_spill_cache,
     chunk_keys: list[str],
 ) -> list[str]:
-    record_keys_by_chunk = prompt_spill_cache._restore_record_keys_for_chunk_chain(
-        chunk_keys
-    )
+    record_keys_by_chunk = restore_spill_record_keys(prompt_spill_cache, chunk_keys)
     if record_keys_by_chunk is None:
         return []
 
@@ -583,9 +625,7 @@ def get_stale_optional_record_keys(
     }
     stale_record_keys = []
     for chunk_key in chunk_keys:
-        for record_key in prompt_spill_cache._get_expected_record_keys_for_chunk(
-            chunk_key
-        ):
+        for record_key in expected_spill_record_keys(prompt_spill_cache, chunk_key):
             record_metadata = prompt_spill_cache._record_metadata_by_key.get(record_key)
             if (
                 record_metadata is not None
@@ -839,8 +879,9 @@ def run_prefix(
             image_spans=extended_prompt_inputs.image_spans,
             timeout_s=args.prefix_wait_timeout_s,
         )
-        expected_prefix_len = prefix_match.matched_prefix_len
-        control_prefix_match = prompt_spill_cache.find_longest_prefix(
+        expected_prefix_len = restore_cached_prefix_len(prefix_match)
+        control_prefix_match = find_restore_records(
+            prompt_spill_cache,
             control_prompt_inputs.prompt_input_ids,
             control_prompt_inputs.image_spans,
         )
@@ -848,7 +889,9 @@ def run_prefix(
         expected_prefix_len = 0
         control_prefix_match = None
     expected_control_progress = (
-        0 if control_prefix_match is None else control_prefix_match.matched_prefix_len
+        0
+        if control_prefix_match is None
+        else restore_cached_prefix_len(control_prefix_match)
     )
 
     extended_trace = PromptProgressTrace()
@@ -1053,21 +1096,23 @@ def run_multi_prefix(args) -> None:
         for chunk in reusable_chunks[:2]:
             save_synthetic_chunk(prompt_spill_cache, chunk, prompt_input_ids)
 
-        prefix_match = prompt_spill_cache.find_longest_prefix(
+        prefix_match = find_restore_records(
+            prompt_spill_cache,
             prompt_input_ids,
             [],
         )
-        if prefix_match is None or len(prefix_match.chunk_keys) != 2:
+        if prefix_match is None or len(restore_chunk_keys(prefix_match)) != 2:
             raise RuntimeError("Synthetic lookup did not return two chunk keys")
         expected_prefix_len = reusable_chunks[1].end
-        if prefix_match.matched_prefix_len != expected_prefix_len:
+        if restore_cached_prefix_len(prefix_match) != expected_prefix_len:
             raise RuntimeError(
                 "Synthetic lookup matched the wrong boundary: "
-                f"{prefix_match.matched_prefix_len} != {expected_prefix_len}"
+                f"{restore_cached_prefix_len(prefix_match)} != {expected_prefix_len}"
             )
 
-        record_keys_by_chunk = prompt_spill_cache._restore_record_keys_for_chunk_chain(
-            prefix_match.chunk_keys
+        record_keys_by_chunk = restore_spill_record_keys(
+            prompt_spill_cache,
+            restore_chunk_keys(prefix_match),
         )
         if record_keys_by_chunk is None:
             raise RuntimeError("Synthetic record selection failed")
@@ -1087,8 +1132,9 @@ def run_multi_prefix(args) -> None:
 
         first_chunk_state_record_key = next(
             record_key
-            for record_key in prompt_spill_cache._get_expected_record_keys_for_chunk(
-                prefix_match.chunk_keys[0]
+            for record_key in expected_spill_record_keys(
+                prompt_spill_cache,
+                restore_chunk_keys(prefix_match)[0],
             )
             if (
                 prompt_spill_cache._record_metadata_by_key[record_key].record_kind
@@ -1112,18 +1158,17 @@ def run_multi_prefix(args) -> None:
         if prompt_spill_cache._total_bytes > prompt_spill_cache._max_cache_bytes:
             raise RuntimeError("State checkpoint eviction did not enforce the byte cap")
 
-        prefix_match = prompt_spill_cache.find_longest_prefix(
+        prefix_match = find_restore_records(
+            prompt_spill_cache,
             prompt_input_ids,
             [],
         )
-        if prefix_match is None or len(prefix_match.chunk_keys) != 2:
+        if prefix_match is None or len(restore_chunk_keys(prefix_match)) != 2:
             raise RuntimeError(
                 "Synthetic lookup required an evicted old state checkpoint"
             )
 
-        spilled_state = prompt_spill_cache.load_chunk_sequence(prefix_match.chunk_keys)
-        if spilled_state is None:
-            raise RuntimeError("Synthetic chunk sequence did not load")
+        spilled_state = load_restore_records(prompt_spill_cache, prefix_match)
 
         kv_keys, kv_values = spilled_state.prompt_cache[0].state
         arrays_value = spilled_state.prompt_cache[1][0]
@@ -1144,7 +1189,7 @@ def run_multi_prefix(args) -> None:
 
         cache_file_sizes = prompt_spill_cache.snapshot_stats().record_sizes
         print("MULTI_PREFIX_SYNTHETIC", True)
-        print("MULTI_PREFIX_CHUNK_KEYS", len(prefix_match.chunk_keys))
+        print("MULTI_PREFIX_CHUNK_KEYS", len(restore_chunk_keys(prefix_match)))
         print("MULTI_PREFIX_BOUNDARIES", [chunk.end for chunk in reusable_chunks[:2]])
         print("MULTI_PREFIX_RESTORED_TOKENS", expected_prefix_len)
         print("MULTI_PREFIX_EVICTED_OLD_STATE", True)
@@ -1174,15 +1219,17 @@ def run_rotating_suffix(args) -> None:
                 prompt_cache=make_synthetic_rotating_prompt_cache(chunk.end),
             )
 
-        prefix_match = prompt_spill_cache.find_longest_prefix(
+        prefix_match = find_restore_records(
+            prompt_spill_cache,
             prompt_input_ids,
             [],
         )
-        if prefix_match is None or len(prefix_match.chunk_keys) != 3:
+        if prefix_match is None or len(restore_chunk_keys(prefix_match)) != 3:
             raise RuntimeError("Rotating lookup did not return three chunk keys")
 
-        record_keys_by_chunk = prompt_spill_cache._restore_record_keys_for_chunk_chain(
-            prefix_match.chunk_keys
+        record_keys_by_chunk = restore_spill_record_keys(
+            prompt_spill_cache,
+            restore_chunk_keys(prefix_match),
         )
         if record_keys_by_chunk is None:
             raise RuntimeError("Rotating record selection failed")
@@ -1202,8 +1249,9 @@ def run_rotating_suffix(args) -> None:
 
         first_chunk_rotating_record_key = next(
             record_key
-            for record_key in prompt_spill_cache._get_expected_record_keys_for_chunk(
-                prefix_match.chunk_keys[0]
+            for record_key in expected_spill_record_keys(
+                prompt_spill_cache,
+                restore_chunk_keys(prefix_match)[0],
             )
             if (
                 prompt_spill_cache._record_metadata_by_key[record_key].record_kind
@@ -1227,16 +1275,18 @@ def run_rotating_suffix(args) -> None:
         if prompt_spill_cache._total_bytes > prompt_spill_cache._max_cache_bytes:
             raise RuntimeError("Rotating eviction did not enforce the byte cap")
 
-        prefix_match = prompt_spill_cache.find_longest_prefix(
+        prefix_match = find_restore_records(
+            prompt_spill_cache,
             prompt_input_ids,
             [],
         )
-        if prefix_match is None or len(prefix_match.chunk_keys) != 3:
+        if prefix_match is None or len(restore_chunk_keys(prefix_match)) != 3:
             raise RuntimeError(
                 "Rotating lookup required an evicted record outside the final window"
             )
-        record_keys_by_chunk = prompt_spill_cache._restore_record_keys_for_chunk_chain(
-            prefix_match.chunk_keys
+        record_keys_by_chunk = restore_spill_record_keys(
+            prompt_spill_cache,
+            restore_chunk_keys(prefix_match),
         )
         if record_keys_by_chunk is None:
             raise RuntimeError("Rotating record selection failed after eviction")
@@ -1247,9 +1297,7 @@ def run_rotating_suffix(args) -> None:
         ]:
             raise RuntimeError("Rotating record selection kept an old SWA record")
 
-        spilled_state = prompt_spill_cache.load_chunk_sequence(prefix_match.chunk_keys)
-        if spilled_state is None:
-            raise RuntimeError("Rotating suffix chunk sequence did not load")
+        spilled_state = load_restore_records(prompt_spill_cache, prefix_match)
         kv_keys, _ = spilled_state.prompt_cache[0].state
         rotating_keys, _ = spilled_state.prompt_cache[1].state
         mx.eval(kv_keys, rotating_keys)
@@ -1263,7 +1311,7 @@ def run_rotating_suffix(args) -> None:
         ):
             raise RuntimeError("Rotating suffix restore did not use the last window")
 
-        print("ROTATING_SUFFIX_CHUNK_KEYS", len(prefix_match.chunk_keys))
+        print("ROTATING_SUFFIX_CHUNK_KEYS", len(restore_chunk_keys(prefix_match)))
         print("ROTATING_SUFFIX_RECORDS", len(rotating_record_keys))
         print("ROTATING_SUFFIX_EVICTED_OLD_RECORD", True)
         print("ROTATING_SUFFIX_TOTAL_BEFORE_EVICT", total_before_eviction)
@@ -1315,14 +1363,30 @@ def run_eviction(args) -> None:
         if prompt_spill_cache._total_bytes > prompt_spill_cache._max_cache_bytes:
             raise RuntimeError("Eviction did not enforce the byte cap")
 
-        prefix_match = prompt_spill_cache.find_longest_prefix(prompt_input_ids, [])
-        if prefix_match is None or prefix_match.matched_prefix_len != first_chunk.end:
+        best_effort_restore = prompt_spill_cache._find_best_effort_restore_records(
+            second_chunk.prefix_chunk_keys
+        )
+        if best_effort_restore is None:
+            raise RuntimeError("Eviction best-effort restore missed")
+        best_effort_state = load_restore_records(
+            prompt_spill_cache,
+            best_effort_restore,
+        )
+        if best_effort_state.cached_prefix_len != first_chunk.end:
+            raise RuntimeError("Eviction best-effort restore used the wrong prefix")
+
+        prefix_match = find_restore_records(
+            prompt_spill_cache,
+            prompt_input_ids,
+            [],
+        )
+        if (
+            prefix_match is None
+            or restore_cached_prefix_len(prefix_match) != first_chunk.end
+        ):
             raise RuntimeError("Eviction did not preserve the shorter reusable prefix")
 
-        spilled_state = prompt_spill_cache.load_chunk_sequence(prefix_match.chunk_keys)
-        if spilled_state is None:
-            raise RuntimeError("Eviction left an unloadable prefix")
-        kv_keys, _ = spilled_state.prompt_cache[0].state
+        kv_keys, _ = best_effort_state.prompt_cache[0].state
         mx.eval(kv_keys)
         if kv_keys.shape[2] != first_chunk.end:
             raise RuntimeError("Eviction restored the wrong prefix length")
@@ -1333,7 +1397,8 @@ def run_eviction(args) -> None:
         print("EVICTION_FILES", len(cache_files))
         print("EVICTION_FIRST_EXISTS", first_exists)
         print("EVICTION_SECOND_EXISTS", second_exists)
-        print("EVICTION_RESTORED_TOKENS", prefix_match.matched_prefix_len)
+        print("EVICTION_RESTORED_TOKENS", restore_cached_prefix_len(prefix_match))
+        print("EVICTION_BEST_EFFORT_TOKENS", best_effort_state.cached_prefix_len)
         print("EVICTION_OK")
     finally:
         prompt_spill_cache.close()
@@ -1369,10 +1434,10 @@ def run_multi_prefix_e2e(model_kit, processor, args) -> None:
         timeout_s=args.prefix_wait_timeout_s,
     )
     expected_restored_tokens = reusable_boundaries[1]
-    if prefix_match.matched_prefix_len != expected_restored_tokens:
+    if restore_cached_prefix_len(prefix_match) != expected_restored_tokens:
         raise RuntimeError(
             "E2E prefix lookup did not stop at the second chunk boundary: "
-            f"{prefix_match.matched_prefix_len} != {expected_restored_tokens}"
+            f"{restore_cached_prefix_len(prefix_match)} != {expected_restored_tokens}"
         )
 
     clear_hot_completed_prompt_cache(model_kit)
@@ -1399,7 +1464,7 @@ def run_multi_prefix_e2e(model_kit, processor, args) -> None:
         len(extended_prompt_inputs.prompt_input_ids),
     )
     print("MULTI_PREFIX_E2E_BOUNDARIES", reusable_boundaries)
-    print("MULTI_PREFIX_E2E_CHUNK_KEYS", len(prefix_match.chunk_keys))
+    print("MULTI_PREFIX_E2E_CHUNK_KEYS", len(restore_chunk_keys(prefix_match)))
     print("MULTI_PREFIX_E2E_RESTORED_TOKENS", expected_restored_tokens)
     print(
         "MULTI_PREFIX_E2E_BASE_BEGIN",
@@ -1449,14 +1514,15 @@ def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
         timeout_s=args.prefix_wait_timeout_s,
     )
     expected_restored_tokens = reusable_boundaries[1]
-    if prefix_match.matched_prefix_len != expected_restored_tokens:
+    if restore_cached_prefix_len(prefix_match) != expected_restored_tokens:
         raise RuntimeError(
             "Hybrid cache lookup did not stop at the second chunk boundary: "
-            f"{prefix_match.matched_prefix_len} != {expected_restored_tokens}"
+            f"{restore_cached_prefix_len(prefix_match)} != {expected_restored_tokens}"
         )
 
     chunk_metadata = [
-        prompt_spill_cache._metadata_by_key[key] for key in prefix_match.chunk_keys
+        prompt_spill_cache._metadata_by_key[key]
+        for key in restore_chunk_keys(prefix_match)
     ]
     per_chunk_payload_counts = [
         dict(Counter(metadata.payload_kinds)) for metadata in chunk_metadata
@@ -1472,9 +1538,7 @@ def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
     ):
         raise RuntimeError("Hybrid cache did not save any non-full-attention payloads")
 
-    spilled_state = prompt_spill_cache.load_chunk_sequence(prefix_match.chunk_keys)
-    if spilled_state is None:
-        raise RuntimeError("Hybrid chunk sequence did not load")
+    spilled_state = load_restore_records(prompt_spill_cache, prefix_match)
     restored_cache_classes = [
         type(cache).__name__ for cache in spilled_state.prompt_cache
     ]
@@ -1513,7 +1577,7 @@ def run_hybrid_cache_e2e(model_kit, processor, args) -> None:
         len(extended_prompt_inputs.prompt_input_ids),
     )
     print("HYBRID_CACHE_BOUNDARIES", reusable_boundaries)
-    print("HYBRID_CACHE_CHUNK_KEYS", len(prefix_match.chunk_keys))
+    print("HYBRID_CACHE_CHUNK_KEYS", len(restore_chunk_keys(prefix_match)))
     print("HYBRID_CACHE_RESTORED_TOKENS", expected_restored_tokens)
     print("HYBRID_CACHE_PAYLOAD_COUNTS", dict(total_payload_counts))
     print("HYBRID_CACHE_PER_CHUNK_PAYLOAD_COUNTS", per_chunk_payload_counts)
@@ -1566,19 +1630,19 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
         timeout_s=args.prefix_wait_timeout_s,
     )
     expected_two_chunk_boundary = reusable_boundaries[1]
-    if two_chunk_match.matched_prefix_len != expected_two_chunk_boundary:
+    if restore_cached_prefix_len(two_chunk_match) != expected_two_chunk_boundary:
         raise RuntimeError(
             "E2E eviction setup did not build a two-chunk cache: "
-            f"{two_chunk_match.matched_prefix_len} != {expected_two_chunk_boundary}"
+            f"{restore_cached_prefix_len(two_chunk_match)} != {expected_two_chunk_boundary}"
         )
 
-    first_key, second_key = two_chunk_match.chunk_keys[:2]
+    first_key, second_key = restore_chunk_keys(two_chunk_match)[:2]
     first_size = get_spill_chunk_size(prompt_spill_cache, first_key)
     second_size = get_spill_chunk_size(prompt_spill_cache, second_key)
     total_before_eviction = prompt_spill_cache._total_bytes
     stale_optional_record_keys = get_stale_optional_record_keys(
         prompt_spill_cache,
-        two_chunk_match.chunk_keys,
+        restore_chunk_keys(two_chunk_match),
     )
     stale_optional_size = sum(
         get_spill_record_size(prompt_spill_cache, record_key)
@@ -1603,18 +1667,20 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
     if prompt_spill_cache._total_bytes > prompt_spill_cache._max_cache_bytes:
         raise RuntimeError("E2E eviction did not enforce the byte cap")
 
-    post_eviction_match = prompt_spill_cache.find_longest_prefix(
+    post_eviction_match = find_restore_records(
+        prompt_spill_cache,
         extended_prompt_inputs.prompt_input_ids,
         extended_prompt_inputs.image_spans,
     )
     if (
         post_eviction_match is None
-        or post_eviction_match.matched_prefix_len != expected_post_eviction_boundary
+        or restore_cached_prefix_len(post_eviction_match)
+        != expected_post_eviction_boundary
     ):
         actual = (
             None
             if post_eviction_match is None
-            else post_eviction_match.matched_prefix_len
+            else restore_cached_prefix_len(post_eviction_match)
         )
         raise RuntimeError(
             "E2E eviction preserved the wrong reusable prefix: "
@@ -1657,7 +1723,10 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
     print("EVICTION_E2E_TOTAL_BYTES", prompt_spill_cache._total_bytes)
     print("EVICTION_E2E_FIRST_EXISTS", first_exists)
     print("EVICTION_E2E_SECOND_EXISTS", second_exists)
-    print("EVICTION_E2E_POST_EVICT_CHUNK_KEYS", len(post_eviction_match.chunk_keys))
+    print(
+        "EVICTION_E2E_POST_EVICT_CHUNK_KEYS",
+        len(restore_chunk_keys(post_eviction_match)),
+    )
     print("EVICTION_E2E_CACHE_FILES", len(cache_file_sizes))
     print("EVICTION_E2E_CACHE_FILE_SIZES", cache_file_sizes)
     print("EVICTION_E2E_RESTORED_TOKENS", expected_post_eviction_boundary)
@@ -1714,19 +1783,19 @@ def run_eviction_stress(model_kit, processor, args) -> None:
         timeout_s=args.prefix_wait_timeout_s,
     )
     expected_two_chunk_boundary = reusable_boundaries[1]
-    if two_chunk_match.matched_prefix_len != expected_two_chunk_boundary:
+    if restore_cached_prefix_len(two_chunk_match) != expected_two_chunk_boundary:
         raise RuntimeError(
             "Eviction-stress setup did not build a two-chunk cache: "
-            f"{two_chunk_match.matched_prefix_len} != {expected_two_chunk_boundary}"
+            f"{restore_cached_prefix_len(two_chunk_match)} != {expected_two_chunk_boundary}"
         )
 
-    first_key, second_key = two_chunk_match.chunk_keys[:2]
+    first_key, second_key = restore_chunk_keys(two_chunk_match)[:2]
     first_size = get_spill_chunk_size(prompt_spill_cache, first_key)
     second_size = get_spill_chunk_size(prompt_spill_cache, second_key)
     total_before_eviction = prompt_spill_cache._total_bytes
     stale_optional_record_keys = get_stale_optional_record_keys(
         prompt_spill_cache,
-        two_chunk_match.chunk_keys,
+        restore_chunk_keys(two_chunk_match),
     )
     stale_optional_size = sum(
         get_spill_record_size(prompt_spill_cache, record_key)
@@ -1741,7 +1810,8 @@ def run_eviction_stress(model_kit, processor, args) -> None:
     prompt_spill_cache._evict_if_needed()
 
     expected_one_chunk_boundary = reusable_boundaries[0]
-    post_eviction_match = prompt_spill_cache.find_longest_prefix(
+    post_eviction_match = find_restore_records(
+        prompt_spill_cache,
         extended_prompt_inputs.prompt_input_ids,
         extended_prompt_inputs.image_spans,
     )
@@ -1752,12 +1822,13 @@ def run_eviction_stress(model_kit, processor, args) -> None:
     )
     if (
         post_eviction_match is None
-        or post_eviction_match.matched_prefix_len != expected_post_eviction_boundary
+        or restore_cached_prefix_len(post_eviction_match)
+        != expected_post_eviction_boundary
     ):
         actual = (
             None
             if post_eviction_match is None
-            else post_eviction_match.matched_prefix_len
+            else restore_cached_prefix_len(post_eviction_match)
         )
         raise RuntimeError(
             "Eviction-stress preserved the wrong reusable prefix: "
@@ -1863,7 +1934,10 @@ def run_eviction_stress(model_kit, processor, args) -> None:
     print("EVICTION_STRESS_STALE_OPTIONAL_RECORDS", len(stale_optional_record_keys))
     print("EVICTION_STRESS_STALE_OPTIONAL_SIZE", stale_optional_size)
     print("EVICTION_STRESS_TOTAL_BEFORE_EVICT", total_before_eviction)
-    print("EVICTION_STRESS_POST_EVICT_CHUNK_KEYS", len(post_eviction_match.chunk_keys))
+    print(
+        "EVICTION_STRESS_POST_EVICT_CHUNK_KEYS",
+        len(restore_chunk_keys(post_eviction_match)),
+    )
     print("EVICTION_STRESS_REQUESTS", request_count)
     print("EVICTION_STRESS_WALL_TIME", f"{wall_time:.2f}s")
     print("EVICTION_STRESS_RESTORED_TOKENS", restored_tokens)
@@ -1915,9 +1989,7 @@ def run_cross_thread_restore(
         deadline = time.perf_counter() + args.prefix_wait_timeout_s
         while time.perf_counter() < deadline:
             try:
-                spilled_state = prompt_spill_cache.load_chunk_sequence(
-                    prefix_match.chunk_keys
-                )
+                spilled_state = load_restore_records(prompt_spill_cache, prefix_match)
             except Exception as exc:  # pragma: no cover - exercised live
                 load_error_holder["error"] = exc
                 return
@@ -1968,7 +2040,9 @@ def run_cross_thread_restore(
 
         if not can_trim_prompt_cache(spilled_state.prompt_cache):
             raise RuntimeError("Background-loaded prompt cache is not trimmable")
-        trim_count = prefix_match.metadata.chunk_end - prefix_match.matched_prefix_len
+        trim_count = spilled_state.cached_prefix_len - restore_cached_prefix_len(
+            prefix_match
+        )
         trimmed_tokens = trim_prompt_cache(spilled_state.prompt_cache, trim_count)
         if trimmed_tokens != trim_count:
             raise RuntimeError(
@@ -1977,7 +2051,7 @@ def run_cross_thread_restore(
 
         override_state["used"] = True
         return RestoredPromptCache(
-            cached_prefix_len=prefix_match.matched_prefix_len,
+            cached_prefix_len=restore_cached_prefix_len(prefix_match),
             prompt_cache=spilled_state.prompt_cache,
             rope_deltas=spilled_state.rope_deltas,
         )
@@ -1998,7 +2072,7 @@ def run_cross_thread_restore(
         raise RuntimeError("Scheduler did not consume the background-loaded state")
     if trace.begin_prefill_tokens_processed is None:
         raise RuntimeError("Cross-thread request did not emit a begin progress event")
-    expected_progress = prefix_match.matched_prefix_len
+    expected_progress = restore_cached_prefix_len(prefix_match)
     if trace.begin_prefill_tokens_processed != expected_progress:
         raise RuntimeError(
             "Cross-thread restore did not resume from the expected chunk prefix: "
@@ -2052,20 +2126,11 @@ def main():
         raise FileNotFoundError(f"Secondary image not found: {secondary_image_path}")
 
     if use_disk_cache:
-        cache_dir = (
-            args.cache_dir.expanduser().resolve()
-            if args.cache_dir is not None
-            else Path(tempfile.mkdtemp(prefix="mlx-vlm-prefix-smoke-"))
-        )
-        cache_dir.mkdir(parents=True, exist_ok=True)
         os.environ["MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE"] = "1"
-        os.environ["MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_DIR"] = str(cache_dir)
-        print("CACHE_DIR", str(cache_dir))
         if args.cache_max_bytes is not None:
             print("CACHE_MAX_BYTES", args.cache_max_bytes)
     else:
         os.environ.pop("MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE", None)
-        os.environ.pop("MLX_ENGINE_MLX_VLM_BATCHED_VISION_DISK_CACHE_DIR", None)
 
     if args.mode == "multi-prefix":
         run_multi_prefix(args)

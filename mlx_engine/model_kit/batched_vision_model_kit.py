@@ -52,7 +52,8 @@ MLX_VLM_BATCHED_VISION_DISK_CACHE_ENV_VAR = (
     "MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE"
 )
 _RESTORE_JOB_PRIORITY = 0
-_SAVE_JOB_PRIORITY = 1
+_FINAL_CAP_JOB_PRIORITY = 1
+_SAVE_JOB_PRIORITY = 2
 _SHUTDOWN_JOB_PRIORITY = -1
 
 
@@ -120,6 +121,11 @@ class _SaveJob:
 
 
 @dataclass
+class _FinalSpillCapJob:
+    max_cache_bytes: int
+
+
+@dataclass
 class _FailedRestore:
     request: _GenerationRequest
     error: Exception
@@ -177,6 +183,12 @@ class _PromptCacheActor:
         # The scheduler already prepared arrays; the actor handles disk I/O.
         self._enqueue(_SAVE_JOB_PRIORITY, _SaveJob(pending_save))
 
+    def enqueue_final_cap(self, max_cache_bytes: int | None) -> None:
+        if self._spill_cache is None or max_cache_bytes is None:
+            return
+        # Cap changes can evict spool records, so keep them actor-owned.
+        self._enqueue(_FINAL_CAP_JOB_PRIORITY, _FinalSpillCapJob(max_cache_bytes))
+
     def _enqueue(self, priority: int, job: Any) -> None:
         self._queue.put((priority, next(self._sequence), job))
 
@@ -187,7 +199,7 @@ class _PromptCacheActor:
     def _discard_queued_jobs(self) -> None:
         while True:
             try:
-                # Dropped save jobs only hold immutable arrays; draining the
+                # Dropped spill jobs only hold immutable arrays or caps; draining the
                 # queue releases them without touching actor-owned cache state.
                 self._queue.get_nowait()
             except QueueEmpty:
@@ -217,6 +229,16 @@ class _PromptCacheActor:
                 except Exception:
                     logger.error(
                         "Failed to commit pending prompt cache save:\n%s",
+                        traceback.format_exc(),
+                    )
+                continue
+
+            if isinstance(job, _FinalSpillCapJob):
+                try:
+                    self._spill_cache.commit_final_cap(job.max_cache_bytes)
+                except Exception:
+                    logger.error(
+                        "Failed to commit prompt spill cache cap:\n%s",
                         traceback.format_exc(),
                     )
 
@@ -901,9 +923,10 @@ class BatchedVisionModelKit:
                     and response.prompt_cache is not None
                     and response.all_tokens is not None
                 ):
-                    self._prompt_spill_cache.finalize_cap_from_completed_cache(
+                    final_cap = self._prompt_spill_cache.final_cap_from_completed_cache(
                         response.prompt_cache
                     )
+                    self._background_actor.enqueue_final_cap(final_cap)
                     self._prompt_cache_coordinator.remember_completed(
                         prompt_input_ids=response.all_tokens,
                         image_spans=result["image_spans"],

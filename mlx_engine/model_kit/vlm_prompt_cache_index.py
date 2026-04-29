@@ -19,8 +19,8 @@ class PromptCacheIndexView:
     - Rotating deltas are needed only inside the target sliding window.
     - Opaque state checkpoints are needed only at the exact target chunk.
 
-    Short-lived by design: callers construct this while holding the spill
-    cache's metadata lock.
+    Short-lived by design: callers construct this from the actor-owned spill
+    cache indexes when they need to evaluate restore availability.
     """
 
     def __init__(
@@ -101,16 +101,6 @@ class PromptCacheIndexView:
         # Sliding-window layers only need chunks overlapping the target boundary.
         window_start = target_chunk_end - rotating_window_size
         return chunk_metadata.chunk_end > window_start
-
-    def expected_record_keys_for_chunk(
-        self, chunk_key: str, metadata: PromptCacheChunkMetadata
-    ) -> list[str]:
-        """Return physical record keys implied by this chunk's payload kinds."""
-        return [
-            make_record_key(chunk_key, record_kind)
-            for record_kind in RECORD_WRITE_ORDER
-            if record_kind in metadata.payload_kinds
-        ]
 
     def _max_rotating_window_size_for_chain(
         self, chunk_keys: list[str]

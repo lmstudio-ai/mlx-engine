@@ -57,16 +57,10 @@ class VlmPromptCacheCoordinator:
         if hot_restored is not None:
             return hot_restored
 
-        prefix_match = self._spill_cache.find_longest_prefix(
-            prompt_input_ids,
-            image_spans,
-        )
-        if prefix_match is None:
-            return None
-
         try:
-            cached_state = self._spill_cache.load_chunk_sequence(
-                prefix_match.chunk_keys
+            cached_state = self._spill_cache.restore_longest_prefix(
+                prompt_input_ids,
+                image_spans,
             )
         except Exception:
             # Spill restore is an optimization; generation can recompute on miss.
@@ -79,7 +73,7 @@ class VlmPromptCacheCoordinator:
             return None
 
         return RestoredPromptCache(
-            cached_prefix_len=prefix_match.matched_prefix_len,
+            cached_prefix_len=cached_state.cached_prefix_len,
             prompt_cache=cached_state.prompt_cache,
             rope_deltas=cached_state.rope_deltas,
         )

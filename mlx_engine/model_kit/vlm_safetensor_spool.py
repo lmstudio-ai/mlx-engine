@@ -88,7 +88,7 @@ class AnonymousSafetensorSpool:
         self,
         key: str,
         arrays: dict[str, Any],
-        metadata: dict[str, str],
+        safetensor_metadata: dict[str, str],
     ) -> int:
         """Store one safetensors record and return its serialized byte length."""
         existing_ref = self._records.get(key)
@@ -97,7 +97,7 @@ class AnonymousSafetensorSpool:
 
         # Serialize first so the spool can reserve the exact blob size.
         buffer = io.BytesIO()
-        mx.save_safetensors(buffer, arrays, metadata)
+        mx.save_safetensors(buffer, arrays, safetensor_metadata)
         blob = buffer.getbuffer()
 
         blob_len = len(blob)
@@ -115,6 +115,7 @@ class AnonymousSafetensorSpool:
         return blob_len
 
     def load_prompt_cache(self, key: str) -> list[Any]:
+        """Load a committed record; missing keys are caller invariant errors."""
         ref = self._records[key]
         reader = _SpoolExtentReader(self._fd, ref.offset, ref.length)
         return _load_prompt_cache_from_file(reader)
@@ -123,8 +124,8 @@ class AnonymousSafetensorSpool:
         return key in self._records
 
     def size(self, key: str) -> int:
-        ref = self._records.get(key)
-        return ref.length if ref is not None else 0
+        """Return a committed record size; missing keys are invariant errors."""
+        return self._records[key].length
 
     def delete(self, key: str) -> None:
         ref = self._records.pop(key, None)
@@ -211,15 +212,18 @@ class AnonymousSafetensorSpool:
 
 
 def _load_prompt_cache_from_file(file_obj):
-    arrays, cache_metadata = mx.load(
+    arrays, safetensor_metadata = mx.load(
         file_obj,
         format="safetensors",
         return_metadata=True,
     )
     arrays = tree_unflatten(list(arrays.items()))
-    cache_metadata = tree_unflatten(list(cache_metadata.items()))
-    info, _metadata, classes = cache_metadata
+    cache_meta_states, cache_class_names = tree_unflatten(
+        list(safetensor_metadata.items())
+    )
     return [
-        getattr(mlx_lm_cache, cache_class).from_state(state, meta_state)
-        for cache_class, state, meta_state in zip(classes, arrays, info)
+        getattr(mlx_lm_cache, cache_class_name).from_state(state, meta_state)
+        for cache_class_name, state, meta_state in zip(
+            cache_class_names, arrays, cache_meta_states
+        )
     ]
