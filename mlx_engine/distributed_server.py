@@ -3,7 +3,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import logging
 import os
-import pickle
 import time
 import uuid
 from typing import Any, Optional
@@ -15,23 +14,153 @@ from mlx_engine.generate import create_generator, load_model, unload
 
 logger = logging.getLogger(__name__)
 
+RANK_PROTOCOL_VERSION = 1
+MESSAGE_TYPE_CHAT_COMPLETIONS = "chat.completions"
+MESSAGE_TYPE_SHUTDOWN = "shutdown"
 
-def share_object(rank: int, value: Optional[dict]) -> Optional[dict]:
+
+def require_object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def require_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or len(value) == 0:
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
+
+
+def require_bool(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be a boolean")
+    return value
+
+
+def require_positive_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def require_optional_int(value: Any, label: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer or null")
+    return value
+
+
+def require_optional_float(value: Any, label: str) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a number or null")
+    return float(value)
+
+
+def require_token_list(value: Any, label: str) -> list[int]:
+    if not isinstance(value, list) or len(value) == 0:
+        raise ValueError(f"{label} must be a non-empty token list")
+    tokens = []
+    for token in value:
+        if isinstance(token, bool) or not isinstance(token, int) or token < 0:
+            raise ValueError(f"{label} must only contain non-negative integers")
+        tokens.append(token)
+    return tokens
+
+
+def require_optional_string_list(value: Any, label: str) -> Optional[list[str]]:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a string list or null")
+    strings = []
+    for string_value in value:
+        if not isinstance(string_value, str):
+            raise ValueError(f"{label} must only contain strings")
+        if len(string_value) == 0:
+            raise ValueError(f"{label} must not contain empty strings")
+        strings.append(string_value)
+    return strings
+
+
+def validate_sampling(value: Any) -> dict[str, Any]:
+    sampling = require_object(value, "sampling")
+    return {
+        "temperature": require_optional_float(
+            sampling.get("temperature"), "sampling.temperature"
+        ),
+        "topP": require_optional_float(sampling.get("topP"), "sampling.topP"),
+        "topK": require_optional_int(sampling.get("topK"), "sampling.topK"),
+        "minP": require_optional_float(sampling.get("minP"), "sampling.minP"),
+        "repetitionPenalty": require_optional_float(
+            sampling.get("repetitionPenalty"), "sampling.repetitionPenalty"
+        ),
+        "repetitionContextSize": require_optional_int(
+            sampling.get("repetitionContextSize"),
+            "sampling.repetitionContextSize",
+        ),
+        "seed": require_optional_int(sampling.get("seed"), "sampling.seed"),
+    }
+
+
+def validate_rank_message(value: Any) -> dict[str, Any]:
+    message = require_object(value, "rank message")
+    version = message.get("version")
+    if version != RANK_PROTOCOL_VERSION:
+        raise ValueError(
+            f"Unsupported rank protocol version {version!r}; expected {RANK_PROTOCOL_VERSION}"
+        )
+
+    message_type = require_string(message.get("type"), "rank message type")
+    if message_type == MESSAGE_TYPE_SHUTDOWN:
+        return {"version": RANK_PROTOCOL_VERSION, "type": MESSAGE_TYPE_SHUTDOWN}
+
+    if message_type != MESSAGE_TYPE_CHAT_COMPLETIONS:
+        raise ValueError(f"Unsupported rank message type: {message_type}")
+
+    return {
+        "version": RANK_PROTOCOL_VERSION,
+        "type": MESSAGE_TYPE_CHAT_COMPLETIONS,
+        "requestId": require_string(message.get("requestId"), "requestId"),
+        "model": require_string(message.get("model"), "model"),
+        "promptTokens": require_token_list(message.get("promptTokens"), "promptTokens"),
+        "maxTokens": require_positive_int(message.get("maxTokens"), "maxTokens"),
+        "stop": require_optional_string_list(message.get("stop"), "stop"),
+        "sampling": validate_sampling(message.get("sampling")),
+        "stream": require_bool(message.get("stream"), "stream"),
+    }
+
+
+def encode_rank_message(value: dict[str, Any]) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+
+def decode_rank_message(data: mx.array) -> dict[str, Any]:
+    payload = bytes(data.tolist()).decode("utf-8")
+    return validate_rank_message(json.loads(payload))
+
+
+def share_rank_message(
+    rank: int, value: Optional[dict[str, Any]]
+) -> Optional[dict[str, Any]]:
     if rank == 0:
         if value is None:
             mx.eval(mx.distributed.all_sum(0))
             return None
-        data = mx.array(pickle.dumps(value))
+        validated_value = validate_rank_message(value)
+        data = mx.array(list(encode_rank_message(validated_value)), dtype=mx.uint8)
         mx.eval(mx.distributed.all_sum(data.size))
         mx.eval(mx.distributed.all_sum(data))
-        return value
+        return validated_value
 
     data_size = mx.distributed.all_sum(0).item()
     if data_size == 0:
         return None
     data = mx.zeros(data_size, dtype=mx.uint8)
     data = mx.distributed.all_sum(data)
-    return pickle.loads(data)
+    return decode_rank_message(data)
 
 
 def exit_after_distributed_error(message: str) -> None:
@@ -45,7 +174,13 @@ def exit_after_distributed_error(message: str) -> None:
 
 def shutdown_workers(rank: int) -> None:
     try:
-        share_object(rank, {"type": "shutdown"})
+        share_rank_message(
+            rank,
+            {
+                "version": RANK_PROTOCOL_VERSION,
+                "type": MESSAGE_TYPE_SHUTDOWN,
+            },
+        )
     except Exception:
         logger.exception("Failed to broadcast worker shutdown")
 
@@ -55,17 +190,27 @@ def normalize_message_content(content: Any) -> str:
         return content
     if isinstance(content, list):
         text_parts = []
-        for content_part in content:
+        for content_part_index, content_part in enumerate(content):
             if not isinstance(content_part, dict):
-                continue
-            if content_part.get("type") == "text":
-                text = content_part.get("text")
-                if isinstance(text, str):
-                    text_parts.append(text)
+                raise ValueError(
+                    f"message.content[{content_part_index}] must be an object"
+                )
+            content_part_type = content_part.get("type")
+            if content_part_type != "text":
+                raise ValueError(
+                    "Distributed mlx-engine supports only text message content; "
+                    f"unsupported content type: {content_part_type!r}"
+                )
+            text = content_part.get("text")
+            if not isinstance(text, str):
+                raise ValueError(
+                    f"message.content[{content_part_index}].text must be a string"
+                )
+            text_parts.append(text)
         return "".join(text_parts)
     if content is None:
         return ""
-    return str(content)
+    raise ValueError("message.content must be a string or an array of text parts")
 
 
 def normalize_messages(value: Any) -> list[dict[str, str]]:
@@ -92,14 +237,33 @@ def normalize_stop(value: Any) -> Optional[list[str]]:
     if value is None:
         return None
     if isinstance(value, str):
+        if len(value) == 0:
+            raise ValueError("stop must not be empty")
         return [value]
     if isinstance(value, list):
         stop_strings = []
         for stop_value in value:
-            if isinstance(stop_value, str):
-                stop_strings.append(stop_value)
+            if not isinstance(stop_value, str):
+                raise ValueError("stop must only contain strings")
+            if len(stop_value) == 0:
+                raise ValueError("stop must not contain empty strings")
+            stop_strings.append(stop_value)
         return stop_strings
     return None
+
+
+def reject_unsupported_request_fields(body: dict[str, Any]) -> None:
+    unsupported_fields = [
+        "adapters",
+        "adapter",
+        "draft_model",
+        "num_draft_tokens",
+    ]
+    for field_name in unsupported_fields:
+        if field_name in body and body[field_name] is not None:
+            raise ValueError(
+                f"Distributed mlx-engine does not support request field: {field_name}"
+            )
 
 
 def optional_float(value: Any) -> Optional[float]:
@@ -158,19 +322,20 @@ def finish_reason_from_stop_condition(stop_condition) -> Optional[str]:
 def run_generation_request(model_kit, request: dict[str, Any]):
     text_parts = []
     finish_reason = None
+    sampling = request["sampling"]
     generator = create_generator(
         model_kit,
-        request["prompt_tokens"],
-        max_tokens=request["max_tokens"],
+        request["promptTokens"],
+        max_tokens=request["maxTokens"],
         stop_strings=request["stop"],
-        temp=request["temperature"],
-        top_p=request["top_p"],
-        top_k=request["top_k"],
-        min_p=request["min_p"],
-        repetition_penalty=request["repetition_penalty"],
-        repetition_context_size=request["repetition_context_size"],
-        seed=request["seed"],
-        request_id=request["request_id"],
+        temp=sampling["temperature"],
+        top_p=sampling["topP"],
+        top_k=sampling["topK"],
+        min_p=sampling["minP"],
+        repetition_penalty=sampling["repetitionPenalty"],
+        repetition_context_size=sampling["repetitionContextSize"],
+        seed=sampling["seed"],
+        request_id=request["requestId"],
     )
 
     for generation_result in generator:
@@ -191,26 +356,51 @@ def build_generation_request(
     model_name: str,
     default_template_args: dict[str, Any],
 ) -> dict[str, Any]:
+    reject_unsupported_request_fields(body)
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
     seed = optional_int(body.get("seed"))
     if seed is None:
         seed = time.time_ns() & (2**32 - 1)
-    return {
-        "type": "chat.completions",
-        "request_id": request_id,
-        "model": body.get("model") if isinstance(body.get("model"), str) else model_name,
-        "prompt_tokens": format_prompt(model_kit, body, default_template_args),
-        "max_tokens": max_tokens_from_value(body.get("max_tokens")),
-        "stop": normalize_stop(body.get("stop")),
-        "temperature": optional_float(body.get("temperature")),
-        "top_p": optional_float(body.get("top_p")),
-        "top_k": optional_int(body.get("top_k")),
-        "min_p": optional_float(body.get("min_p")),
-        "repetition_penalty": optional_float(body.get("repetition_penalty")),
-        "repetition_context_size": optional_int(body.get("repetition_context_size")),
-        "seed": seed,
-        "stream": body.get("stream") is True,
-    }
+    return validate_rank_message(
+        {
+            "version": RANK_PROTOCOL_VERSION,
+            "type": MESSAGE_TYPE_CHAT_COMPLETIONS,
+            "requestId": request_id,
+            "model": (
+                body.get("model")
+                if isinstance(body.get("model"), str)
+                else model_name
+            ),
+            "promptTokens": format_prompt(model_kit, body, default_template_args),
+            "maxTokens": max_tokens_from_value(body.get("max_tokens")),
+            "stop": normalize_stop(body.get("stop")),
+            "sampling": {
+                "temperature": optional_float(body.get("temperature")),
+                "topP": optional_float(body.get("top_p")),
+                "topK": optional_int(body.get("top_k")),
+                "minP": optional_float(body.get("min_p")),
+                "repetitionPenalty": optional_float(
+                    body.get("repetition_penalty")
+                ),
+                "repetitionContextSize": optional_int(
+                    body.get("repetition_context_size")
+                ),
+                "seed": seed,
+            },
+            "stream": body.get("stream") is True,
+        }
+    )
+
+
+def log_request_event(message: str, request: dict[str, Any]) -> None:
+    logger.info(
+        "%s requestId=%s stream=%s maxTokens=%s promptTokens=%s",
+        message,
+        request["requestId"],
+        request["stream"],
+        request["maxTokens"],
+        len(request["promptTokens"]),
+    )
 
 
 class DistributedEngineHandler(BaseHTTPRequestHandler):
@@ -289,7 +479,8 @@ class DistributedEngineHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            share_object(self.rank, request)
+            log_request_event("Broadcasting distributed request", request)
+            share_rank_message(self.rank, request)
         except Exception:
             logger.exception("Request broadcast failed")
             exit_after_distributed_error("Request broadcast failed")
@@ -325,7 +516,7 @@ class DistributedEngineHandler(BaseHTTPRequestHandler):
             self.send_json(
                 200,
                 {
-                    "id": request["request_id"],
+                    "id": request["requestId"],
                     "object": "chat.completion",
                     "created": int(time.time()),
                     "model": request["model"],
@@ -370,7 +561,7 @@ class DistributedEngineHandler(BaseHTTPRequestHandler):
                     try:
                         self.write_sse(
                             {
-                                "id": request["request_id"],
+                                "id": request["requestId"],
                                 "object": "chat.completion.chunk",
                                 "created": int(time.time()),
                                 "model": request["model"],
@@ -394,7 +585,7 @@ class DistributedEngineHandler(BaseHTTPRequestHandler):
             try:
                 self.write_sse(
                     {
-                        "id": request["request_id"],
+                        "id": request["requestId"],
                         "object": "chat.completion.chunk",
                         "created": int(time.time()),
                         "model": request["model"],
@@ -416,13 +607,15 @@ class DistributedEngineHandler(BaseHTTPRequestHandler):
 def run_worker_loop(rank: int, model_kit) -> None:
     logger.info("Rank %s waiting for rank 0 requests", rank)
     while True:
-        request = share_object(rank, None)
+        request = share_rank_message(rank, None)
         if request is None:
             continue
-        if request.get("type") == "shutdown":
+        if request.get("type") == MESSAGE_TYPE_SHUTDOWN:
             return
+        log_request_event(f"Rank {rank} starting distributed request", request)
         for _text, _finish_reason in run_generation_request(model_kit, request):
             pass
+        log_request_event(f"Rank {rank} finished distributed request", request)
 
 
 def parse_chat_template_args(value: str) -> dict[str, Any]:

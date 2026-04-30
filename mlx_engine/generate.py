@@ -152,11 +152,16 @@ def load_model(
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
         prefill_step_size (Optional[int]): Number of tokens to process per prefill chunk.
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
+        distributed (bool): Load the model through DistributedModelKit for MLX distributed
+            tensor parallel inference.
+        distributed_group (Any): Optional initialized MLX distributed group. If omitted,
+            DistributedModelKit initializes the group.
 
     Returns:
-        ModelKit | VisionModelKit: An initialized model instance:
+        ModelKit | VisionModelKit | DistributedModelKit: An initialized model instance:
             - ModelKit: for text-only models and vision models with vision add-on support
             - VisionModelKit: for vision models that are not yet supported by ModelKit
+            - DistributedModelKit: for distributed tensor parallel text-only models
 
     Raises:
         FileNotFoundError: If config.json is not found in the specified model path
@@ -175,9 +180,9 @@ def load_model(
                 "Distributed loading does not currently support KV cache quantization"
             )
         if parallel_requested:
-            logger.warning(
-                f"max_concurrent_predictions={max_seq_nums} was specified, but "
-                "distributed mlx-engine currently handles one request at a time."
+            raise ValueError(
+                "Distributed loading does not support concurrent predictions; "
+                "set max_concurrent_predictions to 1"
             )
         model_kit = DistributedModelKit(
             model_path,

@@ -46,6 +46,10 @@ class DistributedModelKit:
 
         self.model_path = self._resolve_model_path(model_path)
         config_json = json.loads((self.model_path / "config.json").read_text())
+        if "vision_config" in config_json:
+            raise ValueError(
+                "DistributedModelKit supports text-only models; vision models are not supported"
+            )
         self.model_type = config_json.get("model_type", None)
 
         self.group = distributed_group
@@ -123,6 +127,15 @@ class DistributedModelKit:
         return self._cross_prompt_cache_active
 
     def record_token_to_cache(self, token: int) -> None:
+        return
+
+    def is_draft_model_compatible(self, path: str) -> bool:
+        return False
+
+    def load_draft_model(self, path: str) -> None:
+        raise ValueError("DistributedModelKit does not support draft models")
+
+    def unload_draft_model(self) -> None:
         return
 
     def cancel_request(self, request_id: str) -> bool:
