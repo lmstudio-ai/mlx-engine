@@ -170,6 +170,7 @@ class BatchedVisionModelKit:
         top_logprobs: int,
         max_tokens: int,
         sampler: Callable[[mx.array], mx.array],
+        logits_processors: list,
     ):
         if self._shutdown.is_set():
             raise RuntimeError("Cannot accept new requests when model is shutdown")
@@ -185,6 +186,7 @@ class BatchedVisionModelKit:
                 images_b64=images_b64,
                 max_image_size=max_image_size,
                 sampler=sampler,
+                logits_processors=logits_processors,
                 top_logprobs=top_logprobs,
                 max_tokens=max_tokens,
             )
@@ -346,6 +348,7 @@ class BatchedVisionModelKit:
             inputs_embeds=inputs_embeds,
             max_tokens=request.max_tokens,
             sampler=request.sampler,
+            logits_processors=request.logits_processors,
             cache=cache,
             all_tokens=all_tokens,
             rope_deltas=rope_deltas,

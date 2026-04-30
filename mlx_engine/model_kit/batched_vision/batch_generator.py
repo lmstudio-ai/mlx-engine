@@ -27,6 +27,7 @@ from mlx_vlm.generate import (
 _generation_stream = mx.new_thread_local_stream(mx.default_device())
 
 PromptCacheSaveCallback = Callable[[list[Any], list[int]], None]
+LogitsProcessor = Callable[[mx.array, mx.array], mx.array]
 
 
 @contextlib.contextmanager
@@ -42,6 +43,7 @@ class _PendingSequence:
     prompt: list[int]
     max_tokens: int
     sampler: Callable[[mx.array], mx.array]
+    logits_processors: list[LogitsProcessor]
     inputs_embeds: mx.array
     cache: Optional[list[Any]]
     all_tokens: list[int]
@@ -119,6 +121,26 @@ def _sample_with_samplers(
     )
 
 
+def _apply_logits_processors(
+    logits: mx.array,
+    tokens: list[list[int]],
+    logits_processors: list[list[LogitsProcessor]],
+    last_tokens: list[int] | None = None,
+) -> mx.array:
+    processed_logits = []
+    for i in range(logits.shape[0]):
+        sample_logits = logits[i : i + 1]
+        for processor in logits_processors[i]:
+            if last_tokens is not None and hasattr(processor, "process_last_token"):
+                sample_logits = processor.process_last_token(
+                    last_tokens[i], sample_logits
+                )
+            else:
+                sample_logits = processor(mx.array(tokens[i]), sample_logits)
+        processed_logits.append(sample_logits)
+    return mx.concatenate(processed_logits, axis=0)
+
+
 def _top_logprobs(
     logprobs: mx.array, k: int
 ) -> tuple[mx.array | None, mx.array | None]:
@@ -190,6 +212,7 @@ class GenerationBatch:
         top_logprobs_k: int = 0,
         all_tokens: Optional[list[list[int]]] = None,
         rope_deltas: Any | None = None,
+        logits_processors: Optional[list[list[LogitsProcessor]]] = None,
         cache_save_points: Optional[list[list[int]]] = None,
         prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
@@ -214,6 +237,7 @@ class GenerationBatch:
             if all_tokens is not None
             else [[] for _ in uids]
         )
+        self.logits_processors = logits_processors or [[] for _ in uids]
         self._cache_save_points = (
             [list(save_points) for save_points in cache_save_points]
             if cache_save_points is not None
@@ -245,6 +269,19 @@ class GenerationBatch:
         logits = output.logits if hasattr(output, "logits") else output
         logits = logits[:, -1, :]
 
+        if any(self.logits_processors):
+            last_tokens = inputs.tolist()
+            for seq_tokens, token in zip(self.tokens, last_tokens):
+                seq_tokens.append(token)
+            logits = _apply_logits_processors(
+                logits,
+                self.tokens,
+                self.logits_processors,
+                last_tokens=last_tokens,
+            )
+        else:
+            last_tokens = None
+
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         sampled, sampled_logprobs, top_idx, top_logprobs = _sample_next_token(
             logprobs, self.samplers, self.top_logprobs_k
@@ -269,8 +306,9 @@ class GenerationBatch:
             )
         )
 
-        for seq_tokens, token in zip(self.tokens, tokens):
-            seq_tokens.append(token)
+        if last_tokens is None:
+            for seq_tokens, token in zip(self.tokens, tokens):
+                seq_tokens.append(token)
         return tokens, token_logprob_list, top_idx_list, top_logprob_list
 
     def extract_cache(self, idx: int) -> list[Any]:
@@ -290,6 +328,7 @@ class GenerationBatch:
         self.uids.extend(prefilled.uids)
         self.prompt_cache = _extend_cache(self.prompt_cache, prefilled.prompt_cache)
         self.samplers.extend(prefilled.samplers)
+        self.logits_processors.extend(prefilled.logits_processors)
         self.max_tokens.extend(prefilled.max_tokens)
         self._num_tokens.extend(prefilled._num_tokens)
 
@@ -350,6 +389,7 @@ class GenerationBatch:
     def filter(self, keep: list[int]):
         self.uids = [self.uids[idx] for idx in keep]
         self.samplers = [self.samplers[idx] for idx in keep]
+        self.logits_processors = [self.logits_processors[idx] for idx in keep]
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
         self._num_tokens = [self._num_tokens[idx] for idx in keep]
         self.tokens = [self.tokens[idx] for idx in keep]
@@ -365,6 +405,7 @@ class GenerationBatch:
             self._next_top_idx = None
             self._next_top_logprobs = None
             self._rope_deltas = None
+            self.logits_processors = []
             return
 
         keep_arr = mx.array(keep, mx.int32)
@@ -473,6 +514,7 @@ class _PromptPrefill:
         input_ids: list[int],
         max_tokens: int,
         sampler: Callable[[mx.array], mx.array],
+        logits_processors: list[LogitsProcessor],
         inputs_embeds: mx.array,
         prompt_kwargs: dict,
         prefill_step_size: Optional[int] = DEFAULT_PREFILL_STEP_SIZE,
@@ -486,6 +528,7 @@ class _PromptPrefill:
         self.uid = uid
         self.max_tokens = max_tokens
         self.sampler = sampler
+        self.logits_processors = logits_processors
         self.prefill_step_size = prefill_step_size
 
         self._input_ids = _left_pad_prompts([input_ids], max_length=len(input_ids))
@@ -596,6 +639,12 @@ class _PromptPrefill:
         prompt_responses = self.progress_responses()
         logits = output.logits if hasattr(output, "logits") else output
         logits = logits[:, -1, :]
+        if self.logits_processors:
+            logits = _apply_logits_processors(
+                logits,
+                [self._all_tokens + self._prompt_token_ids],
+                [self.logits_processors],
+            )
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         first_tokens, first_logprobs, top_idx, top_logprobs = _sample_next_token(
             logprobs, [self.sampler], top_logprobs_k
@@ -612,6 +661,7 @@ class _PromptPrefill:
             top_logprobs_k=top_logprobs_k,
             all_tokens=[self._all_tokens + self._prompt_token_ids],
             rope_deltas=self._rope_deltas,
+            logits_processors=[self.logits_processors],
             cache_save_points=[list(self._cache_save_points)],
             prompt_cache_save_callback=self._prompt_cache_save_callback,
         )
@@ -682,6 +732,7 @@ class BatchGenerator:
         all_tokens: Optional[list[int]] = None,
         rope_deltas: Any | None = None,
         sampler: Callable[[mx.array], mx.array],
+        logits_processors: list[LogitsProcessor],
         prompt_kwargs: Optional[dict] = None,
         cache_save_points: Optional[list[int]] = None,
         prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
@@ -694,6 +745,7 @@ class BatchGenerator:
                 prompt=prompt,
                 max_tokens=self.max_tokens if max_tokens is None else max_tokens,
                 sampler=sampler,
+                logits_processors=list(logits_processors),
                 inputs_embeds=inputs_embeds,
                 cache=cache,
                 all_tokens=list(all_tokens or []),
@@ -769,6 +821,7 @@ class BatchGenerator:
                 input_ids=sequence.prompt,
                 max_tokens=sequence.max_tokens,
                 sampler=sequence.sampler,
+                logits_processors=sequence.logits_processors,
                 inputs_embeds=sequence.inputs_embeds,
                 prompt_kwargs=sequence.prompt_kwargs,
                 prefill_step_size=self.prefill_step_size,

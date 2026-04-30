@@ -16,53 +16,32 @@ from mlx_engine.stop_string_processor import (
     StopStringProcessorResult,
 )
 from mlx_engine.utils.generation_result import GenerationStopCondition
-from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
-from outlines.processors.structured import JSONLogitsProcessor
 
 MAX_TOP_LOGPROBS = 10
 
 
-def setup_repetition_penalty(
-    repetition_penalty: Optional[float], repetition_context_size: Optional[int]
-) -> dict:
-    repetition_penalty_kwargs = {}
-    if repetition_penalty is not None:
-        repetition_penalty_kwargs["repetition_penalty"] = repetition_penalty
-        if repetition_context_size is not None:
-            repetition_penalty_kwargs["repetition_context_size"] = (
-                repetition_context_size
-            )
-    return repetition_penalty_kwargs
-
-
-def setup_logits_processors(
+def setup_repetition_logits_processors(
     repetition_penalty: Optional[float],
-    repetition_penalty_kwargs: dict,
+    repetition_context_size: Optional[int],
     prompt_tokens: List[int],
     input_tokens: List[int],
-    json_schema: Optional[str],
-    tokenizer: TokenizerWrapper,
 ) -> List:
     logits_processors = []
 
-    if repetition_penalty and repetition_penalty != 0.0:
+    if repetition_penalty not in (None, 0.0, 1.0):
         cached_tokens = (
             prompt_tokens[: -len(input_tokens)]
             if len(input_tokens) > 0
             else prompt_tokens
         )
+        repetition_penalty_kwargs = {"repetition_penalty": repetition_penalty}
+        if repetition_context_size is not None:
+            repetition_penalty_kwargs["repetition_context_size"] = (
+                repetition_context_size
+            )
         logits_processors.append(
             RepetitionPenaltyProcessor(
                 token_history=cached_tokens, **repetition_penalty_kwargs
-            )
-        )
-
-    if json_schema is not None:
-        logits_processors.append(
-            JSONLogitsProcessor(
-                json_schema,
-                OutlinesTransformerTokenizer(tokenizer._tokenizer),
-                tensor_library_name="mlx",
             )
         )
 

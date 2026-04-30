@@ -119,6 +119,7 @@ def get_image_token_index(config: dict) -> int | None:
     for value in (
         config.get("image_token_index"),
         config.get("image_token_id"),
+        config.get("media_placeholder_token_id"),
         config.get("vision_config", {}).get("image_token_id"),
     ):
         if value is not None:

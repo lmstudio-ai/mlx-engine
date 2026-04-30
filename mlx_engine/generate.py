@@ -19,6 +19,7 @@ from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_par
 from mlx_lm.generate import stream_generate
 from mlx_lm.utils import load as mlx_lm_load
 from mlx_lm.models.cache import make_prompt_cache
+from mlx_vlm.structured import build_json_schema_logits_processor
 
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
@@ -52,8 +53,7 @@ from mlx_engine.utils.prompt_progress_reporter import (
     StopPromptProcessing,
 )
 from mlx_engine.utils.generation_helpers import (
-    setup_repetition_penalty,
-    setup_logits_processors,
+    setup_repetition_logits_processors,
     create_sampler,
     validate_top_logprobs,
     create_stop_string_processor,
@@ -445,11 +445,6 @@ def _sequential_generation(
                 if value is not None:
                     generate_args[attr] = value
 
-        # Set up repetition penalty
-        repetition_penalty_kwargs = setup_repetition_penalty(
-            repetition_penalty, repetition_context_size
-        )
-
         # Set up speculative decoding
         draft_model = determine_draft_model_for_generation(
             model_kit, speculative_decoding_toggle
@@ -476,13 +471,11 @@ def _sequential_generation(
             generate_args["input_embeddings"] = input_embeddings
 
         # Setup logits processors
-        logits_processors = setup_logits_processors(
+        logits_processors = setup_repetition_logits_processors(
             repetition_penalty,
-            repetition_penalty_kwargs,
+            repetition_context_size,
             prompt_tokens,
             input_tokens,
-            None,
-            model_kit.tokenizer,
         )
 
         # Set up sampler
@@ -664,22 +657,19 @@ def _batched_generation(
     )
 
     if isinstance(model_kit, BatchedVisionModelKit):
-        # if repetition_penalty not in (None, 0, 1):
-        #     raise ValueError(
-        #         "The mlx-vlm batched vision path does not support repetition_penalty yet"
-        #     )
-        # if json_schema is not None:
-        #     raise ValueError(
-        #         "The mlx-vlm batched vision path does not support json_schema yet"
-        #     )
-        # if speculative_decoding_toggle not in (None, False):
-        #     raise ValueError(
-        #         "The mlx-vlm batched vision path does not support speculative decoding"
-        #     )
-        # if num_draft_tokens is not None:
-        #     raise ValueError(
-        #         "The mlx-vlm batched vision path does not support speculative decoding"
-        #     )
+        logits_processors = setup_repetition_logits_processors(
+            repetition_penalty,
+            repetition_context_size,
+            prompt_tokens,
+            input_tokens,
+        )
+        if json_schema is not None:
+            logits_processors.append(
+                build_json_schema_logits_processor(
+                    model_kit.tokenizer._tokenizer,
+                    json_schema,
+                )
+            )
 
         sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
         stream = model_kit.generate(
@@ -691,21 +681,15 @@ def _batched_generation(
             prompt_progress_callback=mlx_lm_callback,
             top_logprobs=top_logprobs,
             sampler=sampler,
+            logits_processors=logits_processors,
         )
     else:
-        # Set up repetition penalty
-        repetition_penalty_kwargs = setup_repetition_penalty(
-            repetition_penalty, repetition_context_size
-        )
-
         # Setup logits processors
-        logits_processors = setup_logits_processors(
+        logits_processors = setup_repetition_logits_processors(
             repetition_penalty,
-            repetition_penalty_kwargs,
+            repetition_context_size,
             prompt_tokens,
             input_tokens,
-            None,
-            tokenizer,
         )
 
         # Set up sampler

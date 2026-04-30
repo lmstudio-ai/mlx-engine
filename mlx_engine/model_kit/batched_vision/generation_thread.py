@@ -41,6 +41,7 @@ class GenerationRequest:
     images_b64: list[str] | None
     max_image_size: tuple[int, int] | None
     sampler: Callable[[mx.array], mx.array]
+    logits_processors: list
     top_logprobs: int
     max_tokens: int
 
