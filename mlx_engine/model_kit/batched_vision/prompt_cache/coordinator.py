@@ -1,15 +1,22 @@
 import logging
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
-from mlx_engine.model_kit.vlm_prompt_cache_types import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
+    build_prefix_cache_chunks,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.image_spans import (
+    image_safe_common_prefix_len,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     DEFAULT_PREFIX_CHUNK_SIZE,
     PendingPromptCacheSave,
     PromptImageSpan,
-    build_prefix_cache_chunks,
 )
-from mlx_engine.model_kit.vlm_prompt_spill_cache import VlmPromptSpillCache
+from mlx_engine.model_kit.batched_vision.prompt_cache.spill_cache import (
+    VlmPromptSpillCache,
+)
 from mlx_lm.models.cache import can_trim_prompt_cache, trim_prompt_cache
 
 logger = logging.getLogger(__name__)
@@ -17,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RestoredPromptCache:
+    """Prompt cache restored from hot memory or disk for request insertion."""
+
     cached_prefix_len: int
     prompt_cache: list[Any]
-    rope_deltas: Optional[Any]
+    rope_deltas: Any | None
 
 
 @dataclass
@@ -29,21 +38,21 @@ class _HotPromptCacheEntry:
     prompt_input_ids: list[int]
     image_spans: list[PromptImageSpan]
     prompt_cache: list[Any]
-    rope_deltas: Optional[Any]
+    rope_deltas: Any | None
 
 
 class VlmPromptCacheCoordinator:
-    """Coordinates hot-cache reuse and actor-owned disk spill saves.
+    """Coordinates hot-cache reuse and cache-I/O-thread disk spill saves.
 
-    The scheduler thread records the most recently completed runtime cache.
+    The generation thread records the most recently completed runtime cache.
     Request preparation may consume that hot cache before falling back to disk.
     """
 
     def __init__(
         self,
         spill_cache: VlmPromptSpillCache,
-        # Called after the scheduler thread prepares an immutable save payload.
-        # The owner decides how to persist it, usually via actor disk I/O.
+        # Called after the generation thread prepares an immutable save payload.
+        # The owner decides how to persist it, usually via cache I/O thread.
         enqueue_pending_save: Callable[[PendingPromptCacheSave], None],
     ):
         self._spill_cache = spill_cache
@@ -129,7 +138,7 @@ class VlmPromptCacheCoordinator:
         self,
         *,
         image_spans: list[PromptImageSpan],
-    ):
+    ) -> Callable[[list[Any], list[int]], None]:
         image_spans = list(image_spans)
 
         def _callback(
@@ -155,13 +164,13 @@ class VlmPromptCacheCoordinator:
 
         return _callback
 
-    def remember_completed(
+    def store_hot_prompt_cache(
         self,
         *,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
         prompt_cache: list[Any],
-        rope_deltas: Optional[Any],
+        rope_deltas: Any | None,
     ) -> None:
         """Keep exactly one completed cache hot for the next likely follow-up."""
         with self._hot_entry_lock:
@@ -186,7 +195,7 @@ class VlmPromptCacheCoordinator:
             # this request recomputes or restores from disk.
             self._hot_entry = None
 
-        target_prefix_len = _image_safe_common_prefix_len(
+        target_prefix_len = image_safe_common_prefix_len(
             prompt_input_ids,
             image_spans,
             entry.prompt_input_ids,
@@ -209,60 +218,3 @@ class VlmPromptCacheCoordinator:
             prompt_cache=entry.prompt_cache,
             rope_deltas=None if trim_count > 0 else entry.rope_deltas,
         )
-
-
-def _image_safe_common_prefix_len(
-    prompt_input_ids: list[int],
-    image_spans: list[PromptImageSpan],
-    cached_input_ids: list[int],
-    cached_image_spans: list[PromptImageSpan],
-    *,
-    max_prefix_len: int,
-) -> int:
-    """Return the token prefix that does not split or mismatch image spans."""
-    common_prefix_len = 0
-    for token, cached_token in zip(prompt_input_ids, cached_input_ids):
-        if token != cached_token:
-            break
-        common_prefix_len += 1
-    common_prefix_len = min(common_prefix_len, max_prefix_len)
-
-    # Placeholder token ids can match while the underlying image differs.
-    image_keys = {_image_span_key(span) for span in image_spans}
-    cached_image_keys = {_image_span_key(span) for span in cached_image_spans}
-    # Either prompt may contain a non-reusable image inside the prefix.
-    non_reusable_starts = [
-        # New prompt images must match images already present in the hot cache.
-        _first_non_reusable_image_start(
-            common_prefix_len,
-            image_spans,
-            cached_image_keys,
-        ),
-        # Hot-cache images must also still exist in the new prompt.
-        _first_non_reusable_image_start(
-            common_prefix_len,
-            cached_image_spans,
-            image_keys,
-        ),
-    ]
-    non_reusable_starts = [start for start in non_reusable_starts if start is not None]
-    return min(non_reusable_starts) if non_reusable_starts else common_prefix_len
-
-
-def _image_span_key(span: PromptImageSpan) -> tuple[int, int, str]:
-    return span.start, span.end, span.image_hash
-
-
-def _first_non_reusable_image_start(
-    prefix_len: int,
-    spans: list[PromptImageSpan],
-    other_span_keys: set[tuple[int, int, str]],
-) -> int | None:
-    for span in spans:
-        if span.start >= prefix_len:
-            break
-        if span.end > prefix_len:
-            return span.start
-        if _image_span_key(span) not in other_span_keys:
-            return span.start
-    return None

@@ -12,15 +12,15 @@ from mlx.utils import tree_unflatten
 
 
 @dataclass
-class _SpoolExtent:
+class _BlobExtent:
     offset: int
     length: int
 
 
-class _SpoolExtentReader:
-    """Read-only binary stream for one immutable blob inside the spool."""
+class _BlobReader:
+    """Read-only binary stream for one immutable blob inside the store."""
 
-    # Minimal file-like API for MLX; the parent spool owns fd lifetime.
+    # Minimal file-like API for MLX; the blob store owns fd lifetime.
     closed = False
 
     def __init__(self, fd: int, offset: int, length: int):
@@ -46,7 +46,7 @@ class _SpoolExtentReader:
             # Relative to this reader's logical cursor.
             pos = self._pos + offset
         elif whence == os.SEEK_END:
-            # Relative to this blob's end, not the spool file's end.
+            # Relative to this blob's end, not the backing file's end.
             pos = self._length + offset
         else:
             raise ValueError(f"unsupported logical blob seek mode: {whence}")
@@ -62,27 +62,27 @@ class _SpoolExtentReader:
         # A committed blob is immutable and must be fully readable.
         chunk = os.pread(self._fd, read_len, self._offset + self._pos)
         if len(chunk) != read_len:
-            raise OSError("short read from safetensor spool")
+            raise OSError("short read from safetensor blob store")
         view[:read_len] = chunk
         self._pos += read_len
         return read_len
 
 
-class AnonymousSafetensorSpool:
-    """Single-fd anonymous spool for immutable safetensors blobs.
+class AnonymousSafetensorBlobStore:
+    """Single-fd anonymous store for immutable safetensors blobs.
 
     Records are exact-size extents. `_free_extents` is always sorted by offset
-    and coalesced; free space at the file tail truncates the spool.
+    and coalesced; free space at the file tail truncates the backing file.
 
-    Not thread-safe: production access is owned by the prompt-cache actor.
+    Not thread-safe: production access is owned by the prompt-cache I/O thread.
     """
 
     def __init__(self, directory: Path):
         self._file = tempfile.TemporaryFile(mode="w+b", dir=directory)
         self._fd = self._file.fileno()
         self._end = 0
-        self._free_extents: list[_SpoolExtent] = []
-        self._records: dict[str, _SpoolExtent] = {}
+        self._free_extents: list[_BlobExtent] = []
+        self._records: dict[str, _BlobExtent] = {}
 
     def put(
         self,
@@ -95,7 +95,7 @@ class AnonymousSafetensorSpool:
         if existing_ref is not None:
             return existing_ref.length
 
-        # Serialize first so the spool can reserve the exact blob size.
+        # Serialize first so the store can reserve the exact blob size.
         buffer = io.BytesIO()
         mx.save_safetensors(buffer, arrays, safetensor_metadata)
         blob = buffer.getbuffer()
@@ -108,7 +108,7 @@ class AnonymousSafetensorSpool:
             self._release(offset, blob_len)
             raise
 
-        self._records[key] = _SpoolExtent(
+        self._records[key] = _BlobExtent(
             offset=offset,
             length=blob_len,
         )
@@ -117,7 +117,7 @@ class AnonymousSafetensorSpool:
     def load_prompt_cache(self, key: str) -> list[Any]:
         """Load a committed record; missing keys are caller invariant errors."""
         ref = self._records[key]
-        reader = _SpoolExtentReader(self._fd, ref.offset, ref.length)
+        reader = _BlobReader(self._fd, ref.offset, ref.length)
         return _load_prompt_cache_from_file(reader)
 
     def exists(self, key: str) -> bool:
@@ -140,7 +140,7 @@ class AnonymousSafetensorSpool:
         self._file.close()
 
     def _reserve(self, capacity: int) -> int:
-        """Reserve exactly `capacity` bytes and return the spool offset."""
+        """Reserve exactly `capacity` bytes and return the blob-store offset."""
         # Try to reuse space from previously deleted records.
         for idx, extent in enumerate(self._free_extents):
             if extent.length < capacity:
@@ -161,19 +161,19 @@ class AnonymousSafetensorSpool:
         return offset
 
     def _write_blob(self, offset: int, blob) -> None:
-        """Write a complete serialized blob at a reserved spool offset."""
+        """Write a complete serialized blob at a reserved blob-store offset."""
         written = 0
         view = memoryview(blob)
         while written < len(view):
             n = os.pwrite(self._fd, view[written:], offset + written)
             if n <= 0:
-                raise OSError("short write to safetensor spool")
+                raise OSError("short write to safetensor blob store")
             written += n
 
     def _release(self, offset: int, length: int) -> None:
         """Return an extent to the free list and shrink trailing free space."""
         if length <= 0:
-            raise ValueError("released spool extent must have positive length")
+            raise ValueError("released blob-store extent must have positive length")
 
         # Maintain the sorted/coalesced `_free_extents` invariant.
         idx = bisect_left(
@@ -181,7 +181,7 @@ class AnonymousSafetensorSpool:
             offset,
             key=lambda extent: extent.offset,
         )
-        self._free_extents.insert(idx, _SpoolExtent(offset=offset, length=length))
+        self._free_extents.insert(idx, _BlobExtent(offset=offset, length=length))
 
         # Merge with the previous extent if the freed range touches it.
         if idx > 0:
@@ -211,7 +211,8 @@ class AnonymousSafetensorSpool:
             os.ftruncate(self._fd, self._end)
 
 
-def _load_prompt_cache_from_file(file_obj):
+def _load_prompt_cache_from_file(file_obj) -> list[Any]:
+    """Deserialize one safetensors blob back into MLX-LM cache objects."""
     arrays, safetensor_metadata = mx.load(
         file_obj,
         format="safetensors",

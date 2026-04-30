@@ -1,36 +1,43 @@
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import mlx.core as mx
-from mlx_engine.model_kit.vlm_prompt_cache_disk_budget import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
+    build_prefix_cache_chunks,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.disk_budget import (
     final_spill_cache_cap_bytes,
     provisional_spill_cache_cap_bytes,
 )
-from mlx_engine.model_kit.vlm_prompt_cache_payload import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.records import (
     assemble_prompt_cache_chunks,
+    make_prompt_cache_layout,
     materialize_prompt_state,
     prepare_prompt_cache_payload,
 )
-from mlx_engine.model_kit.vlm_prompt_cache_index import PromptCacheIndexView
-from mlx_engine.model_kit.vlm_prompt_cache_types import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.restore_planner import (
+    PromptCacheRestorePlanner,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptCacheLayout,
     PromptImageSpan,
     PromptCacheRecordMetadata,
     PromptPrefixChunk,
     PreparedPromptRecord,
     PendingPromptCacheSave,
+    PromptSpillCacheStats,
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_WRITE_ORDER,
     RecordKind,
     SpilledPromptState,
-    VlmPromptSpillCacheStats,
-    build_prefix_cache_chunks,
     make_record_key,
 )
-from mlx_engine.model_kit.vlm_safetensor_spool import AnonymousSafetensorSpool
+from mlx_engine.model_kit.batched_vision.prompt_cache.blob_store import (
+    AnonymousSafetensorBlobStore,
+)
 from mlx.utils import tree_flatten
 
 
@@ -41,35 +48,16 @@ _RECORD_RETENTION_PRIORITY: tuple[RecordKind, ...] = (
 )
 
 
-def _make_prompt_cache_layout(
-    payload_cache: list[Any],
-    payload_kinds: list[RecordKind],
-) -> PromptCacheLayout:
-    layer_indices_by_kind: dict[RecordKind, list[int]] = {}
-    rotating_window_size = None
-    for layer_idx, record_kind in enumerate(payload_kinds):
-        layer_indices_by_kind.setdefault(record_kind, []).append(layer_idx)
-        if record_kind == RECORD_KIND_ROTATING_DELTA:
-            window_size = int(payload_cache[layer_idx].max_size)
-            rotating_window_size = max(rotating_window_size or 0, window_size)
-
-    return PromptCacheLayout(
-        layer_kinds=list(payload_kinds),
-        layer_indices_by_kind=layer_indices_by_kind,
-        rotating_window_size=rotating_window_size,
-    )
-
-
 class VlmPromptSpillCache:
-    """Actor-owned spill-cache index and anonymous safetensor spool.
+    """Cache-I/O-thread-owned index and anonymous safetensor blob store.
 
-    Mutable index/spool operations run on the prompt-cache actor thread. The
-    scheduler may prepare immutable save payloads and make advisory cap checks,
-    but it must not mutate committed spill state.
+    Mutable index/blob-store operations run on the prompt-cache I/O thread. The
+    generation thread may prepare immutable save payloads and make advisory cap
+    checks, but it must not mutate committed spill state.
 
     Invariants:
     - A selected restore chain is loaded without interleaved eviction.
-    - Selected record keys exist in both metadata and the spool.
+    - Selected record keys exist in both metadata and the blob store.
     - Touched LRU keys are committed physical records.
     """
 
@@ -77,7 +65,7 @@ class VlmPromptSpillCache:
         base_dir = Path("/tmp")
         self._base_dir = base_dir
         self._max_kv_size = max_kv_size
-        self._store = AnonymousSafetensorSpool(base_dir)
+        self._blob_store = AnonymousSafetensorBlobStore(base_dir)
         self._empirical_cap_set = False
         self._layout: PromptCacheLayout | None = None
         self._record_metadata_by_key: dict[str, PromptCacheRecordMetadata] = {}
@@ -89,53 +77,11 @@ class VlmPromptSpillCache:
         self._cache_misses = 0
         self._cache_evictions = 0
 
-    def snapshot_stats(self) -> VlmPromptSpillCacheStats:
-        """Return best-effort diagnostics for smokes/debug output."""
-        total_bytes = self._total_bytes
-        max_bytes = self._max_cache_bytes
-        entry_count = len(self._record_metadata_by_key)
-        hits = self._cache_hits
-        misses = self._cache_misses
-        evictions = self._cache_evictions
-        record_sizes_by_key = dict(self._key_sizes)
-        record_metadata_by_key = dict(self._record_metadata_by_key)
-        chunk_sizes_by_key = {}
-        chunk_records_available_by_key = {}
-        chunk_keys = sorted(
-            {metadata.chunk_key for metadata in record_metadata_by_key.values()}
-        )
-        for chunk_key in chunk_keys:
-            record_keys = [
-                record_key
-                for record_key, metadata in record_metadata_by_key.items()
-                if metadata.chunk_key == chunk_key
-            ]
-            chunk_sizes_by_key[chunk_key] = sum(
-                record_sizes_by_key.get(record_key, 0) for record_key in record_keys
-            )
-            chunk_records_available_by_key[chunk_key] = bool(record_keys) and all(
-                record_key in record_sizes_by_key and self._store.exists(record_key)
-                for record_key in record_keys
-            )
-
-        return VlmPromptSpillCacheStats(
-            total_bytes=total_bytes,
-            max_bytes=max_bytes,
-            entry_count=entry_count,
-            hits=hits,
-            misses=misses,
-            evictions=evictions,
-            record_sizes=sorted(record_sizes_by_key.values()),
-            record_sizes_by_key=record_sizes_by_key,
-            chunk_sizes_by_key=chunk_sizes_by_key,
-            chunk_records_available_by_key=chunk_records_available_by_key,
-        )
-
     def restore_longest_prefix(
         self,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
-    ) -> Optional[SpilledPromptState]:
+    ) -> SpilledPromptState | None:
         """Load the longest matching cacheable prefix.
 
         The final prompt token stays uncached so generation has a suffix to
@@ -206,9 +152,9 @@ class VlmPromptSpillCache:
             chunks,
             layout,
         )
-        # Disk restores run on the prompt-cache actor; decode consumes the cache
-        # on the scheduler thread. Force assembled arrays now so no lazy graph
-        # keeps a thread-local MLX stream from the restore worker.
+        # Disk restores run on the prompt-cache I/O thread; decode consumes the
+        # cache on the generation thread. Force assembled arrays now so no lazy
+        # graph keeps a thread-local MLX stream from the restore worker.
         materialize_prompt_state(prompt_cache)
 
         # Restore access refreshes exactly the records used by this chain.
@@ -235,7 +181,7 @@ class VlmPromptSpillCache:
     ) -> list[Any]:
         prompt_cache: list[Any] = [None] * len(layout.layer_kinds)
         for record_key in record_keys:
-            record_prompt_cache = self._store.load_prompt_cache(record_key)
+            record_prompt_cache = self._blob_store.load_prompt_cache(record_key)
             record_metadata = self._record_metadata_by_key[record_key]
 
             for layer_idx, cache in zip(
@@ -248,14 +194,14 @@ class VlmPromptSpillCache:
     def _find_longest_loadable_records(
         self,
         chunks: list[PromptPrefixChunk],
-    ) -> Optional[tuple[int, list[PromptPrefixChunk], dict[str, list[str]]]]:
+    ) -> tuple[int, list[PromptPrefixChunk], dict[str, list[str]]] | None:
         """Return the longest currently loadable records for an ordered chain."""
-        index_view = self._cache_index_view()
+        restore_planner = self._cache_restore_planner()
         # Loadability is non-monotonic for SWA/state records, so scan downward.
         for end_idx in range(len(chunks), 0, -1):
             candidate_chunks = chunks[:end_idx]
-            record_keys_by_chunk_key = index_view.restore_record_keys_for_chunk_chain(
-                candidate_chunks
+            record_keys_by_chunk_key = (
+                restore_planner.restore_record_keys_for_chunk_chain(candidate_chunks)
             )
             if record_keys_by_chunk_key is not None:
                 cached_prefix_len = candidate_chunks[-1].end
@@ -267,73 +213,6 @@ class VlmPromptSpillCache:
         """Return False when the spill cache is intentionally hot-only."""
         return self._max_cache_bytes != 0
 
-    def final_cap_from_completed_cache(self, prompt_cache: list[Any]) -> int | None:
-        """Return the final empirical cap from a real completed cache."""
-        if self._empirical_cap_set:
-            return None
-
-        return final_spill_cache_cap_bytes(
-            self._base_dir,
-            prompt_cache,
-            self._max_kv_size,
-        )
-
-    def commit_final_cap(self, max_cache_bytes: int) -> None:
-        """Set the final cap and evict records from the cache actor thread."""
-        if self._empirical_cap_set:
-            return
-        self._max_cache_bytes = max_cache_bytes
-        self._empirical_cap_set = True
-
-        self._evict_if_needed()
-
-    def commit_pending_save(self, pending_save: PendingPromptCacheSave) -> None:
-        """Commit a pending save from the cache actor thread."""
-        if not self.can_store_records():
-            return
-        if self._layout is None:
-            self._layout = pending_save.cache_layout
-
-        try:
-            for record in pending_save.records:
-                if self._store.exists(record.key):
-                    self._record_metadata_by_key[record.key] = record.metadata
-                    self._touch_cache_entry(record.key)
-                    continue
-
-                # The actor waits, writes, then publishes/account each record.
-                mx.eval(list(record.snapshot_arrays.values()))
-                self._store.put(
-                    record.key,
-                    record.snapshot_arrays,
-                    record.safetensor_metadata,
-                )
-                self._record_metadata_by_key[record.key] = record.metadata
-                self._touch_cache_entry(record.key)
-
-            chain_record_keys = (
-                self._cache_index_view().restore_record_keys_for_chunk_chain(
-                    pending_save.prefix_chunks
-                )
-            )
-            if chain_record_keys is not None:
-                for record_key in self._ordered_record_keys_for_touch(
-                    [chunk.key for chunk in pending_save.prefix_chunks],
-                    chain_record_keys,
-                ):
-                    self._touch_cache_entry(record_key)
-        finally:
-            self._evict_if_needed()
-
-    def close(self) -> None:
-        """Clear metadata and close the actor-owned anonymous spool."""
-        self._layout = None
-        self._record_metadata_by_key.clear()
-        self._key_sizes.clear()
-        self._lru_keys.clear()
-        self._total_bytes = 0
-        self._store.close()
-
     def prepare_save(
         self,
         *,
@@ -341,13 +220,13 @@ class VlmPromptSpillCache:
         prefix_chunks: list[PromptPrefixChunk],
         prompt_cache: list[Any],
     ) -> PendingPromptCacheSave:
-        """Prepare a cache save for the background actor."""
+        """Prepare a cache save for the cache I/O thread."""
         payload_cache, payload_kinds = prepare_prompt_cache_payload(
             prompt_cache,
             chunk.start,
             chunk.end,
         )
-        layout = _make_prompt_cache_layout(payload_cache, payload_kinds)
+        layout = make_prompt_cache_layout(payload_cache, payload_kinds)
         records = []
         for record_kind in RECORD_WRITE_ORDER:
             layer_indices = layout.layer_indices_by_kind.get(record_kind, [])
@@ -368,6 +247,118 @@ class VlmPromptSpillCache:
             cache_layout=layout,
             records=records,
         )
+
+    def spill_cap_update_from_completed_cache(
+        self, prompt_cache: list[Any]
+    ) -> int | None:
+        """Return the empirical spill cap update from a real completed cache."""
+        if self._empirical_cap_set:
+            return None
+
+        return final_spill_cache_cap_bytes(
+            self._base_dir,
+            prompt_cache,
+            self._max_kv_size,
+        )
+
+    def commit_spill_cap_update(self, max_cache_bytes: int) -> None:
+        """Set the empirical cap and evict records from the cache I/O thread."""
+        if self._empirical_cap_set:
+            return
+        self._max_cache_bytes = max_cache_bytes
+        self._empirical_cap_set = True
+
+        self._evict_if_needed()
+
+    def commit_pending_save(self, pending_save: PendingPromptCacheSave) -> None:
+        """Commit a pending save from the cache I/O thread."""
+        if not self.can_store_records():
+            return
+        if self._layout is None:
+            self._layout = pending_save.cache_layout
+
+        try:
+            for record in pending_save.records:
+                if self._blob_store.exists(record.key):
+                    self._record_metadata_by_key[record.key] = record.metadata
+                    self._touch_cache_entry(record.key)
+                    continue
+
+                # The I/O thread waits, writes, then publishes/account each record.
+                mx.eval(list(record.snapshot_arrays.values()))
+                self._blob_store.put(
+                    record.key,
+                    record.snapshot_arrays,
+                    record.safetensor_metadata,
+                )
+                self._record_metadata_by_key[record.key] = record.metadata
+                self._touch_cache_entry(record.key)
+
+            chain_record_keys = (
+                self._cache_restore_planner().restore_record_keys_for_chunk_chain(
+                    pending_save.prefix_chunks
+                )
+            )
+            if chain_record_keys is not None:
+                for record_key in self._ordered_record_keys_for_touch(
+                    [chunk.key for chunk in pending_save.prefix_chunks],
+                    chain_record_keys,
+                ):
+                    self._touch_cache_entry(record_key)
+        finally:
+            self._evict_if_needed()
+
+    def snapshot_stats(self) -> PromptSpillCacheStats:
+        """Return best-effort diagnostics for smokes/debug output."""
+        total_bytes = self._total_bytes
+        max_bytes = self._max_cache_bytes
+        entry_count = len(self._record_metadata_by_key)
+        hits = self._cache_hits
+        misses = self._cache_misses
+        evictions = self._cache_evictions
+        record_sizes_by_key = dict(self._key_sizes)
+        record_metadata_by_key = dict(self._record_metadata_by_key)
+        chunk_sizes_by_key = {}
+        chunk_records_available_by_key = {}
+        chunk_keys = sorted(
+            {metadata.chunk_key for metadata in record_metadata_by_key.values()}
+        )
+        for chunk_key in chunk_keys:
+            record_keys = [
+                record_key
+                for record_key, metadata in record_metadata_by_key.items()
+                if metadata.chunk_key == chunk_key
+            ]
+            chunk_sizes_by_key[chunk_key] = sum(
+                record_sizes_by_key.get(record_key, 0) for record_key in record_keys
+            )
+            chunk_records_available_by_key[chunk_key] = bool(record_keys) and all(
+                record_key in record_sizes_by_key
+                and self._blob_store.exists(record_key)
+                for record_key in record_keys
+            )
+
+        return PromptSpillCacheStats(
+            total_bytes=total_bytes,
+            max_bytes=max_bytes,
+            entry_count=entry_count,
+            hits=hits,
+            misses=misses,
+            evictions=evictions,
+            record_sizes=sorted(record_sizes_by_key.values()),
+            record_sizes_by_key=record_sizes_by_key,
+            chunk_sizes_by_key=chunk_sizes_by_key,
+            chunk_records_available_by_key=chunk_records_available_by_key,
+        )
+
+    def close(self) -> None:
+        """Clear metadata and close the anonymous blob store."""
+        self._layout = None
+        self._record_metadata_by_key.clear()
+        self._key_sizes.clear()
+        self._lru_keys.clear()
+        self._total_bytes = 0
+        self._blob_store.close()
 
     def _prepare_record_save(
         self,
@@ -394,7 +385,7 @@ class VlmPromptSpillCache:
             name: mx.contiguous(array) for name, array in cache_arrays.items()
         }
 
-        # Schedule snapshot materialization before handing disk I/O to the actor.
+        # Schedule snapshot materialization before handing off disk I/O.
         mx.async_eval(list(snapshot_arrays.values()))
 
         return PreparedPromptRecord(
@@ -409,7 +400,7 @@ class VlmPromptSpillCache:
         )
 
     def _touch_cache_entry(self, key: str) -> None:
-        total_size = self._store.size(key)
+        total_size = self._blob_store.size(key)
         previous_size = self._key_sizes.get(key, 0)
         self._key_sizes[key] = total_size
         self._total_bytes += total_size - previous_size
@@ -449,14 +440,14 @@ class VlmPromptSpillCache:
 
             self._evict_key(key_to_evict)
 
-    def _cache_index_view(self) -> PromptCacheIndexView:
+    def _cache_restore_planner(self) -> PromptCacheRestorePlanner:
         """Return a short-lived read-only view over committed indexes."""
         layout = self._layout
         assert layout is not None
-        return PromptCacheIndexView(
+        return PromptCacheRestorePlanner(
             layout=layout,
             record_metadata_by_key=self._record_metadata_by_key,
-            record_exists=self._store.exists,
+            record_exists=self._blob_store.exists,
         )
 
     def _evict_key(self, key: str) -> None:
@@ -465,4 +456,4 @@ class VlmPromptSpillCache:
         self._record_metadata_by_key.pop(key, None)
         self._cache_evictions += 1
 
-        self._store.delete(key)
+        self._blob_store.delete(key)

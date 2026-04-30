@@ -10,17 +10,19 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from mlx_engine.model_kit.vlm_prompt_cache_types import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.records import (
     record_kind_for_prompt_cache,
 )
 from mlx.utils import tree_flatten
 
 
-_GIB = 1024 * 1024 * 1024
-_MIN_FREE_BYTES = 10 * _GIB
-_PROVISIONAL_CAP_BYTES = 30 * _GIB
+_GIB_BYTES = 1024 * 1024 * 1024
+_MIN_FREE_BYTES = 10 * _GIB_BYTES
+_PROVISIONAL_CAP_BYTES = 30 * _GIB_BYTES
 
 
 def provisional_spill_cache_cap_bytes(cache_dir: Path) -> int:
@@ -90,6 +92,7 @@ def _scaled_kv_bytes(cache: Any, target_token_count: int) -> int:
         return 0
 
     observed_bytes = _array_nbytes(keys) + _array_nbytes(values)
+    # The final cap should never be smaller than the cache shape we observed.
     target_token_count = max(target_token_count, observed_token_count)
     return (
         observed_bytes * target_token_count + observed_token_count - 1

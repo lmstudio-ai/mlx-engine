@@ -4,9 +4,8 @@ from mlx_engine.model_kit.batched_model_kit import (
     BatchedGenerationResponse,
     BatchedModelKit,
 )
-from mlx_engine.model_kit.batched_vision_model_kit import (
+from mlx_engine.model_kit.batched_vision import (
     BatchedVisionModelKit,
-    is_mlx_vlm_batched_vision_enabled,
 )
 from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
 from typing import Iterator, List, Optional
@@ -156,10 +155,10 @@ def load_model(
 
     Returns:
         ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit: An initialized model instance:
-            - ModelKit: for text-only models and vision models with vision add-on support
-            - VisionModelKit: for vision models that are not yet supported by ModelKit
+            - ModelKit: for sequential text-only models and vocab-only loads
+            - VisionModelKit: for legacy sequential vision loads
             - BatchedModelKit: for text-only continuous batching
-            - BatchedVisionModelKit: for feature-flagged mlx-vlm continuous batching
+            - BatchedVisionModelKit: for mlx-vlm continuous batching
 
     Raises:
         FileNotFoundError: If config.json is not found in the specified model path
@@ -170,7 +169,6 @@ def load_model(
     prefill_step_size = validate_prefill_step_size(prefill_step_size)
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
-    model_type = config_json.get("model_type", None)
     parallel_requested = max_seq_nums is not None and max_seq_nums > 1
 
     def warn_if_parallel(reason: str) -> None:
@@ -183,39 +181,27 @@ def load_model(
 
     # Determine which model kit to use based on model capabilities and configuration.
     # The decision tree is:
-    # 1. BatchedVisionModelKit: feature-flagged mlx-vlm continuous batching for VLMs
-    # 2. VisionModelKit: for vision models not yet supported by ModelKit's vision implementation
-    # 3. BatchedModelKit: for models that support continuous batching (can process multiple requests concurrently)
-    # 4. ModelKit: fallback for all other cases (sequential processing)
-    if "vision_config" in config_json and is_mlx_vlm_batched_vision_enabled():
+    # 1. BatchedVisionModelKit: mlx-vlm continuous batching for VLMs
+    # 2. BatchedModelKit: continuous batching for text-only models
+    # 3. ModelKit: fallback for sequential text-only processing
+    if "vision_config" in config_json and vocab_only:
+        model_kit = ModelKit(
+            model_path,
+            prefill_step_size=prefill_step_size,
+            vocab_only=True,
+        )
+    elif "vision_config" in config_json:
         if any([kv_bits, kv_group_size, quantized_kv_start]):
             raise ValueError(
                 "The mlx-vlm batched vision path does not support KV cache quantization yet"
             )
+        batched_vision_max_seq_nums = 4 if max_seq_nums is None else max_seq_nums
         model_kit = BatchedVisionModelKit(
             model_path,
             prefill_step_size=prefill_step_size,
-            vocab_only=vocab_only,
             max_kv_size=max_kv_size,
-            max_seq_nums=max_seq_nums,
+            max_seq_nums=batched_vision_max_seq_nums,
             trust_remote_code=trust_remote_code,
-        )
-    elif "vision_config" in config_json and not ModelKit.is_supported_vision_arch(
-        model_type
-    ):
-        if any([kv_bits, kv_group_size, quantized_kv_start]):
-            raise ValueError(
-                "MLX vision models do not currently support KV cache quantization"
-            )
-        if parallel_requested:
-            raise ValueError(
-                "numParallelSessions must be 1 for vision models as they do not currently support continuous batching"
-            )
-        model_kit = VisionModelKit(
-            model_path,
-            vocab_only,
-            trust_remote_code,
-            prefill_step_size=prefill_step_size,
         )
     else:
         # For non-vision models or ModelKit-supported vision models, choose between
@@ -678,23 +664,24 @@ def _batched_generation(
     )
 
     if isinstance(model_kit, BatchedVisionModelKit):
-        if repetition_penalty not in (None, 0, 0.0):
-            raise ValueError(
-                "The mlx-vlm batched vision path does not support repetition_penalty yet"
-            )
-        if json_schema is not None:
-            raise ValueError(
-                "The mlx-vlm batched vision path does not support json_schema yet"
-            )
-        if speculative_decoding_toggle not in (None, False):
-            raise ValueError(
-                "The mlx-vlm batched vision path does not support speculative decoding"
-            )
-        if num_draft_tokens is not None:
-            raise ValueError(
-                "The mlx-vlm batched vision path does not support speculative decoding"
-            )
+        # if repetition_penalty not in (None, 0, 1):
+        #     raise ValueError(
+        #         "The mlx-vlm batched vision path does not support repetition_penalty yet"
+        #     )
+        # if json_schema is not None:
+        #     raise ValueError(
+        #         "The mlx-vlm batched vision path does not support json_schema yet"
+        #     )
+        # if speculative_decoding_toggle not in (None, False):
+        #     raise ValueError(
+        #         "The mlx-vlm batched vision path does not support speculative decoding"
+        #     )
+        # if num_draft_tokens is not None:
+        #     raise ValueError(
+        #         "The mlx-vlm batched vision path does not support speculative decoding"
+        #     )
 
+        sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
         stream = model_kit.generate(
             prompt_tokens=input_tokens,
             request_id=request_id,
@@ -703,11 +690,7 @@ def _batched_generation(
             max_tokens=max_tokens,
             prompt_progress_callback=mlx_lm_callback,
             top_logprobs=top_logprobs,
-            temp=temp,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
-            min_tokens_to_keep=min_tokens_to_keep,
+            sampler=sampler,
         )
     else:
         # Set up repetition penalty
@@ -756,11 +739,9 @@ def _batched_generation(
         except RequestCancelled:
             yield construct_user_cancelled_result()
             return
-        # TODO: implement this - MLX doesn't yet support cancelling during prompt processing
-        # for batched generation
-        # except StopPromptProcessing:
-        #     yield construct_user_cancelled_result()
-        #     return
+        except StopPromptProcessing:
+            yield construct_user_cancelled_result()
+            return
 
         # Token processor
         token = generation_result.token

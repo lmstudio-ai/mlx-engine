@@ -4,7 +4,7 @@ import logging
 
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
-from mlx_engine.model_kit.batched_vision_model_kit import BatchedVisionModelKit
+from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
 
 logger = logging.getLogger(__name__)
 

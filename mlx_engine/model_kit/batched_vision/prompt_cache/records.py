@@ -1,20 +1,73 @@
 from typing import Any
 
 import mlx.core as mx
-from mlx_engine.model_kit.vlm_prompt_cache_types import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptCacheLayout,
     PromptPrefixChunk,
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
     RecordKind,
-    record_kind_for_prompt_cache,
 )
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 from mlx.utils import tree_flatten
 
 
-def slice_kv_cache(cache: Any, chunk_start: int, chunk_end: int) -> KVCache:
+def prepare_prompt_cache_payload(
+    prompt_cache: list[Any],
+    chunk_start: int,
+    chunk_end: int,
+) -> tuple[list[Any], list[RecordKind]]:
+    payload_cache = []
+    payload_kinds = []
+    for cache in prompt_cache:
+        record_kind = record_kind_for_prompt_cache(cache)
+        if record_kind == RECORD_KIND_KV_DELTA:
+            payload_cache.append(_slice_kv_cache(cache, chunk_start, chunk_end))
+        elif record_kind == RECORD_KIND_ROTATING_DELTA:
+            payload_cache.append(
+                _slice_rotating_kv_cache(cache, chunk_start, chunk_end)
+            )
+        else:
+            # Opaque array-state caches stay as exact boundary checkpoints for V1.
+            payload_cache.append(cache)
+        payload_kinds.append(record_kind)
+
+    return payload_cache, payload_kinds
+
+
+def make_prompt_cache_layout(
+    payload_cache: list[Any],
+    payload_kinds: list[RecordKind],
+) -> PromptCacheLayout:
+    layer_indices_by_kind: dict[RecordKind, list[int]] = {}
+    rotating_window_size = None
+    for layer_idx, record_kind in enumerate(payload_kinds):
+        layer_indices_by_kind.setdefault(record_kind, []).append(layer_idx)
+        if record_kind == RECORD_KIND_ROTATING_DELTA:
+            window_size = int(payload_cache[layer_idx].max_size)
+            rotating_window_size = max(rotating_window_size or 0, window_size)
+
+    return PromptCacheLayout(
+        layer_kinds=list(payload_kinds),
+        layer_indices_by_kind=layer_indices_by_kind,
+        rotating_window_size=rotating_window_size,
+    )
+
+
+def record_kind_for_prompt_cache(cache: Any) -> RecordKind:
+    """Classify one live prompt-cache layer into its disk record kind."""
+    cache_type = type(cache).__name__
+    if cache_type == "KVCache":
+        # mlx-vlm re-exports mlx-lm cache classes; keep this name-based so local
+        # forks do not need identical module identities.
+        return RECORD_KIND_KV_DELTA
+    if cache_type == "RotatingKVCache" and getattr(cache, "keep", 0) == 0:
+        return RECORD_KIND_ROTATING_DELTA
+    return RECORD_KIND_STATE_CHECKPOINT
+
+
+def _slice_kv_cache(cache: Any, chunk_start: int, chunk_end: int) -> KVCache:
     keys, values = cache.state
     chunk_cache = KVCache()
     chunk_cache.state = (
@@ -24,7 +77,7 @@ def slice_kv_cache(cache: Any, chunk_start: int, chunk_end: int) -> KVCache:
     return chunk_cache
 
 
-def slice_rotating_kv_cache(
+def _slice_rotating_kv_cache(
     cache: Any,
     chunk_start: int,
     chunk_end: int,
@@ -44,28 +97,7 @@ def slice_rotating_kv_cache(
     return chunk_cache
 
 
-def prepare_prompt_cache_payload(
-    prompt_cache: list[Any],
-    chunk_start: int,
-    chunk_end: int,
-) -> tuple[list[Any], list[RecordKind]]:
-    payload_cache = []
-    payload_kinds = []
-    for cache in prompt_cache:
-        record_kind = record_kind_for_prompt_cache(cache)
-        if record_kind == RECORD_KIND_KV_DELTA:
-            payload_cache.append(slice_kv_cache(cache, chunk_start, chunk_end))
-        elif record_kind == RECORD_KIND_ROTATING_DELTA:
-            payload_cache.append(slice_rotating_kv_cache(cache, chunk_start, chunk_end))
-        else:
-            # Opaque array-state caches stay as exact boundary checkpoints for V1.
-            payload_cache.append(cache)
-        payload_kinds.append(record_kind)
-
-    return payload_cache, payload_kinds
-
-
-def concat_kv_delta_caches(caches: list[Any]) -> KVCache:
+def _concat_kv_delta_caches(caches: list[Any]) -> KVCache:
     keys = mx.concatenate([cache.state[0] for cache in caches], axis=2)
     values = mx.concatenate([cache.state[1] for cache in caches], axis=2)
     cache = KVCache()
@@ -73,9 +105,9 @@ def concat_kv_delta_caches(caches: list[Any]) -> KVCache:
     return cache
 
 
-def concat_rotating_delta_caches(
+def _concat_rotating_delta_caches(
     caches: list[Any],
-    final_offset: int,
+    target_chunk_end: int,
 ) -> RotatingKVCache:
     keys = mx.concatenate([cache.state[0] for cache in caches], axis=2)
     values = mx.concatenate([cache.state[1] for cache in caches], axis=2)
@@ -87,7 +119,7 @@ def concat_rotating_delta_caches(
 
     cache = RotatingKVCache(max_size=max_size, keep=keep)
     cache.state = (mx.contiguous(keys), mx.contiguous(values))
-    cache.offset = final_offset
+    cache.offset = target_chunk_end
     cache._idx = keys.shape[2]
     return cache
 
@@ -108,11 +140,11 @@ def assemble_prompt_cache_chunks(
         record_kind = layout.layer_kinds[layer_idx]
         if record_kind == RECORD_KIND_KV_DELTA:
             # Full-attention layers keep every chunk in prefix order.
-            assembled.append(concat_kv_delta_caches(layer_chunks))
+            assembled.append(_concat_kv_delta_caches(layer_chunks))
         elif record_kind == RECORD_KIND_ROTATING_DELTA:
             # Planner loads only chunks that overlap the target sliding window.
             assembled.append(
-                concat_rotating_delta_caches(
+                _concat_rotating_delta_caches(
                     [cache for cache in layer_chunks if cache is not None],
                     chunks[-1].end,
                 )

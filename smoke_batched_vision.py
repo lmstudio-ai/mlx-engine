@@ -7,9 +7,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 
-os.environ.setdefault("MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -18,21 +16,28 @@ import mlx.core as mx
 from transformers import AutoProcessor
 
 from mlx_engine.generate import create_generator, load_model, tokenize, unload
-from mlx_engine.model_kit.vlm_prompt_cache_coordinator import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     RestoredPromptCache,
-    _image_safe_common_prefix_len,
 )
-from mlx_engine.model_kit.vlm_prompt_cache_types import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
+    build_prefix_cache_chunks,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.image_spans import (
+    image_safe_common_prefix_len,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptImageSpan,
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_WRITE_ORDER,
-    build_prefix_cache_chunks,
     make_record_key,
 )
-from mlx_engine.model_kit.vlm_prompt_spill_cache import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.spill_cache import (
     VlmPromptSpillCache,
+)
+from mlx_engine.model_kit.batched_vision.prompt_inputs import (
+    prepare_prompt_inputs as prepare_batched_vision_prompt_inputs,
 )
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_lm.models.cache import (
@@ -134,7 +139,7 @@ OPTIONAL_RECORD_KINDS = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Smoke and stress test the feature-flagged mlx-vlm batched vision path"
+        description="Smoke and stress test the mlx-vlm batched vision path"
     )
     parser.add_argument(
         "--mode",
@@ -228,11 +233,6 @@ def parse_args():
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True to model loading and processor loading",
-    )
-    parser.add_argument(
-        "--disk-cache",
-        action="store_true",
-        help="Enable the batched-vision disk cache for this run",
     )
     parser.add_argument(
         "--cache-max-bytes",
@@ -369,12 +369,13 @@ def prepare_prompt_inputs(
 ):
     # Use the real mlx-vlm prompt-prep path so prefix validation checks the
     # actual disk-cache key space instead of guessing from raw text.
-    return model_kit._prepare_prompt_inputs(
-        SimpleNamespace(
-            prompt_tokens=prepared.prompt_tokens,
-            images_b64=prepared.images_b64,
-            max_image_size=None,
-        )
+    return prepare_batched_vision_prompt_inputs(
+        prompt_tokens=prepared.prompt_tokens,
+        images_b64=prepared.images_b64,
+        max_image_size=None,
+        tokenizer=model_kit.tokenizer,
+        processor=model_kit.processor,
+        config=model_kit.config,
     )
 
 
@@ -614,9 +615,7 @@ def wait_for_prefix_snapshot(
     min_chunk_keys: int = 1,
     timeout_s: float,
 ):
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("Prefix mode requires the batched vision spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
 
     deadline = time.perf_counter() + timeout_s
     while time.perf_counter() < deadline:
@@ -640,9 +639,7 @@ def wait_for_restore_plan(
     expected_prefix_len: int,
     timeout_s: float,
 ):
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("Prefix mode requires the batched vision spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
 
     deadline = time.perf_counter() + timeout_s
     last_seen_prefix = None
@@ -736,8 +733,10 @@ def expected_spill_record_keys(prompt_spill_cache, chunk_key: str) -> list[str]:
 
 
 def restore_spill_record_keys(prompt_spill_cache, restore_records):
-    return prompt_spill_cache._cache_index_view().restore_record_keys_for_chunk_chain(
-        restore_records[1]
+    return (
+        prompt_spill_cache._cache_restore_planner().restore_record_keys_for_chunk_chain(
+            restore_records[1]
+        )
     )
 
 
@@ -1002,10 +1001,8 @@ def run_prefix(
     )
     validate_result(base_prepared, base_result)
 
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    disk_spill_enabled = (
-        prompt_spill_cache is not None and prompt_spill_cache.can_store_records()
-    )
+    prompt_spill_cache = model_kit._prompt_spill_cache
+    disk_spill_enabled = prompt_spill_cache.can_store_records()
     if disk_spill_enabled:
         prefix_match = wait_for_prefix_snapshot(
             model_kit,
@@ -1081,7 +1078,7 @@ def run_prefix(
             f"{extended_trace.begin_prefill_tokens_processed} not in "
             f"{sorted(accepted_extended_progress)}"
         )
-    hot_control_progress = _image_safe_common_prefix_len(
+    hot_control_progress = image_safe_common_prefix_len(
         control_prompt_inputs.prompt_input_ids,
         control_prompt_inputs.image_spans,
         extended_prompt_inputs.prompt_input_ids,
@@ -1218,7 +1215,7 @@ def run_multi_prefix(args) -> None:
         raise RuntimeError("Appending an image changed earlier prompt chunk keys")
     if changed_image_chunks[0].key == base_image_chunks[0].key:
         raise RuntimeError("Changing an image did not change its containing chunk")
-    image_reuse_prefix_len = _image_safe_common_prefix_len(
+    image_reuse_prefix_len = image_safe_common_prefix_len(
         extended_image_prompt,
         [
             PromptImageSpan(20, 23, "image-a"),
@@ -1563,9 +1560,7 @@ def run_multi_prefix_e2e(model_kit, processor, args) -> None:
         reusable_boundaries,
         suffix,
     ) = build_multi_prefix_e2e_requests(model_kit, processor)
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("multi-prefix-e2e mode requires the batched spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
 
     base_trace = PromptProgressTrace()
     base_result = run_prepared_request(
@@ -1649,9 +1644,7 @@ def run_hybrid_cache_e2e(
         reusable_boundaries,
         suffix,
     ) = build_multi_prefix_e2e_requests(model_kit, processor)
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("hybrid-cache-e2e mode requires the batched spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
 
     base_trace = PromptProgressTrace()
     base_result = run_prepared_request(
@@ -1776,9 +1769,7 @@ def run_arrays_cache_branch_e2e(model_kit, processor, args) -> None:
         processor,
         min_restored_tokens=512 if args.cache_max_bytes is not None else 256,
     )
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("arrays-cache-branch-e2e mode requires the spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
     if args.cache_max_bytes is not None:
         prompt_spill_cache._max_cache_bytes = args.cache_max_bytes
         prompt_spill_cache._empirical_cap_set = True
@@ -1884,9 +1875,6 @@ def run_qwen_rope_e2e(
         primary_image_b64=primary_image_b64,
         max_tokens=min(args.max_tokens, 4),
     )
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("qwen-rope-e2e mode requires the batched spill cache")
     if not [
         chunk
         for chunk in build_prefix_cache_chunks(
@@ -2012,9 +2000,7 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
         reusable_boundaries,
         suffix,
     ) = build_multi_prefix_e2e_requests(model_kit, processor)
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("eviction-e2e mode requires the batched spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
 
     base_trace = PromptProgressTrace()
     base_result = run_prepared_request(
@@ -2163,9 +2149,7 @@ def run_eviction_stress(model_kit, processor, args) -> None:
         reusable_boundaries,
         suffix,
     ) = build_multi_prefix_e2e_requests(model_kit, processor)
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("eviction-stress mode requires the batched spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
 
     base_trace = PromptProgressTrace()
     base_result = run_prepared_request(
@@ -2371,9 +2355,7 @@ def run_cross_thread_restore(
         request_id="thread-hop-base",
     )
     prompt_inputs = prepare_prompt_inputs(model_kit, prepared)
-    prompt_spill_cache = getattr(model_kit, "_prompt_spill_cache", None)
-    if prompt_spill_cache is None:
-        raise RuntimeError("cross-thread-restore mode requires the batched spill cache")
+    prompt_spill_cache = model_kit._prompt_spill_cache
 
     base_result = run_prepared_request(model_kit, prepared)
     validate_result(prepared, base_result)
@@ -2472,7 +2454,9 @@ def run_cross_thread_restore(
 
     validate_result(prepared, hopped_result)
     if not override_state["used"]:
-        raise RuntimeError("Scheduler did not consume the background-loaded state")
+        raise RuntimeError(
+            "Generation thread did not consume the background-loaded state"
+        )
     if trace.begin_prefill_tokens_processed is None:
         raise RuntimeError("Cross-thread request did not emit a begin progress event")
     expected_progress = restore_cached_prefix_len(prefix_match)
@@ -2511,21 +2495,6 @@ def main():
     model_path = args.model.expanduser().resolve()
     image_path = args.image.expanduser().resolve()
     secondary_image_path = args.secondary_image.expanduser().resolve()
-    use_disk_cache = args.disk_cache or args.mode in {
-        "prefix",
-        "prefix-restart",
-        "multi-prefix",
-        "rotating-suffix",
-        "multi-prefix-e2e",
-        "hybrid-cache-e2e",
-        "arrays-cache-e2e",
-        "arrays-cache-branch-e2e",
-        "qwen-rope-e2e",
-        "eviction",
-        "eviction-e2e",
-        "eviction-stress",
-        "cross-thread-restore",
-    }
 
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
@@ -2542,12 +2511,8 @@ def main():
     ):
         raise FileNotFoundError(f"Secondary image not found: {secondary_image_path}")
 
-    if use_disk_cache:
-        os.environ["MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE"] = "1"
-        if args.cache_max_bytes is not None:
-            print("CACHE_MAX_BYTES", args.cache_max_bytes)
-    else:
-        os.environ.pop("MLX_ENGINE_USE_MLX_VLM_BATCHED_VISION_DISK_CACHE", None)
+    if args.cache_max_bytes is not None:
+        print("CACHE_MAX_BYTES", args.cache_max_bytes)
 
     if args.mode == "multi-prefix":
         run_multi_prefix(args)

@@ -230,21 +230,21 @@ class BatchedMlxLmReporterAdapter:
     We need the off-by-one since mlx-lm prefills every token except for the last one,
     since that token is needed to start the auto-regressive decoding
 
-    Unlike MlxLmReporterAdapter, do not throw when we receive a stop request. This should be fixed
-    when batched mlx-lm supports prompt processing interruption
+    Unlike MlxLmReporterAdapter, do not throw when we receive a stop request.
+    Return False so batched schedulers can cooperatively cancel at chunk
+    boundaries.
     """
 
     def __init__(self, reporter: PromptProgressReporter, emit_begin: bool = False):
-        # TODO: need a way to interrupt prompt processing
         self._reporter = ForwardingReporter(reporter, raise_error_when_stopped=False)
 
         self._emit_begin = emit_begin
         self._first_call = True
         self._finished = False
 
-    def __call__(self, processed_tokens: int, total_tokens: int) -> None:
+    def __call__(self, processed_tokens: int, total_tokens: int) -> bool:
         if self._finished:
-            return
+            return True
 
         # mlx-lm tells us how many total prompt tokens there are. It leaves one unprocessed to seed the decode. Make that adjustment here
         total_tokens = max(0, total_tokens - 1)
@@ -252,19 +252,21 @@ class BatchedMlxLmReporterAdapter:
         if self._first_call:
             self._first_call = False
             if self._emit_begin:
-                self._reporter.begin(
+                should_continue = self._reporter.begin(
                     is_draft=False,
                     cached_tokens=0,  # This is likely wrong
                     total_prompt_tokens=total_tokens,
                     prefill_tokens_processed=processed_tokens,
                 )
+                if not should_continue:
+                    return False
 
         if processed_tokens >= total_tokens:
             self._finished = True
-            self._reporter.finish(
+            return self._reporter.finish(
                 is_draft=False, prefill_tokens_processed=processed_tokens
             )
-        else:
-            self._reporter.update(
-                is_draft=False, prefill_tokens_processed=processed_tokens
-            )
+
+        return self._reporter.update(
+            is_draft=False, prefill_tokens_processed=processed_tokens
+        )

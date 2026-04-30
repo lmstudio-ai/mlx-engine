@@ -1,7 +1,6 @@
 from collections.abc import Callable
-from typing import Optional
 
-from mlx_engine.model_kit.vlm_prompt_cache_types import (
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptCacheLayout,
     PromptCacheRecordMetadata,
     PromptPrefixChunk,
@@ -12,16 +11,16 @@ from mlx_engine.model_kit.vlm_prompt_cache_types import (
 )
 
 
-class PromptCacheIndexView:
-    """Read-only policy view over the prompt-cache indexes.
+class PromptCacheRestorePlanner:
+    """Read-only planner for records needed to restore a prompt prefix.
 
     Restore policy:
     - KV deltas are needed for every chunk in the prefix chain.
     - Rotating deltas are needed only inside the target sliding window.
     - Opaque state checkpoints are needed only at the exact target chunk.
 
-    Short-lived by design: callers construct this from the actor-owned physical
-    record index when they need to evaluate restore availability.
+    Short-lived by design: callers construct this from the cache-I/O-thread-owned
+    physical record index when they need to evaluate restore availability.
     """
 
     def __init__(
@@ -37,12 +36,12 @@ class PromptCacheIndexView:
 
     def restore_record_keys_for_chunk_chain(
         self, chunks: list[PromptPrefixChunk]
-    ) -> Optional[dict[str, list[str]]]:
+    ) -> dict[str, list[str]] | None:
         """Return physical records needed to restore a cached chunk chain.
 
         Returns None when the index says the chain is not currently restorable:
         required records are not indexed, or blobs were already evicted from the
-        spool.
+        blob store.
         """
         if not chunks:
             return {}
@@ -72,14 +71,14 @@ class PromptCacheIndexView:
                         continue
 
                 record_key = make_record_key(chunk.key, record_kind)
-                if not self._record_exists_in_index_and_store(record_key):
+                if not self._has_record(record_key):
                     return None
                 record_keys.append(record_key)
             record_keys_by_chunk_key[chunk.key] = record_keys
 
         return record_keys_by_chunk_key
 
-    def _record_exists_in_index_and_store(self, record_key: str) -> bool:
+    def _has_record(self, record_key: str) -> bool:
         return record_key in self._record_metadata_by_key and self._record_exists(
             record_key
         )
