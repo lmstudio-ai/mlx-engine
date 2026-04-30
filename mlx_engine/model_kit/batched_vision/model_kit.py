@@ -304,7 +304,10 @@ class BatchedVisionModelKit:
 
         prompt_input_ids = full_prompt_input_ids
         prompt_kwargs = None
-        insert_kwargs = {}
+        inputs_embeds = None
+        cache = None
+        all_tokens = None
+        rope_deltas = None
         prompt_progress = 0
         with use_generation_stream():
             if restored is not None:
@@ -315,35 +318,40 @@ class BatchedVisionModelKit:
                     restored.cached_prefix_len,
                     restored.rope_deltas,
                 )
+                inputs_embeds = prompt_kwargs.pop("inputs_embeds")
                 prompt_progress = restored.cached_prefix_len
-                insert_kwargs = {
-                    "caches": [restored.prompt_cache],
-                    "all_tokens": [full_prompt_input_ids[: restored.cached_prefix_len]],
-                    "rope_deltas": [restored.rope_deltas],
-                }
+                cache = restored.prompt_cache
+                all_tokens = full_prompt_input_ids[: restored.cached_prefix_len]
+                rope_deltas = restored.rope_deltas
             else:
                 prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
+                inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
         cache_save_points = self._prompt_cache_coordinator.save_points_after(
             prompt_input_ids=full_prompt_input_ids,
             image_spans=prepared_prompt.image_spans,
             prompt_progress=prompt_progress,
         )
+        prompt_cache_save_callback = None
         if cache_save_points:
-            insert_kwargs["cache_save_points"] = [cache_save_points]
-            insert_kwargs["prompt_cache_save_callback"] = (
+            prompt_cache_save_callback = (
                 self._prompt_cache_coordinator.make_save_callback(
-                    image_spans=prepared_prompt.image_spans,
+                    image_spans=prepared_prompt.image_spans
                 )
             )
 
         request.rqueue.put((prompt_progress, prompt_token_count))
-        (uid,) = batch_generator.insert(
-            [prompt_input_ids],
-            max_tokens=[request.max_tokens],
-            samplers=[request.sampler],
-            **insert_kwargs,
-            prompt_kwargs=[prompt_kwargs],
+        uid = batch_generator.insert(
+            prompt_input_ids,
+            inputs_embeds=inputs_embeds,
+            max_tokens=request.max_tokens,
+            sampler=request.sampler,
+            cache=cache,
+            all_tokens=all_tokens,
+            rope_deltas=rope_deltas,
+            prompt_kwargs=prompt_kwargs,
+            cache_save_points=cache_save_points,
+            prompt_cache_save_callback=prompt_cache_save_callback,
         )
 
         detokenizer = self.tokenizer.detokenizer
