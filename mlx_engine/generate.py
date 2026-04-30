@@ -5,7 +5,7 @@ from mlx_engine.model_kit.batched_model_kit import (
     BatchedModelKit,
 )
 from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
-from typing import Iterator, List, Optional
+from typing import Any, Iterator, List, Optional
 import json
 import logging
 from pathlib import Path
@@ -18,6 +18,7 @@ from mlx_lm.utils import load as mlx_lm_load
 from mlx_lm.models.cache import make_prompt_cache
 
 from mlx_engine.model_kit.model_kit import ModelKit
+from mlx_engine.model_kit.distributed_model_kit import DistributedModelKit
 from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
@@ -129,7 +130,9 @@ def load_model(
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
     prefill_step_size: Optional[int] = None,
-) -> ModelKit | VisionModelKit:
+    distributed: bool = False,
+    distributed_group: Any = None,
+) -> ModelKit | VisionModelKit | DistributedModelKit:
     """
     Load a language model or vision-language model from the specified path.
 
@@ -162,10 +165,34 @@ def load_model(
     """
     set_seed(seed)
     prefill_step_size = validate_prefill_step_size(prefill_step_size)
+    parallel_requested = max_seq_nums is not None and max_seq_nums > 1
+
+    if distributed:
+        if vocab_only:
+            raise ValueError("Distributed loading does not support vocab_only")
+        if any([kv_bits, kv_group_size, quantized_kv_start]):
+            raise ValueError(
+                "Distributed loading does not currently support KV cache quantization"
+            )
+        if parallel_requested:
+            logger.warning(
+                f"max_concurrent_predictions={max_seq_nums} was specified, but "
+                "distributed mlx-engine currently handles one request at a time."
+            )
+        model_kit = DistributedModelKit(
+            model_path,
+            prefill_step_size=prefill_step_size,
+            max_kv_size=max_kv_size,
+            trust_remote_code=trust_remote_code,
+            distributed_group=distributed_group,
+        )
+        sanitize_eos_tokens(model_kit)
+        model_kit.start()
+        return model_kit
+
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
     model_type = config_json.get("model_type", None)
-    parallel_requested = max_seq_nums is not None and max_seq_nums > 1
 
     def warn_if_parallel(reason: str) -> None:
         """Helper to warn about batching not being supported, only if parallel was requested."""
@@ -265,7 +292,8 @@ def load_model(
 
 
 def load_draft_model(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit, path: str | Path
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | DistributedModelKit,
+    path: str | Path,
 ) -> None:
     if not is_speculative_decoding_supported(model_kit):
         raise SpeculativeDecodingNotSupportedError(
@@ -275,7 +303,8 @@ def load_draft_model(
 
 
 def is_draft_model_compatible(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit, path: str | Path
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | DistributedModelKit,
+    path: str | Path,
 ) -> bool:
     if not is_speculative_decoding_supported(model_kit):
         return False
@@ -283,7 +312,7 @@ def is_draft_model_compatible(
 
 
 def unload_draft_model(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit,
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | DistributedModelKit,
 ) -> None:
     if not is_speculative_decoding_supported(model_kit):
         return
@@ -291,7 +320,7 @@ def unload_draft_model(
 
 
 def create_generator(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit,
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | DistributedModelKit,
     prompt_tokens: List[int],
     **kwargs,
 ) -> Iterator[GenerationResult]:
@@ -352,7 +381,8 @@ def create_generator(
 
 @contextmanager
 def _sequential_gen_abort_handler(
-    model_kit: ModelKit | VisionModelKit, request_id: Optional[str]
+    model_kit: ModelKit | VisionModelKit | DistributedModelKit,
+    request_id: Optional[str],
 ):
     """
     Acquires the generation lock for sequential generation, with support for cancellation.
@@ -392,7 +422,7 @@ def _sequential_gen_abort_handler(
 
 
 def _sequential_generation(
-    model_kit: ModelKit | VisionModelKit,
+    model_kit: ModelKit | VisionModelKit | DistributedModelKit,
     prompt_tokens: List[int],
     *,
     prompt_progress_reporter: Optional[PromptProgressReporter] = None,
@@ -590,6 +620,16 @@ def _sequential_generation(
 
             # Standard yield - yield when a non-empty text segment is available or eos token is hit
             should_yield, stop_condition = should_yield_token(text, token, tokenizer)
+            if (
+                stop_condition is None
+                and generation_result.finish_reason == "length"
+            ):
+                should_yield = True
+                stop_condition = GenerationStopCondition(
+                    stop_reason="token_limit",
+                    stop_string="",
+                    stop_tokens=[],
+                )
             if should_yield:
                 yield GenerationResult(
                     text=text,
@@ -772,7 +812,8 @@ def _batched_generation(
 
 
 def stop_generation(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit, request_id: str
+    model_kit: ModelKit | VisionModelKit | BatchedModelKit | DistributedModelKit,
+    request_id: str,
 ):
     """
     Register stop request based off of request_id
@@ -789,11 +830,14 @@ def stop_generation(
         logger.warning(f"Could not cancel {request_id=} (request not found)")
 
 
-def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit):
+def unload(model_kit: ModelKit | VisionModelKit | BatchedModelKit | DistributedModelKit):
     model_kit.shutdown()
 
 
-def tokenize(model_kit: ModelKit | VisionModelKit, prompt: str) -> List[int]:
+def tokenize(
+    model_kit: ModelKit | VisionModelKit | DistributedModelKit,
+    prompt: str,
+) -> List[int]:
     """
     Convert a text prompt into a list of token IDs using the model's tokenizer.
 

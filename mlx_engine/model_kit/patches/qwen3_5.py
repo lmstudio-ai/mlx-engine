@@ -58,14 +58,20 @@ class PatchedDecoderLayer(DecoderLayer):
 
     def __init__(self, args, layer_idx):
         super().__init__(args, layer_idx)
+        self._mrope = None
         if not self.is_linear:
             rope_params = args.rope_parameters
-            self._mrope = Qwen3_5RotaryEmbedding(
-                int(self.self_attn.head_dim * rope_params["partial_rotary_factor"]),
-                max_position_embeddings=args.max_position_embeddings,
-                base=rope_params["rope_theta"],
-                mrope_section=rope_params["mrope_section"],
-            )
+            mrope_section = rope_params.get("mrope_section")
+            if mrope_section is not None:
+                self._mrope = Qwen3_5RotaryEmbedding(
+                    int(
+                        self.self_attn.head_dim
+                        * rope_params["partial_rotary_factor"]
+                    ),
+                    max_position_embeddings=args.max_position_embeddings,
+                    base=rope_params["rope_theta"],
+                    mrope_section=mrope_section,
+                )
 
     def __call__(
         self,
@@ -106,6 +112,9 @@ class PatchedDecoderLayer(DecoderLayer):
         Mirrors Qwen3_5Attention.__call__ from mlx-vlm but operates on
         self.self_attn's projections and norms directly.
         """
+        if self._mrope is None:
+            raise ValueError("Qwen3.5 MRoPE config is required for vision requests")
+
         attn = self.self_attn
         B, L, D = x.shape
 

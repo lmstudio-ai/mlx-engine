@@ -1,0 +1,490 @@
+import argparse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import logging
+import os
+import pickle
+import time
+import uuid
+from typing import Any, Optional
+
+import mlx.core as mx
+
+from mlx_engine.generate import create_generator, load_model, unload
+
+
+logger = logging.getLogger(__name__)
+
+
+def share_object(rank: int, value: Optional[dict]) -> Optional[dict]:
+    if rank == 0:
+        if value is None:
+            mx.eval(mx.distributed.all_sum(0))
+            return None
+        data = mx.array(pickle.dumps(value))
+        mx.eval(mx.distributed.all_sum(data.size))
+        mx.eval(mx.distributed.all_sum(data))
+        return value
+
+    data_size = mx.distributed.all_sum(0).item()
+    if data_size == 0:
+        return None
+    data = mx.zeros(data_size, dtype=mx.uint8)
+    data = mx.distributed.all_sum(data)
+    return pickle.loads(data)
+
+
+def exit_after_distributed_error(message: str) -> None:
+    logger.critical(
+        "%s. Exiting this rank to avoid accepting another request while worker ranks may be out of sync.",
+        message,
+    )
+    logging.shutdown()
+    os._exit(1)
+
+
+def shutdown_workers(rank: int) -> None:
+    try:
+        share_object(rank, {"type": "shutdown"})
+    except Exception:
+        logger.exception("Failed to broadcast worker shutdown")
+
+
+def normalize_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = []
+        for content_part in content:
+            if not isinstance(content_part, dict):
+                continue
+            if content_part.get("type") == "text":
+                text = content_part.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return "".join(text_parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def normalize_messages(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError("messages must be a list")
+
+    messages = []
+    for message in value:
+        if not isinstance(message, dict):
+            raise ValueError("messages entries must be objects")
+        role = message.get("role")
+        if not isinstance(role, str):
+            raise ValueError("message.role must be a string")
+        messages.append(
+            {
+                "role": role,
+                "content": normalize_message_content(message.get("content")),
+            }
+        )
+    return messages
+
+
+def normalize_stop(value: Any) -> Optional[list[str]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        stop_strings = []
+        for stop_value in value:
+            if isinstance(stop_value, str):
+                stop_strings.append(stop_value)
+        return stop_strings
+    return None
+
+
+def optional_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) or isinstance(value, float):
+        return float(value)
+    return None
+
+
+def optional_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def max_tokens_from_value(value: Any) -> int:
+    if value is None:
+        return 256
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("max_tokens must be a positive integer")
+    max_tokens = value
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be a positive integer")
+    return max_tokens
+
+
+def format_prompt(model_kit, body: dict[str, Any], default_template_args: dict[str, Any]) -> list[int]:
+    messages = normalize_messages(body.get("messages"))
+    template_args = dict(default_template_args)
+    request_template_args = body.get("chat_template_kwargs")
+    if isinstance(request_template_args, dict):
+        template_args.update(request_template_args)
+
+    prompt = model_kit.tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        **template_args,
+    )
+    return model_kit.tokenize(prompt)
+
+
+def finish_reason_from_stop_condition(stop_condition) -> Optional[str]:
+    if stop_condition is None:
+        return None
+    if stop_condition.stop_reason == "token_limit":
+        return "length"
+    if stop_condition.stop_reason == "user_cancelled":
+        return "cancelled"
+    return "stop"
+
+
+def run_generation_request(model_kit, request: dict[str, Any]):
+    text_parts = []
+    finish_reason = None
+    generator = create_generator(
+        model_kit,
+        request["prompt_tokens"],
+        max_tokens=request["max_tokens"],
+        stop_strings=request["stop"],
+        temp=request["temperature"],
+        top_p=request["top_p"],
+        top_k=request["top_k"],
+        min_p=request["min_p"],
+        repetition_penalty=request["repetition_penalty"],
+        repetition_context_size=request["repetition_context_size"],
+        seed=request["seed"],
+        request_id=request["request_id"],
+    )
+
+    for generation_result in generator:
+        finish_reason = finish_reason_from_stop_condition(
+            generation_result.stop_condition
+        )
+        yield generation_result.text, finish_reason
+        text_parts.append(generation_result.text)
+
+    if finish_reason is None:
+        finish_reason = "stop"
+    return "".join(text_parts), finish_reason
+
+
+def build_generation_request(
+    model_kit,
+    body: dict[str, Any],
+    model_name: str,
+    default_template_args: dict[str, Any],
+) -> dict[str, Any]:
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
+    seed = optional_int(body.get("seed"))
+    if seed is None:
+        seed = time.time_ns() & (2**32 - 1)
+    return {
+        "type": "chat.completions",
+        "request_id": request_id,
+        "model": body.get("model") if isinstance(body.get("model"), str) else model_name,
+        "prompt_tokens": format_prompt(model_kit, body, default_template_args),
+        "max_tokens": max_tokens_from_value(body.get("max_tokens")),
+        "stop": normalize_stop(body.get("stop")),
+        "temperature": optional_float(body.get("temperature")),
+        "top_p": optional_float(body.get("top_p")),
+        "top_k": optional_int(body.get("top_k")),
+        "min_p": optional_float(body.get("min_p")),
+        "repetition_penalty": optional_float(body.get("repetition_penalty")),
+        "repetition_context_size": optional_int(body.get("repetition_context_size")),
+        "seed": seed,
+        "stream": body.get("stream") is True,
+    }
+
+
+class DistributedEngineHandler(BaseHTTPRequestHandler):
+    model_kit = None
+    model_name = ""
+    rank = 0
+    default_template_args: dict[str, Any] = {}
+    active_distributed_request = False
+
+    def log_message(self, format_string: str, *args) -> None:
+        logger.info("%s - %s", self.address_string(), format_string % args)
+
+    def send_json(self, status_code: int, body: dict[str, Any]) -> None:
+        encoded_body = json.dumps(body).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded_body)))
+        self.end_headers()
+        self.wfile.write(encoded_body)
+
+    def send_error_json(self, status_code: int, message: str) -> None:
+        self.send_json(status_code, {"error": {"message": message}})
+
+    def send_pre_broadcast_error(self, status_code: int, message: str) -> None:
+        try:
+            self.send_error_json(status_code, message)
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning("Client disconnected before request was broadcast")
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            self.send_json(200, {"status": "ok", "rank": self.rank})
+            return
+        if self.path == "/v1/models":
+            self.send_json(
+                200,
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": self.model_name,
+                            "object": "model",
+                            "created": 0,
+                            "owned_by": "mlx-engine",
+                        }
+                    ],
+                },
+            )
+            return
+        self.send_error_json(404, "Not found")
+
+    def do_POST(self) -> None:
+        if self.path != "/v1/chat/completions":
+            self.send_error_json(404, "Not found")
+            return
+
+        content_length = self.headers.get("Content-Length")
+        if content_length is None:
+            self.send_error_json(400, "Missing Content-Length")
+            return
+
+        try:
+            raw_body = self.rfile.read(int(content_length))
+            body = json.loads(raw_body.decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ValueError("Request body must be a JSON object")
+            request = build_generation_request(
+                self.model_kit,
+                body,
+                self.model_name,
+                self.default_template_args,
+            )
+        except Exception as caught_error:
+            logger.exception("Request failed before broadcast")
+            self.send_pre_broadcast_error(400, str(caught_error))
+            return
+
+        try:
+            share_object(self.rank, request)
+        except Exception:
+            logger.exception("Request broadcast failed")
+            exit_after_distributed_error("Request broadcast failed")
+
+        completed_request = False
+        DistributedEngineHandler.active_distributed_request = True
+        try:
+            if request["stream"] is True:
+                self.handle_streaming_request(request)
+            else:
+                self.handle_non_streaming_request(request)
+            completed_request = True
+        except Exception:
+            logger.exception("Request failed after broadcast")
+            exit_after_distributed_error("Post-broadcast request handling failed")
+        finally:
+            if completed_request:
+                DistributedEngineHandler.active_distributed_request = False
+
+    def handle_non_streaming_request(self, request: dict[str, Any]) -> None:
+        text_parts = []
+        finish_reason = "stop"
+        try:
+            for text, next_finish_reason in run_generation_request(self.model_kit, request):
+                text_parts.append(text)
+                if next_finish_reason is not None:
+                    finish_reason = next_finish_reason
+        except Exception:
+            logger.exception("Generation failed")
+            exit_after_distributed_error("Generation failed")
+
+        try:
+            self.send_json(
+                200,
+                {
+                    "id": request["request_id"],
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": request["model"],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "".join(text_parts),
+                            },
+                            "finish_reason": finish_reason,
+                        }
+                    ],
+                },
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning("Client disconnected after non-streaming generation completed")
+
+    def write_sse(self, body: dict[str, Any]) -> None:
+        self.wfile.write(f"data: {json.dumps(body)}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def handle_streaming_request(self, request: dict[str, Any]) -> None:
+        client_connected = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning("Client disconnected before streaming generation began")
+            client_connected = False
+
+        finish_reason = "stop"
+        try:
+            for text, next_finish_reason in run_generation_request(self.model_kit, request):
+                if next_finish_reason is not None:
+                    finish_reason = next_finish_reason
+                if len(text) == 0:
+                    continue
+                if client_connected:
+                    try:
+                        self.write_sse(
+                            {
+                                "id": request["request_id"],
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": request["model"],
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": text},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
+                    except (BrokenPipeError, ConnectionResetError):
+                        logger.warning("Client disconnected during streaming generation; draining request")
+                        client_connected = False
+        except Exception:
+            logger.exception("Generation failed")
+            exit_after_distributed_error("Generation failed")
+
+        if client_connected:
+            try:
+                self.write_sse(
+                    {
+                        "id": request["request_id"],
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": request["model"],
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                    }
+                )
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                logger.warning("Client disconnected after streaming generation completed")
+
+
+def run_worker_loop(rank: int, model_kit) -> None:
+    logger.info("Rank %s waiting for rank 0 requests", rank)
+    while True:
+        request = share_object(rank, None)
+        if request is None:
+            continue
+        if request.get("type") == "shutdown":
+            return
+        for _text, _finish_reason in run_generation_request(model_kit, request):
+            pass
+
+
+def parse_chat_template_args(value: str) -> dict[str, Any]:
+    parsed_value = json.loads(value)
+    if not isinstance(parsed_value, dict):
+        raise ValueError("--chat-template-args must be a JSON object")
+    return parsed_value
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Minimal distributed mlx-engine server.")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--max-kv-size", type=int, default=4096)
+    parser.add_argument("--prefill-step-size", type=int, default=None)
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--chat-template-args", default="{}")
+    args = parser.parse_args()
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+    )
+    default_template_args = parse_chat_template_args(args.chat_template_args)
+
+    group = mx.distributed.init()
+    rank = group.rank()
+    logger.info("Starting distributed mlx-engine rank %s/%s", rank, group.size())
+
+    model_kit = load_model(
+        args.model,
+        max_kv_size=args.max_kv_size,
+        max_seq_nums=1,
+        trust_remote_code=args.trust_remote_code,
+        prefill_step_size=args.prefill_step_size,
+        distributed=True,
+        distributed_group=group,
+    )
+
+    if rank == 0:
+        DistributedEngineHandler.model_kit = model_kit
+        DistributedEngineHandler.model_name = args.model
+        DistributedEngineHandler.rank = rank
+        DistributedEngineHandler.default_template_args = default_template_args
+        try:
+            server = HTTPServer((args.host, args.port), DistributedEngineHandler)
+            logger.info("Serving rank 0 on http://%s:%s", args.host, args.port)
+            server.serve_forever()
+        finally:
+            if DistributedEngineHandler.active_distributed_request:
+                logger.warning(
+                    "Skipping worker shutdown broadcast because a distributed request is active"
+                )
+            else:
+                shutdown_workers(rank)
+            unload(model_kit)
+    else:
+        try:
+            run_worker_loop(rank, model_kit)
+        finally:
+            unload(model_kit)
+
+
+if __name__ == "__main__":
+    main()
