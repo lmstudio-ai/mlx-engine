@@ -3,7 +3,7 @@ from typing import Any, Final, Literal, TypeAlias
 
 
 # LMCache defaults to 256-token external chunks, and MLX KV caches allocate in
-# 256-token steps. This is a spill-cache chunk size, not vLLM's KV page size.
+# 256-token steps. This is a cache store chunk size, not vLLM's KV page size.
 DEFAULT_PREFIX_CHUNK_SIZE = 256
 RecordKind: TypeAlias = Literal["kv_delta", "rotating_delta", "state_checkpoint"]
 RECORD_KIND_KV_DELTA: Final[RecordKind] = "kv_delta"
@@ -29,7 +29,7 @@ class PromptImageSpan:
 
 
 @dataclass
-class SpilledPromptState:
+class StoredPromptState:
     cached_prefix_len: int
     prompt_cache: list[Any]
 
@@ -62,7 +62,7 @@ class PromptCacheLayout:
 class PromptCacheRecordMetadata:
     """Index metadata for one physical safetensor record.
 
-    A record stores one payload kind for one chunk, usually covering one or more
+    A record stores one record kind for one chunk, usually covering one or more
     cache layers.
     """
 
@@ -89,8 +89,8 @@ class PendingPromptCacheSave:
 
 
 @dataclass
-class PromptSpillCacheStats:
-    """Committed spill-cache accounting used by diagnostics and smokes.
+class PromptCacheStoreStats:
+    """Committed cache store accounting used by diagnostics and smokes.
 
     `hits` count restored chunks. `misses` count eligible chunks that could
     not be restored.

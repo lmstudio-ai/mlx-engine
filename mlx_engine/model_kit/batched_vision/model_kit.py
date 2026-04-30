@@ -19,12 +19,13 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 )
 from mlx_engine.model_kit.batched_vision.batch_generator import (
     BatchGenerator as LocalVlmBatchGenerator,
+    use_generation_stream,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     VlmPromptCacheCoordinator,
 )
-from mlx_engine.model_kit.batched_vision.prompt_cache.spill_cache import (
-    VlmPromptSpillCache,
+from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
+    VlmPromptCacheStore,
 )
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     build_cached_prompt_kwargs,
@@ -53,8 +54,8 @@ class BatchedVisionModelKit:
     """
     VLM batching backend built on a local mlx-vlm-style batcher.
 
-    V1 deliberately keeps the scope narrow: a single worker thread owns the
-    local VLM batcher and handles both text-only and basic image requests.
+    A single worker thread owns the local VLM batcher and handles
+    both text-only and basic image requests.
     """
 
     model = None
@@ -90,14 +91,14 @@ class BatchedVisionModelKit:
             model_path, trust_remote_code=trust_remote_code
         )
         self.model_type = self.config.get("model_type")
-        self._prompt_spill_cache = VlmPromptSpillCache(max_kv_size=max_kv_size)
+        self._prompt_cache_store = VlmPromptCacheStore(max_kv_size=max_kv_size)
         self._cache_io_thread = PromptCacheIOThread(
-            spill_cache=self._prompt_spill_cache,
+            cache_store=self._prompt_cache_store,
             generation_queue=self._requests,
             prepare_request=self._prepare_request_for_insert,
         )
         self._prompt_cache_coordinator = VlmPromptCacheCoordinator(
-            self._prompt_spill_cache,
+            self._prompt_cache_store,
             self._cache_io_thread.enqueue_save,
         )
 
@@ -249,13 +250,19 @@ class BatchedVisionModelKit:
             sys.exit(1)
 
     def _make_batch_generator(self) -> LocalVlmBatchGenerator:
+        vlm_tokenizer = (
+            self.processor.tokenizer
+            if hasattr(self.processor, "tokenizer")
+            else self.processor
+        )
+        vlm_tokenizer.stopping_criteria.add_eos_token_ids(
+            list(self.tokenizer.eos_token_ids)
+        )
         return LocalVlmBatchGenerator(
             getattr(self.model, "language_model", self.model),
-            self.processor,
+            vlm_tokenizer.stopping_criteria,
             max_tokens=10000000,
-            stop_tokens=list(self.tokenizer.eos_token_ids),
             completion_batch_size=self._max_seq_nums,
-            prefill_batch_size=1,
             prefill_step_size=(
                 None
                 if getattr(self.model, "no_chunked_prefill", False)
@@ -299,28 +306,23 @@ class BatchedVisionModelKit:
         prompt_kwargs = None
         insert_kwargs = {}
         prompt_progress = 0
-        if restored is not None:
-            prompt_input_ids = full_prompt_input_ids[restored.cached_prefix_len :]
-            prompt_kwargs = build_cached_prompt_kwargs(
-                self.model,
-                prepared_prompt,
-                restored.cached_prefix_len,
-                restored.rope_deltas,
-            )
-            prompt_progress = restored.cached_prefix_len
-            insert_kwargs = {
-                "caches": [restored.prompt_cache],
-                "all_tokens": [full_prompt_input_ids[: restored.cached_prefix_len]],
-                "decode_states": [
-                    (
-                        {"rope_deltas": restored.rope_deltas}
-                        if restored.rope_deltas is not None
-                        else None
-                    )
-                ],
-            }
-        else:
-            prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
+        with use_generation_stream():
+            if restored is not None:
+                prompt_input_ids = full_prompt_input_ids[restored.cached_prefix_len :]
+                prompt_kwargs = build_cached_prompt_kwargs(
+                    self.model,
+                    prepared_prompt,
+                    restored.cached_prefix_len,
+                    restored.rope_deltas,
+                )
+                prompt_progress = restored.cached_prefix_len
+                insert_kwargs = {
+                    "caches": [restored.prompt_cache],
+                    "all_tokens": [full_prompt_input_ids[: restored.cached_prefix_len]],
+                    "rope_deltas": [restored.rope_deltas],
+                }
+            else:
+                prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
 
         cache_save_points = self._prompt_cache_coordinator.save_points_after(
             prompt_input_ids=full_prompt_input_ids,
@@ -524,20 +526,22 @@ class BatchedVisionModelKit:
                     response.prompt_cache is not None
                     and response.all_tokens is not None
                 ):
-                    spill_cap_update = (
-                        self._prompt_spill_cache.spill_cap_update_from_completed_cache(
+                    cache_store_budget_update = (
+                        self._prompt_cache_store.budget_update_from_completed_cache(
                             response.prompt_cache
                         )
                     )
-                    self._cache_io_thread.enqueue_spill_cap_update(spill_cap_update)
+                    self._cache_io_thread.enqueue_cache_store_budget_update(
+                        cache_store_budget_update
+                    )
                     self._prompt_cache_coordinator.store_hot_prompt_cache(
                         prompt_input_ids=response.all_tokens,
                         image_spans=result.image_spans,
                         prompt_cache=response.prompt_cache,
                         rope_deltas=(
                             None
-                            if response.decode_state is None
-                            else response.decode_state.get("rope_deltas")
+                            if response.rope_deltas is None
+                            else response.rope_deltas
                         ),
                     )
                 result.rqueue.put(None)

@@ -7,14 +7,13 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
     build_prefix_cache_chunks,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.disk_budget import (
-    final_spill_cache_cap_bytes,
-    provisional_spill_cache_cap_bytes,
+    final_cache_store_budget_bytes,
+    provisional_cache_store_budget_bytes,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.records import (
     assemble_prompt_cache_chunks,
     make_prompt_cache_layout,
-    materialize_prompt_state,
-    prepare_prompt_cache_payload,
+    prepare_prompt_cache_records_for_chunk,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.restore_planner import (
     PromptCacheRestorePlanner,
@@ -26,17 +25,17 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptPrefixChunk,
     PreparedPromptRecord,
     PendingPromptCacheSave,
-    PromptSpillCacheStats,
+    PromptCacheStoreStats,
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_WRITE_ORDER,
     RecordKind,
-    SpilledPromptState,
+    StoredPromptState,
     make_record_key,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.blob_store import (
-    AnonymousSafetensorBlobStore,
+    TemporarySafetensorBlobStore,
 )
 from mlx.utils import tree_flatten
 
@@ -48,12 +47,12 @@ _RECORD_RETENTION_PRIORITY: tuple[RecordKind, ...] = (
 )
 
 
-class VlmPromptSpillCache:
-    """Cache-I/O-thread-owned index and anonymous safetensor blob store.
+class VlmPromptCacheStore:
+    """Cache-I/O-thread-owned index and temporary safetensor blob store.
 
     Mutable index/blob-store operations run on the prompt-cache I/O thread. The
-    generation thread may prepare immutable save payloads and make advisory cap
-    checks, but it must not mutate committed spill state.
+    generation thread may prepare immutable cache records and make advisory
+    budget checks, but it must not mutate committed cache store state.
 
     Invariants:
     - A selected restore chain is loaded without interleaved eviction.
@@ -65,14 +64,14 @@ class VlmPromptSpillCache:
         base_dir = Path("/tmp")
         self._base_dir = base_dir
         self._max_kv_size = max_kv_size
-        self._blob_store = AnonymousSafetensorBlobStore(base_dir)
-        self._empirical_cap_set = False
+        self._blob_store = TemporarySafetensorBlobStore(base_dir)
+        self._empirical_budget_set = False
         self._layout: PromptCacheLayout | None = None
         self._record_metadata_by_key: dict[str, PromptCacheRecordMetadata] = {}
         self._key_sizes: dict[str, int] = {}
         self._lru_keys: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
-        self._max_cache_bytes = provisional_spill_cache_cap_bytes(base_dir)
+        self._max_cache_store_bytes = provisional_cache_store_budget_bytes(base_dir)
         self._cache_hits = 0
         self._cache_misses = 0
         self._cache_evictions = 0
@@ -81,7 +80,7 @@ class VlmPromptSpillCache:
         self,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
-    ) -> SpilledPromptState | None:
+    ) -> StoredPromptState | None:
         """Load the longest matching cacheable prefix.
 
         The final prompt token stays uncached so generation has a suffix to
@@ -132,7 +131,7 @@ class VlmPromptSpillCache:
         cached_prefix_len: int,
         chunks: list[PromptPrefixChunk],
         record_keys_by_chunk_key: dict[str, list[str]],
-    ) -> SpilledPromptState:
+    ) -> StoredPromptState:
         """Load a selected prompt-cache restore chain."""
         layout = self._layout
         assert layout is not None
@@ -155,7 +154,12 @@ class VlmPromptSpillCache:
         # Disk restores run on the prompt-cache I/O thread; decode consumes the
         # cache on the generation thread. Force assembled arrays now so no lazy
         # graph keeps a thread-local MLX stream from the restore worker.
-        materialize_prompt_state(prompt_cache)
+        mx.eval(
+            [
+                value
+                for _, value in tree_flatten([cache.state for cache in prompt_cache])
+            ]
+        )
 
         # Restore access refreshes exactly the records used by this chain.
         for record_key in self._ordered_record_keys_for_touch(
@@ -169,7 +173,7 @@ class VlmPromptSpillCache:
             miss_chunks=0,
         )
 
-        return SpilledPromptState(
+        return StoredPromptState(
             cached_prefix_len=cached_prefix_len,
             prompt_cache=prompt_cache,
         )
@@ -210,8 +214,8 @@ class VlmPromptSpillCache:
         return None
 
     def can_store_records(self) -> bool:
-        """Return False when the spill cache is intentionally hot-only."""
-        return self._max_cache_bytes != 0
+        """Return False when the cache store is intentionally hot-only."""
+        return self._max_cache_store_bytes != 0
 
     def prepare_save(
         self,
@@ -221,12 +225,12 @@ class VlmPromptSpillCache:
         prompt_cache: list[Any],
     ) -> PendingPromptCacheSave:
         """Prepare a cache save for the cache I/O thread."""
-        payload_cache, payload_kinds = prepare_prompt_cache_payload(
+        record_caches, record_kinds = prepare_prompt_cache_records_for_chunk(
             prompt_cache,
             chunk.start,
             chunk.end,
         )
-        layout = make_prompt_cache_layout(payload_cache, payload_kinds)
+        layout = make_prompt_cache_layout(record_caches, record_kinds)
         records = []
         for record_kind in RECORD_WRITE_ORDER:
             layer_indices = layout.layer_indices_by_kind.get(record_kind, [])
@@ -238,7 +242,7 @@ class VlmPromptSpillCache:
                     chunk_key=chunk.key,
                     record_kind=record_kind,
                     layer_indices=layer_indices,
-                    record_cache=[payload_cache[idx] for idx in layer_indices],
+                    record_cache=[record_caches[idx] for idx in layer_indices],
                 )
             )
 
@@ -248,25 +252,23 @@ class VlmPromptSpillCache:
             records=records,
         )
 
-    def spill_cap_update_from_completed_cache(
-        self, prompt_cache: list[Any]
-    ) -> int | None:
-        """Return the empirical spill cap update from a real completed cache."""
-        if self._empirical_cap_set:
+    def budget_update_from_completed_cache(self, prompt_cache: list[Any]) -> int | None:
+        """Return the empirical cache store budget from a completed cache."""
+        if self._empirical_budget_set:
             return None
 
-        return final_spill_cache_cap_bytes(
+        return final_cache_store_budget_bytes(
             self._base_dir,
             prompt_cache,
             self._max_kv_size,
         )
 
-    def commit_spill_cap_update(self, max_cache_bytes: int) -> None:
-        """Set the empirical cap and evict records from the cache I/O thread."""
-        if self._empirical_cap_set:
+    def commit_budget_update(self, max_cache_store_bytes: int) -> None:
+        """Set the empirical budget and evict records from the cache I/O thread."""
+        if self._empirical_budget_set:
             return
-        self._max_cache_bytes = max_cache_bytes
-        self._empirical_cap_set = True
+        self._max_cache_store_bytes = max_cache_store_bytes
+        self._empirical_budget_set = True
 
         self._evict_if_needed()
 
@@ -308,10 +310,10 @@ class VlmPromptSpillCache:
         finally:
             self._evict_if_needed()
 
-    def snapshot_stats(self) -> PromptSpillCacheStats:
+    def snapshot_stats(self) -> PromptCacheStoreStats:
         """Return best-effort diagnostics for smokes/debug output."""
         total_bytes = self._total_bytes
-        max_bytes = self._max_cache_bytes
+        max_bytes = self._max_cache_store_bytes
         entry_count = len(self._record_metadata_by_key)
         hits = self._cache_hits
         misses = self._cache_misses
@@ -338,7 +340,7 @@ class VlmPromptSpillCache:
                 for record_key in record_keys
             )
 
-        return PromptSpillCacheStats(
+        return PromptCacheStoreStats(
             total_bytes=total_bytes,
             max_bytes=max_bytes,
             entry_count=entry_count,
@@ -352,7 +354,7 @@ class VlmPromptSpillCache:
         )
 
     def close(self) -> None:
-        """Clear metadata and close the anonymous blob store."""
+        """Clear metadata and close the temporary blob store."""
         self._layout = None
         self._record_metadata_by_key.clear()
         self._key_sizes.clear()
@@ -433,7 +435,7 @@ class VlmPromptSpillCache:
         self._cache_misses += miss_chunks
 
     def _evict_if_needed(self) -> None:
-        while self._total_bytes > self._max_cache_bytes:
+        while self._total_bytes > self._max_cache_store_bytes:
             key_to_evict = next(iter(self._lru_keys), None)
             if key_to_evict is None:
                 break

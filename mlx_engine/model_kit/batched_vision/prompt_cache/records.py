@@ -1,3 +1,15 @@
+"""Prompt-cache record shaping and assembly.
+
+A record is the independently stored cache unit for one prompt chunk and one
+record kind, keyed as `(chunk_key, record_kind)`. One record may contain several
+model layers when those layers share the same storage strategy, such as KV
+deltas, rotating-window deltas, or exact state checkpoints.
+
+This file only shapes live MLX cache layers into record-sized cache objects and
+assembles loaded records back into a runtime prompt cache. The cache store owns
+the actual safetensor write/read/eviction work.
+"""
+
 from typing import Any
 
 import mlx.core as mx
@@ -10,53 +22,54 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     RecordKind,
 )
 from mlx_lm.models.cache import KVCache, RotatingKVCache
-from mlx.utils import tree_flatten
 
 
-def prepare_prompt_cache_payload(
+def prepare_prompt_cache_records_for_chunk(
     prompt_cache: list[Any],
     chunk_start: int,
     chunk_end: int,
 ) -> tuple[list[Any], list[RecordKind]]:
-    payload_cache = []
-    payload_kinds = []
+    """Convert live cache layers into record caches for one chunk."""
+    record_caches = []
+    record_kinds = []
     for cache in prompt_cache:
         record_kind = record_kind_for_prompt_cache(cache)
         if record_kind == RECORD_KIND_KV_DELTA:
-            payload_cache.append(_slice_kv_cache(cache, chunk_start, chunk_end))
+            record_caches.append(_slice_kv_cache(cache, chunk_start, chunk_end))
         elif record_kind == RECORD_KIND_ROTATING_DELTA:
-            payload_cache.append(
+            record_caches.append(
                 _slice_rotating_kv_cache(cache, chunk_start, chunk_end)
             )
         else:
             # Opaque array-state caches stay as exact boundary checkpoints for V1.
-            payload_cache.append(cache)
-        payload_kinds.append(record_kind)
+            record_caches.append(cache)
+        record_kinds.append(record_kind)
 
-    return payload_cache, payload_kinds
+    return record_caches, record_kinds
 
 
 def make_prompt_cache_layout(
-    payload_cache: list[Any],
-    payload_kinds: list[RecordKind],
+    record_caches: list[Any],
+    record_kinds: list[RecordKind],
 ) -> PromptCacheLayout:
+    """Describe how record kinds map back onto prompt-cache layers."""
     layer_indices_by_kind: dict[RecordKind, list[int]] = {}
     rotating_window_size = None
-    for layer_idx, record_kind in enumerate(payload_kinds):
+    for layer_idx, record_kind in enumerate(record_kinds):
         layer_indices_by_kind.setdefault(record_kind, []).append(layer_idx)
         if record_kind == RECORD_KIND_ROTATING_DELTA:
-            window_size = int(payload_cache[layer_idx].max_size)
+            window_size = int(record_caches[layer_idx].max_size)
             rotating_window_size = max(rotating_window_size or 0, window_size)
 
     return PromptCacheLayout(
-        layer_kinds=list(payload_kinds),
+        layer_kinds=list(record_kinds),
         layer_indices_by_kind=layer_indices_by_kind,
         rotating_window_size=rotating_window_size,
     )
 
 
 def record_kind_for_prompt_cache(cache: Any) -> RecordKind:
-    """Classify one live prompt-cache layer into its disk record kind."""
+    """Classify one live cache layer into its disk record kind."""
     cache_type = type(cache).__name__
     if cache_type == "KVCache":
         # mlx-vlm re-exports mlx-lm cache classes; keep this name-based so local
@@ -129,7 +142,7 @@ def assemble_prompt_cache_chunks(
     chunks: list[PromptPrefixChunk],
     layout: PromptCacheLayout,
 ) -> list[Any]:
-    """Rebuild one prompt cache from a loadable prefix chunk sequence."""
+    """Rebuild a runtime prompt cache from loaded chunk records."""
     if len(chunk_prompt_caches) == 1:
         return chunk_prompt_caches[0]
 
@@ -158,9 +171,3 @@ def assemble_prompt_cache_chunks(
             raise ValueError(f"unsupported prompt cache record kind: {record_kind}")
 
     return assembled
-
-
-def materialize_prompt_state(prompt_cache: list[Any]) -> None:
-    mx.eval(
-        [value for _, value in tree_flatten([cache.state for cache in prompt_cache])]
-    )

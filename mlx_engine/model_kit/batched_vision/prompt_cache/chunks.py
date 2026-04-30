@@ -1,3 +1,10 @@
+"""Prompt chunking helpers.
+
+A chunk is one reusable slice of a prompt prefix. We save cache records per
+chunk, then restore by replaying the ordered chunk chain whose tokens/images
+match the next request.
+"""
+
 import hashlib
 
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
@@ -13,7 +20,7 @@ def build_prefix_cache_chunks(
     chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
 ) -> list[PromptPrefixChunk]:
     """Return rolling-hash prompt chunks, growing chunks to avoid split images."""
-    chunk_ends = _build_prefix_cache_chunk_ends(
+    chunk_offsets = _build_prefix_cache_chunk_offsets(
         len(prompt_input_ids),
         image_spans,
         chunk_size,
@@ -22,17 +29,17 @@ def build_prefix_cache_chunks(
     chunks = []
 
     previous_chunk_end = 0
-    for chunk_end in chunk_ends:
+    for chunk_end in chunk_offsets:
         chunk_tokens = prompt_input_ids[previous_chunk_end:chunk_end]
         image_fingerprint = _image_fingerprint_for_chunk(
             image_spans,
             previous_chunk_end,
             chunk_end,
         )
-        payload = (
+        hash_input = (
             f"{prefix_hash}|{','.join(map(str, chunk_tokens))}|{image_fingerprint}"
         )
-        prefix_hash = hashlib.sha256(payload.encode()).hexdigest()
+        prefix_hash = hashlib.sha256(hash_input.encode()).hexdigest()
         chunk_key = prefix_hash
         chunks.append(
             PromptPrefixChunk(
@@ -64,12 +71,12 @@ def _image_fingerprint_for_chunk(
     return ",".join(image_hashes)
 
 
-def _build_prefix_cache_chunk_ends(
+def _build_prefix_cache_chunk_offsets(
     prompt_len: int,
     image_spans: list[PromptImageSpan],
     chunk_size: int,
 ) -> list[int]:
-    """Return disk-save chunk ends, treating chunk_size as a minimum."""
+    """Return prefix lengths where cache chunks should end."""
     sorted_image_spans = sorted(image_spans, key=lambda item: item.start)
     chunk_ends = []
     cursor = 0

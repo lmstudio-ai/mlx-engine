@@ -14,8 +14,8 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PendingPromptCacheSave,
     PromptImageSpan,
 )
-from mlx_engine.model_kit.batched_vision.prompt_cache.spill_cache import (
-    VlmPromptSpillCache,
+from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
+    VlmPromptCacheStore,
 )
 from mlx_lm.models.cache import can_trim_prompt_cache, trim_prompt_cache
 
@@ -42,7 +42,7 @@ class _HotPromptCacheEntry:
 
 
 class VlmPromptCacheCoordinator:
-    """Coordinates hot-cache reuse and cache-I/O-thread disk spill saves.
+    """Coordinates hot-cache reuse and cache-I/O-thread disk cache writes.
 
     The generation thread records the most recently completed runtime cache.
     Request preparation may consume that hot cache before falling back to disk.
@@ -50,12 +50,12 @@ class VlmPromptCacheCoordinator:
 
     def __init__(
         self,
-        spill_cache: VlmPromptSpillCache,
-        # Called after the generation thread prepares an immutable save payload.
+        cache_store: VlmPromptCacheStore,
+        # Called after the generation thread prepares immutable cache records.
         # The owner decides how to persist it, usually via cache I/O thread.
         enqueue_pending_save: Callable[[PendingPromptCacheSave], None],
     ):
-        self._spill_cache = spill_cache
+        self._cache_store = cache_store
         self._enqueue_pending_save = enqueue_pending_save
         self._hot_entry_lock = Lock()
         self._hot_entry: _HotPromptCacheEntry | None = None
@@ -82,14 +82,14 @@ class VlmPromptCacheCoordinator:
             return hot_restored
 
         try:
-            cached_state = self._spill_cache.restore_longest_prefix(
+            cached_state = self._cache_store.restore_longest_prefix(
                 prompt_input_ids,
                 image_spans,
             )
         except Exception:
-            # Spill restore is an optimization; generation can recompute on miss.
+            # Cache-store restore is an optimization; generation can recompute on miss.
             logger.debug(
-                "Prompt spill cache restore failed; treating it as a cache miss.",
+                "Prompt cache store restore failed; treating it as a cache miss.",
                 exc_info=True,
             )
             return None
@@ -145,7 +145,7 @@ class VlmPromptCacheCoordinator:
             prompt_cache: list[Any],
             snapshot_input_ids: list[int],
         ) -> None:
-            if not self._spill_cache.can_store_records():
+            if not self._cache_store.can_store_records():
                 return
             snapshot_input_ids = list(snapshot_input_ids)
             chunks = build_prefix_cache_chunks(
@@ -155,7 +155,7 @@ class VlmPromptCacheCoordinator:
             if not chunks:
                 return
 
-            pending_save = self._spill_cache.prepare_save(
+            pending_save = self._cache_store.prepare_save(
                 chunk=chunks[-1],
                 prefix_chunks=chunks,
                 prompt_cache=prompt_cache,

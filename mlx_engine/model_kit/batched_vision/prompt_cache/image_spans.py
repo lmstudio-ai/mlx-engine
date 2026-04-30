@@ -1,3 +1,10 @@
+"""Image-span helpers for prompt-cache reuse.
+
+An image span is the end-exclusive token range occupied by one image
+placeholder, plus a hash of the resized image bytes. Token ids alone are not
+enough: two prompts can have identical placeholder tokens but different images.
+"""
+
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
 
 

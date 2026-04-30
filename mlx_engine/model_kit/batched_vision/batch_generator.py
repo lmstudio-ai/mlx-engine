@@ -2,12 +2,10 @@
 
 The public insert/response shape intentionally mirrors the text batcher so
 `BatchedVisionModelKit` can re-enter generation with restored history. In this
-V1 implementation, the only extra decode-side payload we carry is
-`{"rope_deltas": ...}`.
+V1 implementation, the only extra decode-side payload we carry is RoPE deltas.
 """
 
 import contextlib
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
 
@@ -21,11 +19,9 @@ from mlx_vlm.generate import (
     DEFAULT_KV_GROUP_SIZE,
     DEFAULT_KV_QUANT_SCHEME,
     DEFAULT_MAX_TOKENS,
-    DEFAULT_PREFILL_BATCH_SIZE,
     DEFAULT_PREFILL_STEP_SIZE,
     _left_pad_prompts,
     _make_cache,
-    cache as vlm_cache,
     wired_limit,
 )
 
@@ -36,6 +32,13 @@ _generation_stream = mx.new_thread_local_stream(mx.default_device())
 PromptCacheSaveCallback = Callable[[list[Any], list[int]], None]
 
 
+@contextlib.contextmanager
+def use_generation_stream():
+    """Run MLX model work on the local batcher's generation stream."""
+    with mx.stream(_generation_stream):
+        yield
+
+
 @dataclass
 class _PendingSequence:
     uid: int
@@ -44,7 +47,7 @@ class _PendingSequence:
     sampler: Optional[Callable[[mx.array], mx.array]]
     cache: Optional[list[Any]]
     all_tokens: list[int]
-    decode_state: Optional[dict[str, Any]]
+    rope_deltas: Any | None
     prompt_kwargs: dict
     cache_save_points: list[int]
     prompt_cache_save_callback: Optional[PromptCacheSaveCallback]
@@ -89,23 +92,24 @@ def _normalize_rope_deltas(rope_deltas: Any) -> Any:
     return rope_deltas
 
 
-def _merge_rope_deltas_from_decode_states(
-    decode_states: list[Optional[dict[str, Any]]],
-) -> Any:
-    # V1 keeps prefill_batch_size at 1, so restored RoPE side state is
-    # single-request in practice.
-    if not decode_states or any(state is None for state in decode_states):
-        return None
+def _empty_rope_deltas_like(rope_deltas: Any, count: int) -> Any:
+    return mx.zeros((count, *rope_deltas.shape[1:]), dtype=rope_deltas.dtype)
 
-    rope_deltas = [
-        _normalize_rope_deltas(state.get("rope_deltas")) for state in decode_states
-    ]
-    if any(delta is None for delta in rope_deltas):
-        return None
 
-    if len(rope_deltas) == 1:
-        return rope_deltas[0]
-    return mx.concatenate(rope_deltas)
+def _extend_optional_rope_deltas(
+    rope_deltas: Any | None,
+    count: int,
+    other_rope_deltas: Any | None,
+    other_count: int,
+) -> Any | None:
+    if rope_deltas is None and other_rope_deltas is None:
+        return None
+    # Mixed Qwen/text batches need a per-row value; no side state means zero.
+    if rope_deltas is None:
+        rope_deltas = _empty_rope_deltas_like(other_rope_deltas, count)
+    if other_rope_deltas is None:
+        other_rope_deltas = _empty_rope_deltas_like(rope_deltas, other_count)
+    return mx.concatenate([rope_deltas, other_rope_deltas])
 
 
 def _sample_with_per_request_samplers(
@@ -134,7 +138,7 @@ class GenerationBatch:
         top_logprobs: Optional[list[tuple[int, float]]] = None
         prompt_cache: Optional[list[Any]] = None
         all_tokens: Optional[list[int]] = None
-        decode_state: Optional[dict[str, Any]] = None
+        rope_deltas: Any | None = None
 
     def __init__(
         self,
@@ -148,7 +152,7 @@ class GenerationBatch:
         max_tokens: list[int],
         top_logprobs_k: int = 0,
         all_tokens: Optional[list[list[int]]] = None,
-        decode_state: Optional[dict[str, Any]] = None,
+        rope_deltas: Any | None = None,
         cache_save_points: Optional[list[list[int]]] = None,
         prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
@@ -181,8 +185,7 @@ class GenerationBatch:
             else [[] for _ in uids]
         )
         self._cache_save_callbacks = [prompt_cache_save_callback for _ in uids]
-        if decode_state is not None:
-            self._rope_deltas = _normalize_rope_deltas(decode_state.get("rope_deltas"))
+        self._rope_deltas = _normalize_rope_deltas(rope_deltas)
 
     def __len__(self):
         return len(self.uids)
@@ -254,67 +257,70 @@ class GenerationBatch:
     def extract_cache(self, idx: int) -> list[Any]:
         return [cache.extract(idx) for cache in self.prompt_cache]
 
-    def extract_decode_state(self, idx: int) -> Optional[dict[str, Any]]:
+    def extract_rope_deltas(self, idx: int) -> Any | None:
         if self._rope_deltas is None:
             return None
-        # The local batcher still exposes decode_state for compatibility, but
-        # V1 only needs rope_deltas here.
-        return {
-            "rope_deltas": mx.contiguous(self._rope_deltas[idx : idx + 1]),
-        }
+        return mx.contiguous(self._rope_deltas[idx : idx + 1])
 
-    def extend(self, other: "GenerationBatch"):
-        self.uids.extend(other.uids)
-        self.prompt_cache = _extend_cache(self.prompt_cache, other.prompt_cache)
-        self.samplers.extend(other.samplers)
-        self.max_tokens.extend(other.max_tokens)
-        self._num_tokens.extend(other._num_tokens)
+    def append_prefilled_sequence(self, prefilled: "GenerationBatch"):
+        """Append the one sequence that just finished prompt prefill."""
+        count = len(self.uids)
+        prefilled_count = len(prefilled.uids)
+        self.uids.extend(prefilled.uids)
+        self.prompt_cache = _extend_cache(self.prompt_cache, prefilled.prompt_cache)
+        self.samplers.extend(prefilled.samplers)
+        self.max_tokens.extend(prefilled.max_tokens)
+        self._num_tokens.extend(prefilled._num_tokens)
 
         if self._current_tokens is None:
-            self._current_tokens = other._current_tokens
-            self._current_lps = other._current_lps
-        elif other._current_tokens is not None:
+            self._current_tokens = prefilled._current_tokens
+            self._current_lps = prefilled._current_lps
+        elif prefilled._current_tokens is not None:
             self._current_tokens = mx.concatenate(
-                [self._current_tokens, other._current_tokens]
+                [self._current_tokens, prefilled._current_tokens]
             )
-            if self._current_lps is not None and other._current_lps is not None:
+            if self._current_lps is not None and prefilled._current_lps is not None:
                 self._current_lps = mx.concatenate(
-                    [self._current_lps, other._current_lps]
+                    [self._current_lps, prefilled._current_lps]
                 )
 
         if self._next_tokens is None:
-            self._next_tokens = other._next_tokens
-            self._next_lps = other._next_lps
-            self._next_top_idx = other._next_top_idx
-            self._next_top_lp = other._next_top_lp
-        elif other._next_tokens is not None:
-            self._next_tokens = mx.concatenate([self._next_tokens, other._next_tokens])
-            if self._next_lps is not None and other._next_lps is not None:
-                self._next_lps = mx.concatenate([self._next_lps, other._next_lps])
+            self._next_tokens = prefilled._next_tokens
+            self._next_lps = prefilled._next_lps
+            self._next_top_idx = prefilled._next_top_idx
+            self._next_top_lp = prefilled._next_top_lp
+        elif prefilled._next_tokens is not None:
+            self._next_tokens = mx.concatenate(
+                [self._next_tokens, prefilled._next_tokens]
+            )
+            if self._next_lps is not None and prefilled._next_lps is not None:
+                self._next_lps = mx.concatenate([self._next_lps, prefilled._next_lps])
 
             if (
                 self._next_top_idx is not None
-                and other._next_top_idx is not None
-                and self._next_top_idx.shape[-1] == other._next_top_idx.shape[-1]
+                and prefilled._next_top_idx is not None
+                and self._next_top_idx.shape[-1] == prefilled._next_top_idx.shape[-1]
             ):
                 self._next_top_idx = mx.concatenate(
-                    [self._next_top_idx, other._next_top_idx]
+                    [self._next_top_idx, prefilled._next_top_idx]
                 )
                 self._next_top_lp = mx.concatenate(
-                    [self._next_top_lp, other._next_top_lp]
+                    [self._next_top_lp, prefilled._next_top_lp]
                 )
             else:
                 self._next_top_idx = None
                 self._next_top_lp = None
 
-        if self._rope_deltas is None:
-            self._rope_deltas = other._rope_deltas
-        elif other._rope_deltas is not None:
-            self._rope_deltas = mx.concatenate([self._rope_deltas, other._rope_deltas])
+        self._rope_deltas = _extend_optional_rope_deltas(
+            self._rope_deltas,
+            count,
+            prefilled._rope_deltas,
+            prefilled_count,
+        )
 
-        self.tokens.extend(other.tokens)
-        self._cache_save_points.extend(other._cache_save_points)
-        self._cache_save_callbacks.extend(other._cache_save_callbacks)
+        self.tokens.extend(prefilled.tokens)
+        self._cache_save_points.extend(prefilled._cache_save_points)
+        self._cache_save_callbacks.extend(prefilled._cache_save_callbacks)
 
     def filter(self, keep: list[int]):
         self.uids = [self.uids[idx] for idx in keep]
@@ -398,9 +404,7 @@ class GenerationBatch:
                     top_logprobs=top_lp,
                     prompt_cache=self.extract_cache(i) if finish_reason else None,
                     all_tokens=list(self.tokens[i]) if finish_reason else None,
-                    decode_state=(
-                        self.extract_decode_state(i) if finish_reason else None
-                    ),
+                    rope_deltas=self.extract_rope_deltas(i) if finish_reason else None,
                 )
             )
 
@@ -436,6 +440,8 @@ class GenerationBatch:
 
 
 class PromptProcessingBatch:
+    """One request being prefetched before it joins the decode batch."""
+
     @dataclass
     class Response:
         uid: int
@@ -446,89 +452,62 @@ class PromptProcessingBatch:
     def __init__(
         self,
         model: nn.Module,
-        uids: list[int],
-        input_ids: list[list[int]],
-        max_tokens: list[int],
-        samplers: list[Optional[Callable[[mx.array], mx.array]]],
+        uid: int,
+        input_ids: list[int],
+        max_tokens: int,
+        sampler: Optional[Callable[[mx.array], mx.array]],
         inputs_embeds: mx.array,
         prompt_kwargs: dict,
         prefill_step_size: Optional[int] = DEFAULT_PREFILL_STEP_SIZE,
         kv_bits=None,
         kv_group_size: int = DEFAULT_KV_GROUP_SIZE,
         kv_quant_scheme: str = DEFAULT_KV_QUANT_SCHEME,
-        caches: Optional[list[Optional[list[Any]]]] = None,
-        all_tokens: Optional[list[list[int]]] = None,
-        decode_states: Optional[list[Optional[dict[str, Any]]]] = None,
-        cache_save_points: Optional[list[list[int]]] = None,
+        cache: Optional[list[Any]] = None,
+        all_tokens: Optional[list[int]] = None,
+        rope_deltas: Any | None = None,
+        cache_save_points: Optional[list[int]] = None,
         prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
         self.model = model
         self._language_model = getattr(model, "language_model", model)
-        self.uids = uids
-        self.max_tokens = max_tokens
-        self.samplers = samplers
+        self.uids = [uid]
+        self.uid = uid
+        self.max_tokens = [max_tokens]
+        self.samplers = [sampler]
         self.prefill_step_size = prefill_step_size
 
-        lengths = [len(ids) for ids in input_ids]
-        max_length = max(lengths)
-        left_padding = [max_length - length for length in lengths]
-        self._total_prompt_tokens = sum(lengths)
-
-        self._input_ids = _left_pad_prompts(input_ids, max_length=max_length)
+        self._input_ids = _left_pad_prompts([input_ids], max_length=len(input_ids))
         self._inputs_embeds = inputs_embeds
         self._prompt_kwargs = prompt_kwargs
-        self._prompt_token_ids = [list(ids) for ids in input_ids]
-        self._all_tokens = (
-            [list(tokens) for tokens in all_tokens]
-            if all_tokens is not None
-            else [[] for _ in uids]
-        )
-        self._processed_prefix_lengths = [len(tokens) for tokens in self._all_tokens]
-        self._cache_save_points = (
-            [list(save_points) for save_points in cache_save_points]
-            if cache_save_points is not None
-            else [[] for _ in uids]
-        )
+        self._prompt_token_ids = list(input_ids)
+        self._all_tokens = list(all_tokens) if all_tokens is not None else []
+        self._processed_prefix_len = len(self._all_tokens)
+        self._cache_save_points = list(cache_save_points or [])
         self._prompt_cache_save_callback = prompt_cache_save_callback
-        self._rope_deltas = (
-            _merge_rope_deltas_from_decode_states(decode_states)
-            if decode_states is not None
-            else None
-        )
+        self._rope_deltas = _normalize_rope_deltas(rope_deltas)
 
-        if caches is None or all(seq_cache is None for seq_cache in caches):
+        if cache is None:
             self.prompt_cache = _make_cache(
                 model,
-                left_padding,
+                [0],
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 kv_quant_scheme=kv_quant_scheme,
             )
         else:
-            prepared_caches = [
-                seq_cache
-                if seq_cache is not None
-                else vlm_cache.make_prompt_cache(model)
-                for seq_cache in caches
-            ]
-            self.prompt_cache = _merge_caches(prepared_caches)
+            self.prompt_cache = _merge_caches([cache])
 
     def __len__(self):
         return len(self.uids)
 
     def progress_responses(self, *, end_of_prompt: bool) -> list[Response]:
+        total = len(self._all_tokens) + len(self._prompt_token_ids)
         return [
             self.Response(
-                uid,
-                (processed, len(prefix_tokens) + len(prompt_tokens)),
+                self.uid,
+                (self._processed_prefix_len, total),
                 end_of_prompt,
                 end_of_prompt,
-            )
-            for uid, processed, prefix_tokens, prompt_tokens in zip(
-                self.uids,
-                self._processed_prefix_lengths,
-                self._all_tokens,
-                self._prompt_token_ids,
             )
         ]
 
@@ -543,7 +522,7 @@ class PromptProcessingBatch:
         next_save_point = self._next_cache_save_point()
         if (
             next_save_point is not None
-            and next_save_point < self._processed_prefix_lengths[0] + remaining_tokens
+            and next_save_point < self._processed_prefix_len + remaining_tokens
         ):
             return True
 
@@ -557,7 +536,7 @@ class PromptProcessingBatch:
         n = min(self.prefill_step_size, remaining_tokens - 1)
         next_save_point = self._next_cache_save_point()
         if next_save_point is not None:
-            save_point_delta = next_save_point - self._processed_prefix_lengths[0]
+            save_point_delta = next_save_point - self._processed_prefix_len
             if 0 < save_point_delta < remaining_tokens:
                 n = min(n, save_point_delta)
 
@@ -571,38 +550,29 @@ class PromptProcessingBatch:
         mx.eval([c.state for c in self.prompt_cache])
         self._inputs_embeds = self._inputs_embeds[:, n:]
         self._input_ids = self._input_ids[:, n:]
-        self._processed_prefix_lengths = [
-            processed + n for processed in self._processed_prefix_lengths
-        ]
+        self._processed_prefix_len += n
         self._emit_cache_save_snapshots()
         mx.clear_cache()
         return n
 
     def _next_cache_save_point(self) -> Optional[int]:
-        if len(self.uids) != 1 or not self._cache_save_points:
-            return None
-
-        processed = self._processed_prefix_lengths[0]
-        for save_point in self._cache_save_points[0]:
+        processed = self._processed_prefix_len
+        for save_point in self._cache_save_points:
             if save_point > processed:
                 return save_point
         return None
 
     def _emit_cache_save_snapshots(self) -> None:
-        # V1 prompt-stage cache saves are single-request because mlx-engine
-        # creates this batcher with prefill_batch_size=1.
-        if self._prompt_cache_save_callback is None or len(self.uids) != 1:
+        if self._prompt_cache_save_callback is None:
             return
 
-        processed = self._processed_prefix_lengths[0]
-        save_points = self._cache_save_points[0]
+        processed = self._processed_prefix_len
+        save_points = self._cache_save_points
         while save_points and save_points[0] <= processed:
             save_point = save_points.pop(0)
             if save_point == processed:
-                suffix_len = processed - len(self._all_tokens[0])
-                snapshot_tokens = (
-                    self._all_tokens[0] + self._prompt_token_ids[0][:suffix_len]
-                )
+                suffix_len = processed - len(self._all_tokens)
+                snapshot_tokens = self._all_tokens + self._prompt_token_ids[:suffix_len]
                 self._prompt_cache_save_callback(
                     [
                         cache.extract(0) if hasattr(cache, "extract") else cache
@@ -621,13 +591,7 @@ class PromptProcessingBatch:
             inputs_embeds=self._inputs_embeds,
             **self._prompt_kwargs,
         )
-        self._processed_prefix_lengths = [
-            len(prefix_tokens) + len(prompt_tokens)
-            for prefix_tokens, prompt_tokens in zip(
-                self._all_tokens,
-                self._prompt_token_ids,
-            )
-        ]
+        self._processed_prefix_len = len(self._all_tokens) + len(self._prompt_token_ids)
         self._emit_cache_save_snapshots()
         prompt_responses = self.progress_responses(end_of_prompt=True)
         logits = output.logits if hasattr(output, "logits") else output
@@ -649,20 +613,9 @@ class PromptProcessingBatch:
             stop_criteria=stop_criteria,
             max_tokens=list(self.max_tokens),
             top_logprobs_k=top_logprobs_k,
-            all_tokens=[
-                prefix + prompt_tokens
-                for prefix, prompt_tokens in zip(
-                    self._all_tokens, self._prompt_token_ids
-                )
-            ],
-            decode_state=(
-                {"rope_deltas": self._rope_deltas}
-                if self._rope_deltas is not None
-                else None
-            ),
-            cache_save_points=[
-                list(save_points) for save_points in self._cache_save_points
-            ],
+            all_tokens=[self._all_tokens + self._prompt_token_ids],
+            rope_deltas=self._rope_deltas,
+            cache_save_points=[list(self._cache_save_points)],
             prompt_cache_save_callback=self._prompt_cache_save_callback,
         )
         gen_batch._next_lps = logprobs[mx.arange(first_tokens.shape[0]), first_tokens]
@@ -686,21 +639,17 @@ class PromptProcessingBatch:
         self.prompt_cache = []
         return gen_batch, prompt_responses
 
-    @property
-    def total_prompt_tokens(self):
-        return self._total_prompt_tokens
-
 
 class BatchGenerator:
+    """MLX-VLM-style continuous batcher with single-request prompt prefill."""
+
     def __init__(
         self,
         model,
-        processor,
+        stop_criteria,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        stop_tokens: Optional[set] = None,
         sampler: Optional[Callable[[mx.array], mx.array]] = None,
         completion_batch_size: int = DEFAULT_COMPLETION_BATCH_SIZE,
-        prefill_batch_size: int = DEFAULT_PREFILL_BATCH_SIZE,
         prefill_step_size: Optional[int] = DEFAULT_PREFILL_STEP_SIZE,
         kv_bits=None,
         kv_group_size: int = DEFAULT_KV_GROUP_SIZE,
@@ -709,28 +658,19 @@ class BatchGenerator:
     ):
         self.model = model
         self.max_tokens = max_tokens
-        self.processor = processor
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.kv_quant_scheme = kv_quant_scheme
         self.top_logprobs_k = top_logprobs_k
-        self.tokenizer = (
-            processor.tokenizer if hasattr(processor, "tokenizer") else processor
-        )
+        self.stop_criteria = stop_criteria
         self.sampler = sampler or (lambda x: mx.argmax(x, axis=-1))
         self.uid_count = 0
         self.prefill_step_size = prefill_step_size
-        self.prefill_batch_size = prefill_batch_size
         self.completion_batch_size = completion_batch_size
-
-        self.tokenizer.stopping_criteria.add_eos_token_ids(stop_tokens)
 
         self._prompt_batch: Optional[PromptProcessingBatch] = None
         self._unprocessed_sequences: list[_PendingSequence] = []
 
-        self._prompt_tokens_counter = 0
-        self._prompt_time_counter = 0
-        self._gen_tokens_counter = 0
         self._steps_counter = 0
 
         self._wire_stack = contextlib.ExitStack()
@@ -738,7 +678,7 @@ class BatchGenerator:
         self._generation_batch = GenerationBatch.empty(
             self.model,
             self.sampler,
-            self.tokenizer.stopping_criteria,
+            self.stop_criteria,
             top_logprobs_k=self.top_logprobs_k,
         )
 
@@ -756,14 +696,12 @@ class BatchGenerator:
         max_tokens: Union[list[int], int, None] = None,
         caches: Optional[list[Optional[list[Any]]]] = None,
         all_tokens: Optional[list[list[int]]] = None,
-        decode_states: Optional[list[Optional[dict[str, Any]]]] = None,
+        rope_deltas: Optional[list[Any | None]] = None,
         samplers: Optional[list[Optional[Callable[[mx.array], mx.array]]]] = None,
         prompt_kwargs: Optional[list[dict]] = None,
         cache_save_points: Optional[list[list[int]]] = None,
         prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
-        # Keep the mlx-lm-style decode_states interface, but the only supported
-        # payload today is {"rope_deltas": ...}.
         if max_tokens is None or isinstance(max_tokens, int):
             max_tokens = [max_tokens or self.max_tokens] * len(prompts)
 
@@ -771,8 +709,8 @@ class BatchGenerator:
             caches = [None] * len(prompts)
         if all_tokens is None:
             all_tokens = [[] for _ in prompts]
-        if decode_states is None:
-            decode_states = [None] * len(prompts)
+        if rope_deltas is None:
+            rope_deltas = [None] * len(prompts)
         if samplers is None:
             samplers = [None] * len(prompts)
         if prompt_kwargs is None:
@@ -781,12 +719,12 @@ class BatchGenerator:
             cache_save_points = [[] for _ in prompts]
 
         uids = []
-        for p, m, c, at, ds, s, kw, save_points in zip(
+        for p, m, c, at, rd, s, kw, save_points in zip(
             prompts,
             max_tokens,
             caches,
             all_tokens,
-            decode_states,
+            rope_deltas,
             samplers,
             prompt_kwargs,
             cache_save_points,
@@ -799,7 +737,7 @@ class BatchGenerator:
                     sampler=s,
                     cache=c,
                     all_tokens=at,
-                    decode_state=ds,
+                    rope_deltas=rd,
                     prompt_kwargs=kw,
                     cache_save_points=save_points,
                     prompt_cache_save_callback=prompt_cache_save_callback,
@@ -846,7 +784,6 @@ class BatchGenerator:
 
         if len(self._generation_batch) > 0:
             generation_responses = self._generation_batch.next()
-            self._gen_tokens_counter += len(generation_responses)
             self._steps_counter += 1
             if self._steps_counter % 512 == 0:
                 mx.clear_cache()
@@ -856,108 +793,68 @@ class BatchGenerator:
 
         if self._prompt_batch is not None:
             if self._prompt_batch.needs_processing():
-                tic = time.perf_counter()
-                n = self._prompt_batch.prompt_step()
-                self._prompt_time_counter += time.perf_counter() - tic
-                self._prompt_tokens_counter += n
+                self._prompt_batch.prompt_step()
                 prompt_responses = self._prompt_batch.progress_responses(
                     end_of_prompt=False
                 )
                 return prompt_responses, generation_responses
 
-            tic = time.perf_counter()
             gen_batch, prompt_responses = self._prompt_batch.generate(
                 self.sampler,
-                self.tokenizer.stopping_criteria,
+                self.stop_criteria,
                 top_logprobs_k=self.top_logprobs_k,
             )
-            self._prompt_time_counter += time.perf_counter() - tic
-            self._generation_batch.extend(gen_batch)
+            self._generation_batch.append_prefilled_sequence(gen_batch)
             self._prompt_batch = None
             mx.clear_cache()
             return prompt_responses, generation_responses
 
         num_active = len(self._generation_batch)
         num_to_add = self.completion_batch_size - num_active
-        if self._unprocessed_sequences and num_to_add >= self.prefill_batch_size:
-            n = min(self.prefill_batch_size, len(self._unprocessed_sequences))
-            sequences = self._unprocessed_sequences[:n]
-            self._unprocessed_sequences = self._unprocessed_sequences[n:]
+        if self._unprocessed_sequences and num_to_add >= 1:
+            sequence = self._unprocessed_sequences.pop(0)
 
-            uids = [sequence.uid for sequence in sequences]
-            input_ids = [sequence.prompt for sequence in sequences]
-            max_tokens_list = [sequence.max_tokens for sequence in sequences]
-            samplers_list = [sequence.sampler for sequence in sequences]
-            caches_list = [sequence.cache for sequence in sequences]
-            all_tokens_list = [sequence.all_tokens for sequence in sequences]
-            decode_states_list = [sequence.decode_state for sequence in sequences]
-            prompt_kwargs_list = [sequence.prompt_kwargs for sequence in sequences]
-            cache_save_points_list = [
-                sequence.cache_save_points for sequence in sequences
-            ]
-            prompt_cache_save_callback = sequences[0].prompt_cache_save_callback
-
-            inputs_embeds = None
-            merged_kwargs = {}
-            for kw in prompt_kwargs_list:
-                if kw:
-                    inputs_embeds = kw.get("inputs_embeds", inputs_embeds)
-                    merged_kwargs = {
-                        key: value
-                        for key, value in kw.items()
-                        if key != "inputs_embeds"
-                    }
-                    break
+            inputs_embeds = sequence.prompt_kwargs.get("inputs_embeds")
+            prompt_kwargs = {
+                key: value
+                for key, value in sequence.prompt_kwargs.items()
+                if key != "inputs_embeds"
+            }
 
             if inputs_embeds is None:
                 raise ValueError("inputs_embeds is required")
 
-            batch_size = len(uids)
-            batch_major_kwargs = {"visual_pos_masks", "per_layer_inputs"}
-            for key, value in merged_kwargs.items():
-                if (
-                    key in batch_major_kwargs
-                    and isinstance(value, mx.array)
-                    and value.ndim > 0
-                ):
-                    merged_kwargs[key] = value[:batch_size]
-
             self._prompt_batch = PromptProcessingBatch(
                 model=self.model,
-                uids=uids,
-                input_ids=input_ids,
-                max_tokens=max_tokens_list,
-                samplers=samplers_list,
+                uid=sequence.uid,
+                input_ids=sequence.prompt,
+                max_tokens=sequence.max_tokens,
+                sampler=sequence.sampler,
                 inputs_embeds=inputs_embeds,
-                prompt_kwargs=merged_kwargs,
+                prompt_kwargs=prompt_kwargs,
                 prefill_step_size=self.prefill_step_size,
                 kv_bits=self.kv_bits,
                 kv_group_size=self.kv_group_size,
                 kv_quant_scheme=self.kv_quant_scheme,
-                caches=caches_list,
-                all_tokens=all_tokens_list,
-                decode_states=decode_states_list,
-                cache_save_points=cache_save_points_list,
-                prompt_cache_save_callback=prompt_cache_save_callback,
+                cache=sequence.cache,
+                all_tokens=sequence.all_tokens,
+                rope_deltas=sequence.rope_deltas,
+                cache_save_points=sequence.cache_save_points,
+                prompt_cache_save_callback=sequence.prompt_cache_save_callback,
             )
-            self._prompt_tokens_counter += self._prompt_batch.total_prompt_tokens
 
             if self._prompt_batch.needs_processing():
-                tic = time.perf_counter()
-                n = self._prompt_batch.prompt_step()
-                self._prompt_time_counter += time.perf_counter() - tic
+                self._prompt_batch.prompt_step()
                 prompt_responses = self._prompt_batch.progress_responses(
                     end_of_prompt=False
                 )
             else:
-                tic = time.perf_counter()
                 gen_batch, prompt_responses = self._prompt_batch.generate(
                     self.sampler,
-                    self.tokenizer.stopping_criteria,
+                    self.stop_criteria,
                     top_logprobs_k=self.top_logprobs_k,
                 )
-                self._prompt_time_counter += time.perf_counter() - tic
-                self._generation_batch.extend(gen_batch)
+                self._generation_batch.append_prefilled_sequence(gen_batch)
                 self._prompt_batch = None
                 mx.clear_cache()
 

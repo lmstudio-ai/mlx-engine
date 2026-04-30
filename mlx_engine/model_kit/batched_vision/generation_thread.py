@@ -16,8 +16,8 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     RestoredPromptCache,
 )
 from mlx_engine.model_kit.batched_vision.prompt_inputs import PreparedPrompt
-from mlx_engine.model_kit.batched_vision.prompt_cache.spill_cache import (
-    VlmPromptSpillCache,
+from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
+    VlmPromptCacheStore,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PendingPromptCacheSave,
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 _RESTORE_JOB_PRIORITY = 0
-_SPILL_CAP_UPDATE_JOB_PRIORITY = 1
+_CACHE_STORE_BUDGET_UPDATE_JOB_PRIORITY = 1
 _SAVE_JOB_PRIORITY = 2
 _SHUTDOWN_JOB_PRIORITY = -1
 
@@ -63,8 +63,8 @@ class SaveJob:
 
 
 @dataclass
-class SpillCapUpdateJob:
-    max_cache_bytes: int
+class CacheStoreBudgetUpdateJob:
+    max_cache_store_bytes: int
 
 
 @dataclass
@@ -93,16 +93,16 @@ class GenerationThreadState:
 
 
 class PromptCacheIOThread:
-    """Runs background restore prep and blocking spill-cache commits."""
+    """Runs background restore prep and blocking cache store commits."""
 
     def __init__(
         self,
         *,
-        spill_cache: VlmPromptSpillCache,
+        cache_store: VlmPromptCacheStore,
         generation_queue: Queue,
         prepare_request: Callable[[GenerationRequest], PreparedInsert],
     ):
-        self._spill_cache = spill_cache
+        self._cache_store = cache_store
         self._generation_queue = generation_queue
         self._prepare_request = prepare_request
         self._queue = PriorityQueue()
@@ -119,7 +119,7 @@ class PromptCacheIOThread:
             return
         self._closed.set()
         if self._thread is None:
-            self._close_spill_cache()
+            self._close_cache_store()
             return
         self._enqueue(_SHUTDOWN_JOB_PRIORITY, None)
         self._thread.join()
@@ -131,25 +131,27 @@ class PromptCacheIOThread:
         # The generation thread already prepared arrays; this thread does disk I/O.
         self._enqueue(_SAVE_JOB_PRIORITY, SaveJob(pending_save))
 
-    def enqueue_spill_cap_update(self, max_cache_bytes: int | None) -> None:
-        if max_cache_bytes is None:
+    def enqueue_cache_store_budget_update(
+        self, max_cache_store_bytes: int | None
+    ) -> None:
+        if max_cache_store_bytes is None:
             return
-        # Cap changes can evict blob-store records, so keep them on this thread.
+        # Budget changes can evict blob-store records, so keep them on this thread.
         self._enqueue(
-            _SPILL_CAP_UPDATE_JOB_PRIORITY,
-            SpillCapUpdateJob(max_cache_bytes),
+            _CACHE_STORE_BUDGET_UPDATE_JOB_PRIORITY,
+            CacheStoreBudgetUpdateJob(max_cache_store_bytes),
         )
 
     def _enqueue(self, priority: int, job: Any) -> None:
         self._queue.put((priority, next(self._sequence), job))
 
-    def _close_spill_cache(self) -> None:
-        self._spill_cache.close()
+    def _close_cache_store(self) -> None:
+        self._cache_store.close()
 
     def _discard_queued_jobs(self) -> None:
         while True:
             try:
-                # Dropped spill jobs only hold immutable arrays or caps.
+                # Dropped cache store jobs only hold immutable arrays or budgets.
                 self._queue.get_nowait()
             except QueueEmpty:
                 return
@@ -159,7 +161,7 @@ class PromptCacheIOThread:
             _, _, job = self._queue.get()
             if job is None:
                 self._discard_queued_jobs()
-                self._close_spill_cache()
+                self._close_cache_store()
                 return
 
             if isinstance(job, RestoreJob):
@@ -174,7 +176,7 @@ class PromptCacheIOThread:
 
             if isinstance(job, SaveJob):
                 try:
-                    self._spill_cache.commit_pending_save(job.pending_save)
+                    self._cache_store.commit_pending_save(job.pending_save)
                 except Exception:
                     logger.error(
                         "Failed to commit pending prompt cache save:\n%s",
@@ -182,11 +184,11 @@ class PromptCacheIOThread:
                     )
                 continue
 
-            if isinstance(job, SpillCapUpdateJob):
+            if isinstance(job, CacheStoreBudgetUpdateJob):
                 try:
-                    self._spill_cache.commit_spill_cap_update(job.max_cache_bytes)
+                    self._cache_store.commit_budget_update(job.max_cache_store_bytes)
                 except Exception:
                     logger.error(
-                        "Failed to commit prompt spill cache cap:\n%s",
+                        "Failed to commit prompt cache store budget:\n%s",
                         traceback.format_exc(),
                     )

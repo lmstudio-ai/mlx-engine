@@ -35,7 +35,7 @@ def prepare_prompt_inputs(
             image_spans=[],
         )
 
-    # Keep image decode and prompt prep on the worker thread for now.
+    # Keep image decode and processor prep off the generation thread.
     prompt = tokenizer.decode(prompt_tokens) or " "
     images = custom_resize(
         convert_to_pil(images_b64),

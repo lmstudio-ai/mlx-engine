@@ -1,8 +1,8 @@
-"""Disk-budget policy for the VLM prompt spill cache.
+"""Disk-budget policy for the VLM prompt cache store.
 
-The spill cache starts with a conservative provisional cap, then replaces it
-once with a final empirical cap derived from the first real completed prompt
-cache. This keeps model-architecture guessing out of the main spill-cache
+The cache store starts with a conservative provisional budget, then replaces it
+once with a final empirical budget derived from the first real completed prompt
+cache. This keeps model-architecture guessing out of the main cache store
 implementation.
 """
 
@@ -22,29 +22,30 @@ from mlx.utils import tree_flatten
 
 _GIB_BYTES = 1024 * 1024 * 1024
 _MIN_FREE_BYTES = 10 * _GIB_BYTES
-_PROVISIONAL_CAP_BYTES = 30 * _GIB_BYTES
+_PROVISIONAL_BUDGET_BYTES = 30 * _GIB_BYTES
 
 
-def provisional_spill_cache_cap_bytes(cache_dir: Path) -> int:
-    """Return the provisional spill-cache cap before a real cache is observed.
+def provisional_cache_store_budget_bytes(cache_dir: Path) -> int:
+    """Return the provisional cache store budget before a real cache is observed.
 
     Provisional policy:
     - if free disk is under 10 GiB, disable disk records
     - otherwise allow min(30 GiB, free disk / 4)
     """
-    return _apply_disk_space_limit(cache_dir, _PROVISIONAL_CAP_BYTES)
+    return _apply_disk_space_limit(cache_dir, _PROVISIONAL_BUDGET_BYTES)
 
 
-def final_spill_cache_cap_bytes(
+def final_cache_store_budget_bytes(
     cache_dir: Path,
     prompt_cache: list[Any],
     max_kv_size: int | None,
 ) -> int | None:
-    """Return the final empirical cap from a completed real prompt cache.
+    """Return the final empirical budget from a completed real prompt cache.
 
     Full KV layers scale to max_kv_size. Rotating/SWA layers scale only to
     their window. Opaque state caches use observed bytes only. The provisional
-    30 GiB cap does not apply after observation; free disk remains the limit.
+    30 GiB ceiling is removed after observation; the final budget is still
+    limited to one quarter of currently free disk.
     """
     if max_kv_size is None:
         return None
@@ -92,7 +93,7 @@ def _scaled_kv_bytes(cache: Any, target_token_count: int) -> int:
         return 0
 
     observed_bytes = _array_nbytes(keys) + _array_nbytes(values)
-    # The final cap should never be smaller than the cache shape we observed.
+    # The final budget should never be smaller than the cache shape we observed.
     target_token_count = max(target_token_count, observed_token_count)
     return (
         observed_bytes * target_token_count + observed_token_count - 1

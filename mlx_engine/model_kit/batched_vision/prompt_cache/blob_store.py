@@ -68,8 +68,11 @@ class _BlobReader:
         return read_len
 
 
-class AnonymousSafetensorBlobStore:
-    """Single-fd anonymous store for immutable safetensors blobs.
+class TemporarySafetensorBlobStore:
+    """Single-fd temporary-file store for immutable safetensors blobs.
+
+    The backing file is created with `tempfile.TemporaryFile`, so normal process
+    shutdown closes the fd and releases storage without path cleanup.
 
     Records are exact-size extents. `_free_extents` is always sorted by offset
     and coalesced; free space at the file tail truncates the backing file.
@@ -155,7 +158,7 @@ class AnonymousSafetensorBlobStore:
                 extent.length -= capacity
             return offset
 
-        # Otherwise append a new extent to the anonymous backing file.
+        # Otherwise append a new extent to the temporary backing file.
         offset = self._end
         self._end += capacity
         return offset
@@ -200,7 +203,7 @@ class AnonymousSafetensorBlobStore:
                 current.length += next_extent.length
                 self._free_extents.pop(idx + 1)
 
-        # If the free range reaches EOF, shrink the anonymous backing file.
+        # If the free range reaches EOF, shrink the temporary backing file.
         while (
             self._free_extents
             and self._free_extents[-1].offset + self._free_extents[-1].length
