@@ -3,7 +3,6 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from queue import Empty as QueueEmpty
 from queue import Queue
 from threading import Event, Thread
 from typing import Callable, Iterable
@@ -33,13 +32,14 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     build_prompt_kwargs,
     prepare_prompt_inputs,
 )
-from mlx_engine.model_kit.batched_vision.generation_thread import (
+from mlx_engine.model_kit.batched_vision.cache_io_thread import PromptCacheIOThread
+from mlx_engine.model_kit.batched_vision.request_lifecycle import (
     ActiveRequest,
     FailedRestore,
+    GenerationThreadController,
     GenerationThreadState,
     GenerationRequest,
     PreparedInsert,
-    PromptCacheIOThread,
 )
 from mlx_engine.utils.generation_helpers import MAX_TOP_LOGPROBS
 from mlx_engine.utils.token import Token
@@ -379,39 +379,6 @@ class BatchedVisionModelKit:
             image_spans=prepared_prompt.image_spans,
         )
 
-    def _cancel_request(
-        self,
-        request_id: str,
-        state: GenerationThreadState,
-    ) -> bool:
-        for i, request in enumerate(state.pending):
-            if request.request_id == request_id:
-                state.pending.pop(i)
-                request.rqueue.put(RequestCancelled())
-                return True
-
-        for i, prepared_insert in enumerate(state.ready):
-            if prepared_insert.request.request_id == request_id:
-                state.ready.pop(i)
-                prepared_insert.request.rqueue.put(RequestCancelled())
-                return True
-
-        request = state.restoring.pop(request_id, None)
-        if request is not None:
-            state.cancelled_restores.add(request_id)
-            request.rqueue.put(RequestCancelled())
-            return True
-
-        for uid, result in list(state.active.items()):
-            if result.request_id != request_id:
-                continue
-            state.batch_generator.remove(uid)
-            result.rqueue.put(RequestCancelled())
-            del state.active[uid]
-            return True
-
-        return False
-
     def _emit_response(
         self, result: ActiveRequest, response
     ) -> BatchedGenerationResponse:
@@ -441,147 +408,27 @@ class BatchedVisionModelKit:
             from_draft=False,
         )
 
-    @staticmethod
-    def _drain_queue(queue: Queue, timeout: float | None) -> list:
-        items = []
-        try:
-            item = (
-                queue.get(timeout=timeout)
-                if timeout is not None
-                else queue.get_nowait()
+    def _finish_response(self, result: ActiveRequest, response) -> None:
+        if response.prompt_cache is None or response.all_tokens is None:
+            return
+
+        cache_store_budget_update = (
+            self._prompt_cache_store.budget_update_from_completed_cache(
+                response.prompt_cache
             )
-            items.append(item)
-        except QueueEmpty:
-            return items
-
-        while True:
-            try:
-                items.append(queue.get_nowait())
-            except QueueEmpty:
-                return items
-
-    def _handle_prepared_event(
-        self,
-        item: PreparedInsert | FailedRestore,
-        state: GenerationThreadState,
-    ) -> None:
-        request_id = item.request.request_id
-        state.restoring.pop(request_id, None)
-
-        if request_id in state.cancelled_restores:
-            state.cancelled_restores.discard(request_id)
-            return
-
-        if isinstance(item, FailedRestore):
-            item.request.rqueue.put(item.error)
-            return
-
-        state.ready.append(item)
-
-    @staticmethod
-    def _reserved_slots(state: GenerationThreadState) -> int:
-        return len(state.active) + len(state.ready) + len(state.restoring)
-
-    def _drain_generation_events(
-        self, state: GenerationThreadState, timeout: float | None
-    ):
-        for item in self._drain_queue(self._requests, timeout):
-            if isinstance(item, CancelGenerationRequest):
-                if not self._cancel_request(item.request_id, state):
-                    logger.warning(f"Could not cancel request_id={item.request_id}")
-                continue
-
-            if isinstance(item, (PreparedInsert, FailedRestore)):
-                self._handle_prepared_event(item, state)
-                continue
-
-            state.pending.append(item)
-
-    def _insert_ready_requests(self, state: GenerationThreadState) -> None:
-        if len(state.active) >= self._max_seq_nums:
-            return
-
-        next_ready = []
-        for prepared_insert in state.ready:
-            if len(state.active) < self._max_seq_nums:
-                self._insert_prepared_request(
-                    state.batch_generator,
-                    prepared_insert,
-                    state.active,
-                )
-            else:
-                next_ready.append(prepared_insert)
-        state.ready = next_ready
-
-    def _admit_pending_requests(self, state: GenerationThreadState) -> None:
-        if self._reserved_slots(state) >= self._max_seq_nums:
-            return
-
-        next_pending = []
-        for request in state.pending:
-            if self._reserved_slots(state) < self._max_seq_nums:
-                state.restoring[request.request_id] = request
-                self._cache_io_thread.enqueue_restore(request)
-            else:
-                next_pending.append(request)
-        state.pending = next_pending
-
-    def _step_generation(self, state: GenerationThreadState) -> None:
-        if not state.active:
-            return
-
-        prompt_responses, generation_responses = state.batch_generator.next()
-        for response in prompt_responses:
-            result = state.active.get(response.uid)
-            if result is None:
-                continue
-            processed, total = response.progress
-            result.rqueue.put((min(processed, total), total))
-
-        for response in generation_responses:
-            result = state.active.get(response.uid)
-            if result is None:
-                continue
-
-            result.rqueue.put(self._emit_response(result, response))
-            if response.finish_reason is not None:
-                if (
-                    response.prompt_cache is not None
-                    and response.all_tokens is not None
-                ):
-                    cache_store_budget_update = (
-                        self._prompt_cache_store.budget_update_from_completed_cache(
-                            response.prompt_cache
-                        )
-                    )
-                    self._cache_io_thread.enqueue_cache_store_budget_update(
-                        cache_store_budget_update
-                    )
-                    self._prompt_cache_coordinator.store_hot_prompt_cache(
-                        prompt_input_ids=response.all_tokens,
-                        image_spans=result.image_spans,
-                        prompt_cache=response.prompt_cache,
-                        rope_deltas=response.rope_deltas,
-                    )
-                result.rqueue.put(None)
-                del state.active[response.uid]
-
-    def _cancel_all_requests(self, state: GenerationThreadState) -> None:
-        state.batch_generator.close()
-
-        for result in state.active.values():
-            result.rqueue.put(RequestCancelled("Model shutdown requested"))
-        for request in state.pending:
-            request.rqueue.put(RequestCancelled("Model shutdown requested"))
-        for prepared_insert in state.ready:
-            prepared_insert.request.rqueue.put(
-                RequestCancelled("Model shutdown requested")
-            )
-        for request in state.restoring.values():
-            request.rqueue.put(RequestCancelled("Model shutdown requested"))
+        )
+        self._cache_io_thread.enqueue_cache_store_budget_update(
+            cache_store_budget_update
+        )
+        self._prompt_cache_coordinator.store_hot_prompt_cache(
+            prompt_input_ids=response.all_tokens,
+            image_spans=result.image_spans,
+            prompt_cache=response.prompt_cache,
+            rope_deltas=response.rope_deltas,
+        )
 
     def _fail_all_requests(self, error: Exception) -> None:
-        for item in self._drain_queue(self._requests, None):
+        for item in GenerationThreadController.drain_queue(self._requests, None):
             if isinstance(item, GenerationRequest):
                 item.rqueue.put(error)
             elif isinstance(item, (PreparedInsert, FailedRestore)):
@@ -607,15 +454,24 @@ class BatchedVisionModelKit:
 
         state = GenerationThreadState(batch_generator=self._make_batch_generator())
         self._generation_thread_state = state
+        controller = GenerationThreadController(
+            state=state,
+            request_queue=self._requests,
+            max_seq_nums=self._max_seq_nums,
+            enqueue_restore=self._cache_io_thread.enqueue_restore,
+            insert_prepared_request=self._insert_prepared_request,
+            emit_response=self._emit_response,
+            finish_response=self._finish_response,
+        )
 
         while not self._shutdown.is_set():
             timeout = None if state.active or state.ready else 0.1
-            self._drain_generation_events(state, timeout)
-            self._insert_ready_requests(state)
-            self._admit_pending_requests(state)
-            self._step_generation(state)
+            controller.drain_generation_events(timeout)
+            controller.insert_ready_requests()
+            controller.admit_pending_requests()
+            controller.step_generation()
 
-        self._cancel_all_requests(state)
+        controller.cancel_all_requests()
 
     def __del__(self):
         self.shutdown()

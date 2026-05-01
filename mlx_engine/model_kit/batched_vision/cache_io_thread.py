@@ -1,6 +1,6 @@
 import logging
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import count
 from queue import Empty as QueueEmpty
 from queue import PriorityQueue
@@ -8,20 +8,16 @@ from queue import Queue
 from threading import Event, Thread
 from typing import Any, Callable
 
-import mlx.core as mx
-from mlx_engine.model_kit.batched_vision.batch_generator import (
-    BatchGenerator as LocalVlmBatchGenerator,
-)
-from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
-    RestoredPromptCache,
-)
-from mlx_engine.model_kit.batched_vision.prompt_inputs import PreparedPrompt
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
     VlmPromptCacheStore,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PendingPromptCacheSave,
-    PromptImageSpan,
+)
+from mlx_engine.model_kit.batched_vision.request_lifecycle import (
+    FailedRestore,
+    GenerationRequest,
+    PreparedInsert,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,25 +27,6 @@ _RESTORE_JOB_PRIORITY = 0
 _CACHE_STORE_BUDGET_UPDATE_JOB_PRIORITY = 1
 _SAVE_JOB_PRIORITY = 2
 _SHUTDOWN_JOB_PRIORITY = -1
-
-
-@dataclass
-class GenerationRequest:
-    rqueue: Queue
-    prompt_tokens: list[int]
-    request_id: str
-    images_b64: list[str] | None
-    sampler: Callable[[mx.array], mx.array]
-    logits_processors: list
-    top_logprobs: int
-    max_tokens: int
-
-
-@dataclass
-class PreparedInsert:
-    request: GenerationRequest
-    prepared_prompt: PreparedPrompt
-    restored: RestoredPromptCache | None
 
 
 @dataclass
@@ -65,31 +42,6 @@ class SaveJob:
 @dataclass
 class CacheStoreBudgetUpdateJob:
     max_cache_store_bytes: int
-
-
-@dataclass
-class FailedRestore:
-    request: GenerationRequest
-    error: Exception
-
-
-@dataclass
-class ActiveRequest:
-    rqueue: Queue
-    detokenizer: Any
-    top_logprobs: int
-    request_id: str
-    image_spans: list[PromptImageSpan]
-
-
-@dataclass
-class GenerationThreadState:
-    batch_generator: LocalVlmBatchGenerator
-    active: dict[int, ActiveRequest] = field(default_factory=dict)
-    pending: list[GenerationRequest] = field(default_factory=list)
-    ready: list[PreparedInsert] = field(default_factory=list)
-    restoring: dict[str, GenerationRequest] = field(default_factory=dict)
-    cancelled_restores: set[str] = field(default_factory=set)
 
 
 class PromptCacheIOThread:
