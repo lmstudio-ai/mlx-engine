@@ -2,3 +2,4 @@ __pycache__/
 .venv*/
 .DS_Store
 .idea
+smoke_batched_vision.py
