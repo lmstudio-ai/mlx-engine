@@ -34,6 +34,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     make_record_key,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
+    PromptCacheRestorePlan,
     VlmPromptCacheStore,
 )
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
@@ -619,7 +620,7 @@ def wait_for_prefix_snapshot(
 
     deadline = time.perf_counter() + timeout_s
     while time.perf_counter() < deadline:
-        match = find_restore_records(
+        match = find_restore_plan(
             prompt_cache_store,
             prompt_input_ids,
             image_spans,
@@ -644,7 +645,7 @@ def wait_for_restore_plan(
     deadline = time.perf_counter() + timeout_s
     last_seen_prefix = None
     while time.perf_counter() < deadline:
-        match = find_restore_records(
+        match = find_restore_plan(
             prompt_cache_store,
             prompt_input_ids,
             image_spans,
@@ -664,29 +665,23 @@ def wait_for_restore_plan(
     )
 
 
-def find_restore_records(prompt_cache_store, prompt_input_ids: list[int], image_spans):
-    max_reusable_prefix_len = len(prompt_input_ids) - 1
-    if max_reusable_prefix_len <= 0:
-        return None
-
-    candidate_chunks = [
-        chunk
-        for chunk in build_prefix_cache_chunks(prompt_input_ids, image_spans)
-        if chunk.end <= max_reusable_prefix_len
-    ]
-    return prompt_cache_store._find_longest_loadable_records(candidate_chunks)
+def find_restore_plan(prompt_cache_store, prompt_input_ids: list[int], image_spans):
+    return prompt_cache_store.plan_longest_prefix_restore(
+        prompt_input_ids,
+        image_spans,
+    )
 
 
-def restore_cached_prefix_len(restore_records) -> int:
-    return restore_records[0]
+def restore_cached_prefix_len(restore_plan: PromptCacheRestorePlan) -> int:
+    return restore_plan.cached_prefix_len
 
 
-def restore_chunk_keys(restore_records) -> list[str]:
-    return [chunk.key for chunk in restore_records[1]]
+def restore_chunk_keys(restore_plan: PromptCacheRestorePlan) -> list[str]:
+    return [chunk.key for chunk in restore_plan.chunks]
 
 
-def load_restore_records(prompt_cache_store, restore_records):
-    return prompt_cache_store._load_restore_records(*restore_records)
+def load_restore_plan(prompt_cache_store, restore_plan: PromptCacheRestorePlan):
+    return prompt_cache_store.load_restore_plan(restore_plan)
 
 
 def clear_hot_completed_prompt_cache(model_kit) -> None:
@@ -703,8 +698,8 @@ def print_cache_store_stats(prefix: str, prompt_cache_store) -> None:
     print(f"{prefix}_STATS_TOTAL_BYTES", stats.total_bytes)
     print(f"{prefix}_STATS_MAX_BYTES", stats.max_bytes)
     print(f"{prefix}_STATS_ENTRY_COUNT", stats.entry_count)
-    print(f"{prefix}_STATS_HITS", stats.hits)
-    print(f"{prefix}_STATS_MISSES", stats.misses)
+    print(f"{prefix}_STATS_HIT_TOKENS", stats.hit_tokens)
+    print(f"{prefix}_STATS_MISS_TOKENS", stats.miss_tokens)
     print(f"{prefix}_STATS_EVICTIONS", stats.evictions)
 
 
@@ -732,21 +727,17 @@ def expected_cache_store_record_keys(prompt_cache_store, chunk_key: str) -> list
     ]
 
 
-def restore_cache_store_record_keys(prompt_cache_store, restore_records):
-    return (
-        prompt_cache_store._cache_restore_planner().restore_record_keys_for_chunk_chain(
-            restore_records[1]
-        )
-    )
+def restore_cache_store_record_keys(prompt_cache_store, restore_plan):
+    return restore_plan.record_keys_by_chunk_key
 
 
 def get_stale_optional_record_keys(
     prompt_cache_store,
-    restore_records,
+    restore_plan,
 ) -> list[str]:
     record_keys_by_chunk = restore_cache_store_record_keys(
         prompt_cache_store,
-        restore_records,
+        restore_plan,
     )
     if record_keys_by_chunk is None:
         return []
@@ -757,7 +748,7 @@ def get_stale_optional_record_keys(
         for record_key in record_keys
     }
     stale_record_keys = []
-    for chunk_key in restore_chunk_keys(restore_records):
+    for chunk_key in restore_chunk_keys(restore_plan):
         for record_key in expected_cache_store_record_keys(
             prompt_cache_store, chunk_key
         ):
@@ -1013,7 +1004,7 @@ def run_prefix(
             timeout_s=args.prefix_wait_timeout_s,
         )
         expected_prefix_len = restore_cached_prefix_len(prefix_match)
-        control_prefix_match = find_restore_records(
+        control_prefix_match = find_restore_plan(
             prompt_cache_store,
             control_prompt_inputs.prompt_input_ids,
             control_prompt_inputs.image_spans,
@@ -1095,8 +1086,6 @@ def run_prefix(
             f"{sorted(accepted_control_progress)}"
         )
 
-    # BatchedMlxLmReporterAdapter currently hardcodes cached_tokens=0, so use
-    # begin_prefill_tokens_processed as the restore signal.
     print("PREFIX_SUFFIX", repr(suffix))
     print("PREFIX_BASE_EXPECTED_WARM", expect_warm_base)
     print("PREFIX_BASE_PROMPT_TOKENS", len(base_prompt_inputs.prompt_input_ids))
@@ -1248,7 +1237,7 @@ def run_multi_prefix(args) -> None:
         for chunk in reusable_chunks[:2]:
             save_synthetic_chunk(prompt_cache_store, chunk, prompt_input_ids)
 
-        prefix_match = find_restore_records(
+        prefix_match = find_restore_plan(
             prompt_cache_store,
             prompt_input_ids,
             [],
@@ -1312,7 +1301,7 @@ def run_multi_prefix(args) -> None:
                 "State checkpoint eviction did not enforce the byte budget"
             )
 
-        prefix_match = find_restore_records(
+        prefix_match = find_restore_plan(
             prompt_cache_store,
             prompt_input_ids,
             [],
@@ -1322,7 +1311,7 @@ def run_multi_prefix(args) -> None:
                 "Synthetic lookup required an evicted old state checkpoint"
             )
 
-        stored_state = load_restore_records(prompt_cache_store, prefix_match)
+        stored_state = load_restore_plan(prompt_cache_store, prefix_match)
 
         kv_keys, kv_values = stored_state.prompt_cache[0].state
         arrays_value = stored_state.prompt_cache[1][0]
@@ -1370,7 +1359,7 @@ def run_rotating_suffix(args) -> None:
                 prompt_cache=make_synthetic_rotating_prompt_cache(chunk.end),
             )
 
-        prefix_match = find_restore_records(
+        prefix_match = find_restore_plan(
             prompt_cache_store,
             prompt_input_ids,
             [],
@@ -1426,7 +1415,7 @@ def run_rotating_suffix(args) -> None:
         if prompt_cache_store._total_bytes > prompt_cache_store._max_cache_store_bytes:
             raise RuntimeError("Rotating eviction did not enforce the byte budget")
 
-        prefix_match = find_restore_records(
+        prefix_match = find_restore_plan(
             prompt_cache_store,
             prompt_input_ids,
             [],
@@ -1448,7 +1437,7 @@ def run_rotating_suffix(args) -> None:
         ]:
             raise RuntimeError("Rotating record selection kept an old SWA record")
 
-        stored_state = load_restore_records(prompt_cache_store, prefix_match)
+        stored_state = load_restore_plan(prompt_cache_store, prefix_match)
         kv_keys, _ = stored_state.prompt_cache[0].state
         rotating_keys, _ = stored_state.prompt_cache[1].state
         mx.eval(kv_keys, rotating_keys)
@@ -1516,19 +1505,21 @@ def run_eviction(args) -> None:
         if prompt_cache_store._total_bytes > prompt_cache_store._max_cache_store_bytes:
             raise RuntimeError("Eviction did not enforce the byte budget")
 
-        best_effort_restore = prompt_cache_store._find_longest_loadable_records(
-            reusable_chunks[:2]
+        best_effort_restore = find_restore_plan(
+            prompt_cache_store,
+            prompt_input_ids,
+            [],
         )
         if best_effort_restore is None:
             raise RuntimeError("Eviction best-effort restore missed")
-        best_effort_state = load_restore_records(
+        best_effort_state = load_restore_plan(
             prompt_cache_store,
             best_effort_restore,
         )
         if best_effort_state.cached_prefix_len != first_chunk.end:
             raise RuntimeError("Eviction best-effort restore used the wrong prefix")
 
-        prefix_match = find_restore_records(
+        prefix_match = find_restore_plan(
             prompt_cache_store,
             prompt_input_ids,
             [],
@@ -1694,7 +1685,7 @@ def run_hybrid_cache_e2e(
     ):
         raise RuntimeError("Hybrid cache did not save any non-full-attention records")
 
-    stored_state = load_restore_records(prompt_cache_store, prefix_match)
+    stored_state = load_restore_plan(prompt_cache_store, prefix_match)
     restored_cache_classes = [
         type(cache).__name__ for cache in stored_state.prompt_cache
     ]
@@ -2066,7 +2057,7 @@ def run_eviction_e2e(model_kit, processor, args) -> None:
     if prompt_cache_store._total_bytes > prompt_cache_store._max_cache_store_bytes:
         raise RuntimeError("E2E eviction did not enforce the byte budget")
 
-    post_eviction_match = find_restore_records(
+    post_eviction_match = find_restore_plan(
         prompt_cache_store,
         extended_prompt_inputs.prompt_input_ids,
         extended_prompt_inputs.image_spans,
@@ -2209,7 +2200,7 @@ def run_eviction_stress(model_kit, processor, args) -> None:
     prompt_cache_store._evict_if_needed()
 
     expected_one_chunk_boundary = reusable_boundaries[0]
-    post_eviction_match = find_restore_records(
+    post_eviction_match = find_restore_plan(
         prompt_cache_store,
         extended_prompt_inputs.prompt_input_ids,
         extended_prompt_inputs.image_spans,
@@ -2311,9 +2302,11 @@ def run_eviction_stress(model_kit, processor, args) -> None:
         prompt_cache_store,
         timeout_s=args.prefix_wait_timeout_s,
     )
-    if final_stats.hits < request_count:
+    expected_hit_tokens = sum(restored_tokens)
+    if final_stats.hit_tokens < expected_hit_tokens:
         raise RuntimeError(
-            f"Eviction-stress expected at least {request_count} hits, got {final_stats.hits}"
+            "Eviction-stress expected at least "
+            f"{expected_hit_tokens} hit tokens, got {final_stats.hit_tokens}"
         )
     if final_stats.evictions < 1:
         raise RuntimeError("Eviction-stress expected at least one eviction")
@@ -2386,7 +2379,7 @@ def run_cross_thread_restore(
         deadline = time.perf_counter() + args.prefix_wait_timeout_s
         while time.perf_counter() < deadline:
             try:
-                stored_state = load_restore_records(prompt_cache_store, prefix_match)
+                stored_state = load_restore_plan(prompt_cache_store, prefix_match)
             except Exception as exc:  # pragma: no cover - exercised live
                 load_error_holder["error"] = exc
                 return
@@ -2544,6 +2537,7 @@ def main():
     )
     model_kit = load_model(
         model_path=model_path,
+        max_kv_size=args.cache_max_bytes,
         max_seq_nums=args.max_seq_nums,
         trust_remote_code=args.trust_remote_code,
     )

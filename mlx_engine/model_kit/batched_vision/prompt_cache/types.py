@@ -92,17 +92,17 @@ class PendingPromptCacheSave:
 
 @dataclass
 class PromptCacheStoreStats:
-    """Committed cache store accounting used by diagnostics and smokes.
+    """Committed cache-store diagnostics used by smokes/debug output.
 
-    `hits` count restored chunks. `misses` count eligible chunks that could
-    not be restored.
+    Hit/miss tokens are coordinator-recorded restore accounting across both hot
+    memory and disk.
     """
 
     total_bytes: int
     max_bytes: int
     entry_count: int
-    hits: int
-    misses: int
+    hit_tokens: int
+    miss_tokens: int
     evictions: int
     record_sizes: list[int]
     record_sizes_by_key: dict[str, int]

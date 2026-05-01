@@ -15,6 +15,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptImageSpan,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
+    PromptCacheRestorePlan,
     VlmPromptCacheStore,
 )
 from mlx_lm.models.cache import can_trim_prompt_cache, trim_prompt_cache
@@ -41,11 +42,20 @@ class _HotPromptCacheEntry:
     rope_deltas: Any | None
 
 
+@dataclass
+class _HotRestorePlan:
+    """Taken hot cache plus the prefix length it can serve for this request."""
+
+    entry: _HotPromptCacheEntry
+    cached_prefix_len: int
+
+
 class VlmPromptCacheCoordinator:
     """Coordinates hot-cache reuse and cache-I/O-thread disk cache writes.
 
     The generation thread records the most recently completed runtime cache.
-    Request preparation may consume that hot cache before falling back to disk.
+    Request preparation consumes that hot cache, compares it with disk, then
+    restores whichever source can serve the longest prefix.
     """
 
     def __init__(
@@ -66,8 +76,34 @@ class VlmPromptCacheCoordinator:
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
     ) -> RestoredPromptCache | None:
+        """Restore a prefix and record combined hot/disk cache token efficiency."""
+        restored = self._restore_best_prefix(
+            prompt_input_ids=prompt_input_ids,
+            image_spans=image_spans,
+        )
+        hit_tokens = 0 if restored is None else restored.cached_prefix_len
+        prefill_tokens = max(0, len(prompt_input_ids) - 1)
+        self._cache_store.record_restore_tokens(
+            hit_tokens=hit_tokens,
+            miss_tokens=prefill_tokens - hit_tokens,
+        )
+        return restored
+
+    def _restore_best_prefix(
+        self,
+        *,
+        prompt_input_ids: list[int],
+        image_spans: list[PromptImageSpan],
+    ) -> RestoredPromptCache | None:
+        """Restore the longest reusable prefix from hot memory or disk.
+
+        This runs on the cache I/O thread. We take the one hot cache, plan
+        disk, then load whichever source serves more tokens. Ties prefer hot;
+        disk plans are loaded immediately so eviction cannot invalidate them.
+        """
         try:
-            hot_restored = self._restore_hot_entry(
+            hot_plan = self._plan_hot_restore(
+                entry=self._take_hot_entry(),
                 prompt_input_ids=prompt_input_ids,
                 image_spans=image_spans,
             )
@@ -77,23 +113,118 @@ class VlmPromptCacheCoordinator:
                 "Hot prompt cache restore failed; treating it as a cache miss.",
                 exc_info=True,
             )
+            hot_plan = None
+
+        disk_plan = self._plan_disk_restore(prompt_input_ids, image_spans)
+        if hot_plan is None:
+            return (
+                None if disk_plan is None else self._load_disk_restore_plan(disk_plan)
+            )
+
+        if (
+            disk_plan is not None
+            and disk_plan.cached_prefix_len > hot_plan.cached_prefix_len
+        ):
+            # Release hot memory before materializing a better disk prefix.
+            hot_plan = None
+            return self._load_disk_restore_plan(disk_plan)
+
+        try:
+            hot_restored = self._load_hot_restore_plan(hot_plan)
+        except Exception:
+            logger.debug(
+                "Hot prompt cache restore failed; treating it as a cache miss.",
+                exc_info=True,
+            )
             hot_restored = None
         if hot_restored is not None:
             return hot_restored
 
+        if disk_plan is not None:
+            return self._load_disk_restore_plan(disk_plan)
+
+        return None
+
+    def _plan_disk_restore(
+        self,
+        prompt_input_ids: list[int],
+        image_spans: list[PromptImageSpan],
+    ) -> PromptCacheRestorePlan | None:
         try:
-            cached_state = self._cache_store.restore_longest_prefix(
+            return self._cache_store.plan_longest_prefix_restore(
                 prompt_input_ids,
                 image_spans,
             )
         except Exception:
-            # Cache-store restore is an optimization; generation can recompute on miss.
+            # Cache-store planning is an optimization; generation can recompute.
+            logger.debug(
+                "Prompt cache store planning failed; treating it as a cache miss.",
+                exc_info=True,
+            )
+            return None
+
+    def _take_hot_entry(self) -> _HotPromptCacheEntry | None:
+        with self._hot_entry_lock:
+            entry = self._hot_entry
+            # A new request makes the old hot cache cold. Take ownership so we
+            # never keep an idle cache around while this request recomputes.
+            self._hot_entry = None
+            return entry
+
+    def _plan_hot_restore(
+        self,
+        *,
+        entry: _HotPromptCacheEntry | None,
+        prompt_input_ids: list[int],
+        image_spans: list[PromptImageSpan],
+    ) -> _HotRestorePlan | None:
+        if entry is None:
+            return None
+        target_prefix_len = image_safe_common_prefix_len(
+            prompt_input_ids,
+            image_spans,
+            entry.prompt_input_ids,
+            entry.image_spans,
+            max_prefix_len=len(prompt_input_ids) - 1,
+        )
+        if target_prefix_len <= 0:
+            return None
+
+        return _HotRestorePlan(
+            entry=entry,
+            cached_prefix_len=target_prefix_len,
+        )
+
+    def _load_hot_restore_plan(
+        self,
+        plan: _HotRestorePlan,
+    ) -> RestoredPromptCache | None:
+        entry = plan.entry
+        trim_count = len(entry.prompt_input_ids) - plan.cached_prefix_len
+        if trim_count > 0:
+            if not can_trim_prompt_cache(entry.prompt_cache):
+                return None
+            trimmed = trim_prompt_cache(entry.prompt_cache, trim_count)
+            if trimmed != trim_count:
+                return None
+
+        return RestoredPromptCache(
+            cached_prefix_len=plan.cached_prefix_len,
+            prompt_cache=entry.prompt_cache,
+            rope_deltas=None if trim_count > 0 else entry.rope_deltas,
+        )
+
+    def _load_disk_restore_plan(
+        self,
+        disk_plan: PromptCacheRestorePlan,
+    ) -> RestoredPromptCache | None:
+        try:
+            cached_state = self._cache_store.load_restore_plan(disk_plan)
+        except Exception:
             logger.debug(
                 "Prompt cache store restore failed; treating it as a cache miss.",
                 exc_info=True,
             )
-            return None
-        if cached_state is None:
             return None
 
         return RestoredPromptCache(
@@ -180,41 +311,3 @@ class VlmPromptCacheCoordinator:
                 prompt_cache=prompt_cache,
                 rope_deltas=rope_deltas,
             )
-
-    def _restore_hot_entry(
-        self,
-        *,
-        prompt_input_ids: list[int],
-        image_spans: list[PromptImageSpan],
-    ) -> RestoredPromptCache | None:
-        with self._hot_entry_lock:
-            entry = self._hot_entry
-            if entry is None:
-                return None
-            # A new request makes the old hot cache cold; do not keep it while
-            # this request recomputes or restores from disk.
-            self._hot_entry = None
-
-        target_prefix_len = image_safe_common_prefix_len(
-            prompt_input_ids,
-            image_spans,
-            entry.prompt_input_ids,
-            entry.image_spans,
-            max_prefix_len=len(prompt_input_ids) - 1,
-        )
-        if target_prefix_len <= 0:
-            return None
-
-        trim_count = len(entry.prompt_input_ids) - target_prefix_len
-        if trim_count > 0:
-            if not can_trim_prompt_cache(entry.prompt_cache):
-                return None
-            trimmed = trim_prompt_cache(entry.prompt_cache, trim_count)
-            if trimmed != trim_count:
-                return None
-
-        return RestoredPromptCache(
-            cached_prefix_len=target_prefix_len,
-            prompt_cache=entry.prompt_cache,
-            rope_deltas=None if trim_count > 0 else entry.rope_deltas,
-        )

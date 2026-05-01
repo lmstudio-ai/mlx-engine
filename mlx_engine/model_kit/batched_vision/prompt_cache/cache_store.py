@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,19 @@ _RECORD_RETENTION_PRIORITY: tuple[RecordKind, ...] = (
 )
 
 
+@dataclass
+class PromptCacheRestorePlan:
+    """Same-thread selection of records for one prompt-cache restore.
+
+    The caller may compare this with a hot-cache candidate, but any selected
+    plan must be loaded without yielding off the cache I/O thread.
+    """
+
+    cached_prefix_len: int
+    chunks: list[PromptPrefixChunk]
+    record_keys_by_chunk_key: dict[str, list[str]]
+
+
 class VlmPromptCacheStore:
     """Cache-I/O-thread-owned index and temporary safetensor blob store.
 
@@ -72,82 +86,71 @@ class VlmPromptCacheStore:
         self._lru_keys: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
         self._max_cache_store_bytes = provisional_cache_store_budget_bytes(base_dir)
-        self._cache_hits = 0
-        self._cache_misses = 0
+        self._restore_hit_tokens = 0
+        self._restore_miss_tokens = 0
         self._cache_evictions = 0
 
-    def restore_longest_prefix(
+    def plan_longest_prefix_restore(
         self,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
-    ) -> LoadedPromptState | None:
-        """Load the longest matching cacheable prefix.
+    ) -> PromptCacheRestorePlan | None:
+        """Select the longest matching cacheable prefix without loading blobs.
 
         The final prompt token stays uncached so generation has a suffix to
-        process. Too-short or unchunkable prompts are ineligible and do not
-        affect hit/miss stats.
+        process. Too-short or unchunkable prompts do not produce a disk plan.
         """
         max_reusable_prefix_len = len(prompt_input_ids) - 1
         if max_reusable_prefix_len <= 0:
             return None
+        if self._layout is None:
+            return None
 
-        request_chunks = build_prefix_cache_chunks(
-            prompt_input_ids,
-            image_spans,
-        )
         eligible_chunks = [
-            chunk for chunk in request_chunks if chunk.end <= max_reusable_prefix_len
+            chunk
+            for chunk in build_prefix_cache_chunks(prompt_input_ids, image_spans)
+            if chunk.end <= max_reusable_prefix_len
         ]
         if not eligible_chunks:
             return None
-        if self._layout is None:
-            self._record_prefix_lookup(
-                hit_chunks=0,
-                miss_chunks=len(eligible_chunks),
-            )
-            return None
 
+        restore_planner = self._cache_restore_planner()
         # A later SWA boundary may be restorable even if an earlier boundary is
-        # missing old rotating records, so availability selection happens once
-        # over the full matching chain.
-        restore_records = self._find_longest_loadable_records(eligible_chunks)
-        hit_chunks = 0 if restore_records is None else len(restore_records[1])
-        self._record_prefix_lookup(
-            hit_chunks=0,
-            miss_chunks=len(eligible_chunks) - hit_chunks,
-        )
-        if restore_records is None:
-            return None
+        # missing old rotating records, so scan downward for the best boundary.
+        for end_idx in range(len(eligible_chunks), 0, -1):
+            chunks = eligible_chunks[:end_idx]
+            record_keys_by_chunk_key = (
+                restore_planner.restore_record_keys_for_chunk_chain(chunks)
+            )
+            if record_keys_by_chunk_key is not None:
+                return PromptCacheRestorePlan(
+                    cached_prefix_len=chunks[-1].end,
+                    chunks=chunks,
+                    record_keys_by_chunk_key=record_keys_by_chunk_key,
+                )
 
-        cached_prefix_len, chunks, record_keys_by_chunk_key = restore_records
-        return self._load_restore_records(
-            cached_prefix_len,
-            chunks,
-            record_keys_by_chunk_key,
-        )
+        return None
 
-    def _load_restore_records(
+    def load_restore_plan(
         self,
-        cached_prefix_len: int,
-        chunks: list[PromptPrefixChunk],
-        record_keys_by_chunk_key: dict[str, list[str]],
+        plan: PromptCacheRestorePlan,
     ) -> LoadedPromptState:
-        """Load a selected prompt-cache restore chain."""
+        """Load a restore plan selected on this cache I/O thread."""
         layout = self._require_layout()
 
         chunk_prompt_caches = []
 
         # Load each chunk's physical records into sparse per-layer cache lists.
-        for chunk in chunks:
+        for chunk in plan.chunks:
             prompt_cache = self._load_one_chunk(
-                record_keys_by_chunk_key[chunk.key],
+                plan.record_keys_by_chunk_key[chunk.key],
                 layout,
             )
             chunk_prompt_caches.append(prompt_cache)
 
         prompt_cache = assemble_prompt_cache_chunks(
             chunk_prompt_caches,
-            chunks,
+            plan.chunks,
             layout,
         )
         # Disk restores run on the prompt-cache I/O thread; decode consumes the
@@ -162,20 +165,20 @@ class VlmPromptCacheStore:
 
         # Restore access refreshes exactly the records used by this chain.
         for record_key in self._ordered_record_keys_for_touch(
-            [chunk.key for chunk in chunks],
-            record_keys_by_chunk_key,
+            [chunk.key for chunk in plan.chunks],
+            plan.record_keys_by_chunk_key,
         ):
             self._touch_cache_entry(record_key)
-        # Count chunks only after the restore has actually materialized.
-        self._record_prefix_lookup(
-            hit_chunks=len(chunks),
-            miss_chunks=0,
-        )
 
         return LoadedPromptState(
-            cached_prefix_len=cached_prefix_len,
+            cached_prefix_len=plan.cached_prefix_len,
             prompt_cache=prompt_cache,
         )
+
+    def record_restore_tokens(self, *, hit_tokens: int, miss_tokens: int) -> None:
+        """Record combined hot/disk prompt-cache efficiency for one request."""
+        self._restore_hit_tokens += hit_tokens
+        self._restore_miss_tokens += miss_tokens
 
     def _load_one_chunk(
         self,
@@ -193,24 +196,6 @@ class VlmPromptCacheStore:
                 prompt_cache[layer_idx] = cache
 
         return prompt_cache
-
-    def _find_longest_loadable_records(
-        self,
-        chunks: list[PromptPrefixChunk],
-    ) -> tuple[int, list[PromptPrefixChunk], dict[str, list[str]]] | None:
-        """Return the longest currently loadable records for an ordered chain."""
-        restore_planner = self._cache_restore_planner()
-        # Loadability is non-monotonic for SWA/state records, so scan downward.
-        for end_idx in range(len(chunks), 0, -1):
-            candidate_chunks = chunks[:end_idx]
-            record_keys_by_chunk_key = (
-                restore_planner.restore_record_keys_for_chunk_chain(candidate_chunks)
-            )
-            if record_keys_by_chunk_key is not None:
-                cached_prefix_len = candidate_chunks[-1].end
-                return cached_prefix_len, candidate_chunks, record_keys_by_chunk_key
-
-        return None
 
     def can_store_records(self) -> bool:
         """Return False when the cache store is intentionally hot-only."""
@@ -314,8 +299,8 @@ class VlmPromptCacheStore:
         total_bytes = self._total_bytes
         max_bytes = self._max_cache_store_bytes
         entry_count = len(self._record_metadata_by_key)
-        hits = self._cache_hits
-        misses = self._cache_misses
+        hit_tokens = self._restore_hit_tokens
+        miss_tokens = self._restore_miss_tokens
         evictions = self._cache_evictions
         record_sizes_by_key = dict(self._key_sizes)
         record_metadata_by_key = dict(self._record_metadata_by_key)
@@ -343,8 +328,8 @@ class VlmPromptCacheStore:
             total_bytes=total_bytes,
             max_bytes=max_bytes,
             entry_count=entry_count,
-            hits=hits,
-            misses=misses,
+            hit_tokens=hit_tokens,
+            miss_tokens=miss_tokens,
             evictions=evictions,
             record_sizes=sorted(record_sizes_by_key.values()),
             record_sizes_by_key=record_sizes_by_key,
@@ -428,10 +413,6 @@ class VlmPromptCacheStore:
                     ordered_record_keys.append(record_key)
 
         return ordered_record_keys
-
-    def _record_prefix_lookup(self, *, hit_chunks: int, miss_chunks: int) -> None:
-        self._cache_hits += hit_chunks
-        self._cache_misses += miss_chunks
 
     def _evict_if_needed(self) -> None:
         while self._total_bytes > self._max_cache_store_bytes:
