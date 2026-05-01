@@ -79,7 +79,7 @@ class GenerationThreadController:
             [LocalVlmBatchGenerator, PreparedInsert, dict[int, ActiveRequest]], None
         ],
         emit_response: Callable[[ActiveRequest, Any], Any],
-        finish_response: Callable[[ActiveRequest, Any], None],
+        finish_response: Callable[[ActiveRequest, Any, bool], None],
     ):
         self.state = state
         self._request_queue = request_queue
@@ -220,7 +220,10 @@ class GenerationThreadController:
 
             result.rqueue.put(self._emit_response(result, response))
             if response.finish_reason is not None:
-                self._finish_response(result, response)
+                keep_hot_cache = (
+                    len(state.active) == 1 and not state.ready and not state.restoring
+                )
+                self._finish_response(result, response, keep_hot_cache)
                 result.rqueue.put(None)
                 del state.active[response.uid]
 

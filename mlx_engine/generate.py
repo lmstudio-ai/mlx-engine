@@ -244,10 +244,11 @@ def load_model(
         use_batched_kit = batchable and max_seq_nums != 1
 
         if use_batched_kit:
+            batched_max_seq_nums = 4 if max_seq_nums is None else max_seq_nums
             model_kit = BatchedModelKit(
                 model_path,
                 max_kv_size=max_kv_size,
-                max_seq_nums=max_seq_nums,
+                max_seq_nums=batched_max_seq_nums,
                 prefill_step_size=prefill_step_size,
             )
         else:

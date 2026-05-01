@@ -311,3 +311,8 @@ class VlmPromptCacheCoordinator:
                 prompt_cache=prompt_cache,
                 rope_deltas=rope_deltas,
             )
+
+    def clear_hot_prompt_cache(self) -> None:
+        """Drop the idle runtime cache held for follow-up reuse."""
+        with self._hot_entry_lock:
+            self._hot_entry = None

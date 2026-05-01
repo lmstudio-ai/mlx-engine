@@ -1,3 +1,4 @@
+import gc
 import logging
 import sys
 import time
@@ -227,7 +228,16 @@ class BatchedVisionModelKit:
             if self._generation_thread:
                 self._generation_thread.join()
             self._cache_io_thread.close()
+            if self._generation_thread_state is not None:
+                self._generation_thread_state.batch_generator.close()
+                self._generation_thread_state = None
+            self._prompt_cache_coordinator.clear_hot_prompt_cache()
             self.model = None
+            self.processor = None
+            self.tokenizer = None
+            self.detokenizer = None
+            self._generation_thread = None
+            gc.collect()
             mx.clear_cache()
 
     def is_shutdown(self) -> bool:
@@ -408,7 +418,12 @@ class BatchedVisionModelKit:
             from_draft=False,
         )
 
-    def _finish_response(self, result: ActiveRequest, response) -> None:
+    def _finish_response(
+        self, result: ActiveRequest, response, keep_hot_cache: bool
+    ) -> None:
+        if not keep_hot_cache:
+            self._prompt_cache_coordinator.clear_hot_prompt_cache()
+
         if response.prompt_cache is None or response.all_tokens is None:
             return
 
@@ -420,12 +435,13 @@ class BatchedVisionModelKit:
         self._cache_io_thread.enqueue_cache_store_budget_update(
             cache_store_budget_update
         )
-        self._prompt_cache_coordinator.store_hot_prompt_cache(
-            prompt_input_ids=response.all_tokens,
-            image_spans=result.image_spans,
-            prompt_cache=response.prompt_cache,
-            rope_deltas=response.rope_deltas,
-        )
+        if keep_hot_cache:
+            self._prompt_cache_coordinator.store_hot_prompt_cache(
+                prompt_input_ids=response.all_tokens,
+                image_spans=result.image_spans,
+                prompt_cache=response.prompt_cache,
+                rope_deltas=response.rope_deltas,
+            )
 
     def _fail_all_requests(self, error: Exception) -> None:
         for item in GenerationThreadController.drain_queue(self._requests, None):

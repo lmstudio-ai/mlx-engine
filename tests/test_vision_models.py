@@ -51,6 +51,12 @@ def _assert_batched_vlm_reporter_events(reporter: RecordingReporter) -> None:
     assert finish_event["prefill_tokens_processed"] >= begin_event["cached_tokens"]
 
 
+def _expected_cached_text_prompt_tokens(model_kit, prompt: str) -> set[int]:
+    token_count = len(model_kit.tokenize(prompt))
+    # The runtime cache may include the sampled stop token; generated_text does not.
+    return {token_count, token_count + 1}
+
+
 class TestVisionModels:
     @classmethod
     def setup_class(cls):
@@ -326,7 +332,9 @@ class TestVisionModels:
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         cached_prompt = prompt + generated_text
-        expected_cached_tokens = len(model_kit.tokenize(cached_prompt))
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
         prompt = cached_prompt + "[INST]What was the main character's name?[/INST]"
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
@@ -335,7 +343,7 @@ class TestVisionModels:
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == expected_cached_tokens
+        assert begin_event["cached_tokens"] in expected_cached_tokens
         assert "aldric" in generated_text.lower()
 
     def test_qwen2_vision(self):
@@ -556,7 +564,9 @@ You are a helpful assistant.<|im_end|>
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         cached_prompt = prompt + generated_text
-        expected_cached_tokens = len(model_kit.tokenize(cached_prompt))
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
         prompt = cached_prompt + dedent("""\
             <end_of_turn>
             <start_of_turn>user
@@ -570,7 +580,7 @@ You are a helpful assistant.<|im_end|>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == expected_cached_tokens
+        assert begin_event["cached_tokens"] in expected_cached_tokens
         assert len(generated_text.strip()) > 0
 
     def test_gemma3_text_only_long_original_prompt_caching(self):
@@ -627,7 +637,9 @@ Summarize this in one sentence<end_of_turn>
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
-        expected_cached_tokens = len(model_kit.tokenize(cached_prompt))
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
         prompt = cached_prompt + dedent("""\
                 <end_of_turn>
                 <start_of_turn>user
@@ -639,7 +651,7 @@ Summarize this in one sentence<end_of_turn>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == expected_cached_tokens
+        assert begin_event["cached_tokens"] in expected_cached_tokens
         assert len(generated_text.strip()) > 0
 
     def test_gemma3n_vision(self):
@@ -741,7 +753,9 @@ Summarize this in one sentence<end_of_turn>
         assert begin_event["cached_tokens"] == 0
         assert len(generated_text) > 0
 
-        expected_cached_tokens = len(model_kit.tokenize(prompt + generated_text))
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, prompt + generated_text
+        )
         second_conversation = first_conversation + [
             {
                 "role": "assistant",
@@ -763,16 +777,13 @@ Summarize this in one sentence<end_of_turn>
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
 
         follow_up_text, reporter = generate_text(prompt)
-        second_update_events = [
-            event for event in reporter.events if event["type"] == "update"
-        ]
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == expected_cached_tokens
-        assert len(second_update_events) <= len(first_update_events)
+        assert begin_event["cached_tokens"] in expected_cached_tokens
+        finish_event = reporter.events[-1]
         assert (
-            second_update_events[-1]["prefill_tokens_processed"]
-            < first_update_events[-1]["prefill_tokens_processed"]
+            finish_event["prefill_tokens_processed"] - begin_event["cached_tokens"]
+            <= CACHING_TEST_PREFILL_STEP_SIZE
         )
         assert len(follow_up_text.strip()) > 0
 
@@ -961,7 +972,9 @@ Summarize this in one sentence<end_of_turn>
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         cached_prompt = prompt + generated_text
-        expected_cached_tokens = len(model_kit.tokenize(cached_prompt))
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
         prompt = cached_prompt + dedent("""\
             <end_of_turn>
             <start_of_turn>user
@@ -975,7 +988,7 @@ Summarize this in one sentence<end_of_turn>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == expected_cached_tokens
+        assert begin_event["cached_tokens"] in expected_cached_tokens
         assert len(generated_text.strip()) > 0
 
     # TODO(will): Parameterize and de-dup
@@ -1032,7 +1045,9 @@ Summarize this in one sentence<end_of_turn>
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
-        expected_cached_tokens = len(model_kit.tokenize(cached_prompt))
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
         prompt = cached_prompt + dedent("""\
                 <end_of_turn>
                 <start_of_turn>user
@@ -1044,7 +1059,7 @@ Summarize this in one sentence<end_of_turn>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == expected_cached_tokens
+        assert begin_event["cached_tokens"] in expected_cached_tokens
         assert len(generated_text.strip()) > 0
 
     def test_gemma3n_vision_long_prompt_progress_reported(self):
@@ -1238,21 +1253,21 @@ Summarize this in one sentence<end_of_turn>
         scratchpad_text = generated_text[:final_index]
         assert len(scratchpad_text.strip()) > 0
 
-        second_prompt = (
-            first_prompt
-            + control_word
-            + dedent("""\
+        cached_prompt = first_prompt + generated_text
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
+        second_prompt = cached_prompt + dedent("""\
             <|im_end|>
             <|im_start|>user
             What was the exact single-word final answer from your previous message? Reply with only that word.<|im_end|>
             <|im_start|>assistant
             """)
-        )
 
         _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > len(first_prompt_tokens) // 2
+        assert begin_event["cached_tokens"] in expected_cached_tokens
         assert len(follow_up_text.strip()) > 0
 
     def test_qwen3_5_multi_image_process_prompt_preserves_image_positions(self):
