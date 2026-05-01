@@ -8,7 +8,7 @@ from mlx_engine.model_kit.batched_vision import (
     BatchedVisionModelKit,
 )
 from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, TypeAlias
 import json
 import logging
 from pathlib import Path
@@ -63,6 +63,10 @@ from mlx_engine.utils.generation_helpers import (
 
 
 logger = logging.getLogger(__name__)
+
+SequentialGenerationKit: TypeAlias = ModelKit | VisionModelKit
+BatchedGenerationKit: TypeAlias = BatchedModelKit | BatchedVisionModelKit
+LoadedModelKit: TypeAlias = SequentialGenerationKit | BatchedGenerationKit
 
 
 def _handle_stop_string_detected(
@@ -130,7 +134,7 @@ def load_model(
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
     prefill_step_size: Optional[int] = None,
-) -> ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit:
+) -> LoadedModelKit:
     """
     Load a language model or vision-language model from the specified path.
 
@@ -152,7 +156,7 @@ def load_model(
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
 
     Returns:
-        ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit: An initialized model instance:
+        LoadedModelKit: An initialized model instance:
             - ModelKit: for sequential text-only models and vocab-only loads
             - VisionModelKit: for legacy sequential vision loads
             - BatchedModelKit: for text-only continuous batching
@@ -262,7 +266,7 @@ def load_model(
 
 
 def load_draft_model(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: LoadedModelKit,
     path: str | Path,
 ) -> None:
     if not is_speculative_decoding_supported(model_kit):
@@ -273,7 +277,7 @@ def load_draft_model(
 
 
 def is_draft_model_compatible(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: LoadedModelKit,
     path: str | Path,
 ) -> bool:
     if not is_speculative_decoding_supported(model_kit):
@@ -282,7 +286,7 @@ def is_draft_model_compatible(
 
 
 def unload_draft_model(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: LoadedModelKit,
 ) -> None:
     if not is_speculative_decoding_supported(model_kit):
         return
@@ -290,7 +294,7 @@ def unload_draft_model(
 
 
 def create_generator(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: LoadedModelKit,
     prompt_tokens: List[int],
     **kwargs,
 ) -> Iterator[GenerationResult]:
@@ -302,7 +306,7 @@ def create_generator(
     standard language models and vision-language models.
 
     Args:
-        model_kit (ModelKit | VisionModelKit): The initialized model to use for generation
+        model_kit (LoadedModelKit): The initialized model to use for generation
         prompt_tokens (List[int]): List of token IDs representing the input prompt
         prompt_progress_reporter (Optional[PromptProgressReporter]): Reporter for receiving prompt
             processing progress updates. Reporter methods should return True to continue processing,
@@ -351,7 +355,7 @@ def create_generator(
 
 @contextmanager
 def _sequential_gen_abort_handler(
-    model_kit: ModelKit | VisionModelKit, request_id: Optional[str]
+    model_kit: SequentialGenerationKit, request_id: Optional[str]
 ):
     """
     Acquires the generation lock for sequential generation, with support for cancellation.
@@ -391,7 +395,7 @@ def _sequential_gen_abort_handler(
 
 
 def _sequential_generation(
-    model_kit: ModelKit | VisionModelKit,
+    model_kit: SequentialGenerationKit,
     prompt_tokens: List[int],
     *,
     prompt_progress_reporter: Optional[PromptProgressReporter] = None,
@@ -598,7 +602,7 @@ def _sequential_generation(
 
 
 def _batched_generation(
-    model_kit: BatchedModelKit | BatchedVisionModelKit,
+    model_kit: BatchedGenerationKit,
     prompt_tokens: List[int],
     *,
     prompt_progress_reporter: Optional[PromptProgressReporter] = None,
@@ -773,7 +777,7 @@ def _batched_generation(
 
 
 def stop_generation(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: LoadedModelKit,
     request_id: str,
 ):
     """
@@ -792,21 +796,21 @@ def stop_generation(
 
 
 def unload(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: LoadedModelKit,
 ):
     model_kit.shutdown()
 
 
 def tokenize(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: LoadedModelKit,
     prompt: str,
 ) -> List[int]:
     """
     Convert a text prompt into a list of token IDs using the model's tokenizer.
 
     Args:
-        model_kit (ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit):
-            The model kit instance containing the tokenizer to use for tokenization
+        model_kit (LoadedModelKit): The model kit instance containing the tokenizer
+            to use for tokenization
         prompt (str): The raw text prompt to be tokenized
 
     Returns:
