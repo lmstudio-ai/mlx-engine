@@ -6,7 +6,10 @@ import mlx.core as mx
 import mlx_vlm
 
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
-from mlx_engine.utils.image_utils import convert_to_pil, custom_resize
+from mlx_engine.model_kit.batched_vision.qwen_mrope import (
+    apply_qwen_image_mrope_state,
+)
+from mlx_engine.utils.image_utils import convert_to_pil
 
 
 @dataclass
@@ -20,7 +23,6 @@ def prepare_prompt_inputs(
     *,
     prompt_tokens: list[int],
     images_b64: list[str] | None,
-    max_image_size: tuple[int, int] | None,
     tokenizer,
     processor,
     config: dict,
@@ -35,12 +37,9 @@ def prepare_prompt_inputs(
             image_spans=[],
         )
 
-    # Keep image decode and processor prep off the generation thread.
+    # Request prep runs on the cache I/O thread before generation insertion.
     prompt = tokenizer.decode(prompt_tokens) or " "
-    images = custom_resize(
-        convert_to_pil(images_b64),
-        max_size=max_image_size,
-    )
+    images = convert_to_pil(images_b64)
     image_token_index = get_image_token_index(config)
     raw_inputs = mlx_vlm.prepare_inputs(
         processor=processor,
@@ -66,7 +65,11 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
     if prepared_prompt.raw_inputs is None:
         input_ids = mx.array(prepared_prompt.prompt_input_ids, dtype=mx.int32)[None, :]
         embedding_output = model.get_input_embeddings(input_ids)
-        return embedding_output.to_dict()
+        return {
+            key: value
+            for key, value in embedding_output.to_dict().items()
+            if value is not None
+        }
 
     raw_inputs = prepared_prompt.raw_inputs
     input_ids = raw_inputs["input_ids"]
@@ -83,10 +86,21 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
         mask=attention_mask,
         **data_kwargs,
     )
-    return {
+    apply_qwen_image_mrope_state(
+        model,
+        input_ids=input_ids,
+        image_grid_thw=raw_inputs.get("image_grid_thw"),
+    )
+    prompt_kwargs = {
         **data_kwargs,
-        **embedding_output.to_dict(),
+        **{
+            key: value
+            for key, value in embedding_output.to_dict().items()
+            if value is not None
+        },
     }
+    _add_language_model_rope_state(model, prompt_kwargs)
+    return prompt_kwargs
 
 
 def build_cached_prompt_kwargs(
@@ -102,17 +116,40 @@ def build_cached_prompt_kwargs(
         prompt_kwargs["inputs_embeds"] = prompt_kwargs["inputs_embeds"][
             :, cached_prefix_len:
         ]
+        if "position_ids" in prompt_kwargs:
+            # MRoPE image positions are request-local; slice them with embeds.
+            prompt_kwargs["position_ids"] = prompt_kwargs["position_ids"][
+                :, :, cached_prefix_len:
+            ]
         return prompt_kwargs
 
     input_ids = mx.array(prompt_input_ids, dtype=mx.int32)[None, :]
     embedding_output = model.get_input_embeddings(input_ids)
-    prompt_kwargs = embedding_output.to_dict()
+    prompt_kwargs = {
+        key: value
+        for key, value in embedding_output.to_dict().items()
+        if value is not None
+    }
 
     # Prefix restores carry the tiny RoPE delta side state in memory.
     if rope_deltas is not None and prompt_kwargs.get("rope_deltas") is None:
         prompt_kwargs["rope_deltas"] = rope_deltas
 
     return prompt_kwargs
+
+
+def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
+    language_model = getattr(model, "language_model", None)
+    if language_model is None:
+        return
+
+    position_ids = getattr(language_model, "_position_ids", None)
+    if position_ids is not None:
+        prompt_kwargs["position_ids"] = position_ids
+
+    rope_deltas = getattr(language_model, "_rope_deltas", None)
+    if rope_deltas is not None:
+        prompt_kwargs["rope_deltas"] = rope_deltas
 
 
 def get_image_token_index(config: dict) -> int | None:

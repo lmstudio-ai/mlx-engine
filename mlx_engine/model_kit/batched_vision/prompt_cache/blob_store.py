@@ -117,11 +117,11 @@ class TemporarySafetensorBlobStore:
         )
         return blob_len
 
-    def load_prompt_cache(self, key: str) -> list[Any]:
+    def load_record(self, key: str) -> list[Any]:
         """Load a committed record; missing keys are caller invariant errors."""
         ref = self._records[key]
         reader = _BlobReader(self._fd, ref.offset, ref.length)
-        return _load_prompt_cache_from_file(reader)
+        return _load_record_from_file(reader)
 
     def exists(self, key: str) -> bool:
         return key in self._records
@@ -214,7 +214,7 @@ class TemporarySafetensorBlobStore:
             os.ftruncate(self._fd, self._end)
 
 
-def _load_prompt_cache_from_file(file_obj) -> list[Any]:
+def _load_record_from_file(file_obj) -> list[Any]:
     """Deserialize one safetensors blob back into MLX-LM cache objects."""
     arrays, safetensor_metadata = mx.load(
         file_obj,

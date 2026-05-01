@@ -1,8 +1,10 @@
-from typing import Optional
-from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
-from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
-from mlx_engine.model_kit.model_kit import ModelKit
-from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
+from typing import Any, Optional, Protocol
+
+
+class _TokenKit(Protocol):
+    tokenizer: Any
+    model_type: str | None
+
 
 # Taken from https://github.com/ggml-org/llama.cpp/blob/971f245/src/llama-vocab.cpp#L1807-L1814
 DEFAULT_EOT_TOKENS = [
@@ -50,7 +52,7 @@ def _get_eot_token_ids(tokenizer, model_type: Optional[str] = None) -> set[int]:
 
 
 def sanitize_eos_tokens(
-    model_kit: ModelKit | VisionModelKit | BatchedModelKit | BatchedVisionModelKit,
+    model_kit: _TokenKit,
 ) -> None:
     # Remove (probably) incorrect EOS tokens
     tokenizer = model_kit.tokenizer

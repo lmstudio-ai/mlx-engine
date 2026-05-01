@@ -29,7 +29,9 @@ class PromptImageSpan:
 
 
 @dataclass
-class StoredPromptState:
+class LoadedPromptState:
+    """Prompt cache materialized from physical cache-store records."""
+
     cached_prefix_len: int
     prompt_cache: list[Any]
 

@@ -61,8 +61,6 @@ from mlx_engine.utils.generation_helpers import (
     should_yield_token,
 )
 
-MAX_TOP_LOGPROBS = 10
-
 
 logger = logging.getLogger(__name__)
 
@@ -232,13 +230,6 @@ def load_model(
                 warn_if_parallel(
                     "concurrency is not supported with KV Cache Quantization"
                 )
-                return False
-            # 3. Vision models are not compatible with batching yet
-            if "vision_config" in config_json:
-                if parallel_requested:
-                    raise ValueError(
-                        "numParallelSessions must be 1 for vision models as they do not currently support continuous batching"
-                    )
                 return False
             return True
 
@@ -656,13 +647,16 @@ def _batched_generation(
         prompt_progress_reporter, emit_begin=True
     )
 
+    logits_processors = setup_repetition_logits_processors(
+        repetition_penalty,
+        repetition_context_size,
+        prompt_tokens,
+        input_tokens,
+    )
+    sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
+
     if isinstance(model_kit, BatchedVisionModelKit):
-        logits_processors = setup_repetition_logits_processors(
-            repetition_penalty,
-            repetition_context_size,
-            prompt_tokens,
-            input_tokens,
-        )
+        # `max_image_size` is legacy-only; batched VLM lets mlx-vlm processors resize.
         if json_schema is not None:
             logits_processors.append(
                 build_json_schema_logits_processor(
@@ -671,12 +665,10 @@ def _batched_generation(
                 )
             )
 
-        sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
         stream = model_kit.generate(
             prompt_tokens=input_tokens,
             request_id=request_id,
             images_b64=images_b64,
-            max_image_size=max_image_size,
             max_tokens=max_tokens,
             prompt_progress_callback=mlx_lm_callback,
             top_logprobs=top_logprobs,
@@ -684,17 +676,6 @@ def _batched_generation(
             logits_processors=logits_processors,
         )
     else:
-        # Setup logits processors
-        logits_processors = setup_repetition_logits_processors(
-            repetition_penalty,
-            repetition_context_size,
-            prompt_tokens,
-            input_tokens,
-        )
-
-        # Set up sampler
-        sampler = create_sampler(temp, top_p, min_p, min_tokens_to_keep, top_k)
-
         # Add outlines logits processor if json_schema is provided
         if json_schema is not None:
             logits_processors.append(

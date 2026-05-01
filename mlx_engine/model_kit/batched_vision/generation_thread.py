@@ -39,7 +39,6 @@ class GenerationRequest:
     prompt_tokens: list[int]
     request_id: str
     images_b64: list[str] | None
-    max_image_size: tuple[int, int] | None
     sampler: Callable[[mx.array], mx.array]
     logits_processors: list
     top_logprobs: int
@@ -112,7 +111,11 @@ class PromptCacheIOThread:
         self._closed = Event()
 
     def start(self) -> None:
-        self._thread = Thread(target=self._run, daemon=True)
+        self._thread = Thread(
+            target=self._run,
+            name="mlx-engine-vlm-cache-io",
+            daemon=True,
+        )
         self._thread.start()
 
     def close(self) -> None:

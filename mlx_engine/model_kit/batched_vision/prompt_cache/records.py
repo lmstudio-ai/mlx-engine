@@ -143,9 +143,6 @@ def assemble_prompt_cache_chunks(
     layout: PromptCacheLayout,
 ) -> list[Any]:
     """Rebuild a runtime prompt cache from loaded chunk records."""
-    if len(chunk_prompt_caches) == 1:
-        return chunk_prompt_caches[0]
-
     assembled = []
     layer_count = len(chunk_prompt_caches[-1])
     for layer_idx in range(layer_count):

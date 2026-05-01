@@ -11,6 +11,7 @@ from typing import Callable, Iterable
 import mlx.core as mx
 import mlx_lm
 import mlx_vlm
+from transformers.image_utils import ChannelDimension
 
 from mlx_engine.model_kit.batched_model_kit_types import (
     BatchedGenerationResponse,
@@ -79,6 +80,7 @@ class BatchedVisionModelKit:
         self._generation_thread = None
         self._generation_thread_state: GenerationThreadState | None = None
         self._shutdown = Event()
+        self._startup_complete = Event()
         self.prefill_step_size = prefill_step_size
         self._model_path = model_path
         self._max_seq_nums = max_seq_nums
@@ -102,11 +104,6 @@ class BatchedVisionModelKit:
             self._cache_io_thread.enqueue_save,
         )
 
-        # Keep tokenizer/config (and the pure-Python processor) on the caller
-        # thread, but load the MLX-backed model on the generation thread. MLX
-        # 0.31.2 tolerates the threaded stream usage we want, but async_eval
-        # still trips if the underlying MLX arrays/modules were created on a
-        # different thread.
         self._init_tokenizer_only()
         self.processor = mlx_vlm.utils.load_processor(
             self._model_path,
@@ -114,6 +111,7 @@ class BatchedVisionModelKit:
             eos_token_ids=self._get_eos_token_ids(),
             trust_remote_code=self._trust_remote_code,
         )
+        self._ensure_channel_first_if_fast_processor()
         image_processor = mlx_vlm.utils.load_image_processor(
             self._model_path,
             trust_remote_code=self._trust_remote_code,
@@ -137,21 +135,33 @@ class BatchedVisionModelKit:
         )
         self.detokenizer = self.tokenizer.detokenizer
 
+    def _ensure_channel_first_if_fast_processor(self) -> None:
+        if self.model_type != "lfm2-vl":
+            return
+        image_processor = getattr(self.processor, "image_processor", None)
+        if image_processor is not None and getattr(image_processor, "is_fast", False):
+            image_processor.input_data_format = ChannelDimension.FIRST
+
     def _load_model(self) -> None:
         self.model, _ = mlx_vlm.utils.load_model(
             self._model_path,
             lazy=False,
             trust_remote_code=self._trust_remote_code,
         )
+        mx.synchronize()
         mx.clear_cache()
 
     def start(self):
-        mx.synchronize()
-        self._cache_io_thread.start()
         self._generation_thread = Thread(
-            target=self._generate_with_exception_handling, daemon=True
+            target=self._generate_with_exception_handling,
+            name="mlx-engine-vlm-generation",
+            daemon=True,
         )
         self._generation_thread.start()
+        self._startup_complete.wait()
+        if isinstance(self._backend_exception, Exception):
+            raise self._backend_exception
+        self._cache_io_thread.start()
 
     def tokenize(self, prompt: str) -> list[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
@@ -165,7 +175,6 @@ class BatchedVisionModelKit:
         prompt_tokens: list[int],
         request_id: str,
         images_b64: list[str] | None,
-        max_image_size: tuple[int, int] | None,
         prompt_progress_callback,
         top_logprobs: int,
         max_tokens: int,
@@ -184,7 +193,6 @@ class BatchedVisionModelKit:
                 prompt_tokens=prompt_tokens,
                 request_id=request_id,
                 images_b64=images_b64,
-                max_image_size=max_image_size,
                 sampler=sampler,
                 logits_processors=logits_processors,
                 top_logprobs=top_logprobs,
@@ -219,6 +227,8 @@ class BatchedVisionModelKit:
             if self._generation_thread:
                 self._generation_thread.join()
             self._cache_io_thread.close()
+            self.model = None
+            mx.clear_cache()
 
     def is_shutdown(self) -> bool:
         return self._shutdown.is_set()
@@ -238,14 +248,13 @@ class BatchedVisionModelKit:
 
     def _generate_with_exception_handling(self):
         try:
-            if self.model is None:
-                self._load_model()
             self._generate()
         except Exception:
             err_string = f"Encountered fatal exception in the backend generation thread: {traceback.format_exc()}"
             logger.error(err_string)
             self._backend_exception = Exception(err_string)
             self._fail_all_requests(self._backend_exception)
+            self._startup_complete.set()
 
             # Sleep to allow error messages to be logged and propagated to clients.
             time.sleep(3)
@@ -277,7 +286,6 @@ class BatchedVisionModelKit:
         prepared_prompt = prepare_prompt_inputs(
             prompt_tokens=request.prompt_tokens,
             images_b64=request.images_b64,
-            max_image_size=request.max_image_size,
             tokenizer=self.tokenizer,
             processor=self.processor,
             config=self.config,
@@ -329,10 +337,14 @@ class BatchedVisionModelKit:
                 prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
                 inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
+        save_point_progress = prompt_progress
+        if getattr(self.model, "no_chunked_prefill", False):
+            # One-shot prefill skips exact intermediate prompt boundaries.
+            save_point_progress = prompt_token_count
         cache_save_points = self._prompt_cache_coordinator.save_points_after(
             prompt_input_ids=full_prompt_input_ids,
             image_spans=prepared_prompt.image_spans,
-            prompt_progress=prompt_progress,
+            prompt_progress=save_point_progress,
         )
         prompt_cache_save_callback = None
         if cache_save_points:
@@ -549,11 +561,7 @@ class BatchedVisionModelKit:
                         prompt_input_ids=response.all_tokens,
                         image_spans=result.image_spans,
                         prompt_cache=response.prompt_cache,
-                        rope_deltas=(
-                            None
-                            if response.rope_deltas is None
-                            else response.rope_deltas
-                        ),
+                        rope_deltas=response.rope_deltas,
                     )
                 result.rqueue.put(None)
                 del state.active[response.uid]
@@ -593,6 +601,10 @@ class BatchedVisionModelKit:
             request.rqueue.put(error)
 
     def _generate(self):
+        if self.model is None:
+            self._load_model()
+        self._startup_complete.set()
+
         state = GenerationThreadState(batch_generator=self._make_batch_generator())
         self._generation_thread_state = state
 

@@ -22,19 +22,14 @@ from mlx_vlm.generate import (
     wired_limit,
 )
 
-# The local batcher owns generation on the mlx-engine generation thread, so it
-# should not mutate mlx-vlm's module-global generation stream.
-_generation_stream = mx.new_thread_local_stream(mx.default_device())
-
 PromptCacheSaveCallback = Callable[[list[Any], list[int]], None]
 LogitsProcessor = Callable[[mx.array, mx.array], mx.array]
 
 
 @contextlib.contextmanager
 def use_generation_stream():
-    """Run MLX model work on the local batcher's generation stream."""
-    with mx.stream(_generation_stream):
-        yield
+    """Generation-thread MLX work uses that thread's default stream."""
+    yield
 
 
 @dataclass
@@ -311,8 +306,13 @@ class GenerationBatch:
                 seq_tokens.append(token)
         return tokens, token_logprob_list, top_idx_list, top_logprob_list
 
-    def extract_cache(self, idx: int) -> list[Any]:
-        return [cache.extract(idx) for cache in self.prompt_cache]
+    def extract_cache(self, idx: int) -> list[Any] | None:
+        extracted = []
+        for cache in self.prompt_cache:
+            if not hasattr(cache, "extract") or getattr(cache, "keys", True) is None:
+                return None
+            extracted.append(cache.extract(idx))
+        return extracted
 
     def extract_rope_deltas(self, idx: int) -> Any | None:
         if self._rope_deltas is None:
@@ -367,7 +367,7 @@ class GenerationBatch:
                     [self._next_token_logprobs, prefilled._next_token_logprobs]
                 )
 
-            if self._next_top_idx is not None or prefilled._next_top_idx is not None:
+            if self._next_top_idx is not None:
                 self._next_top_idx = mx.concatenate(
                     [self._next_top_idx, prefilled._next_top_idx]
                 )
@@ -434,7 +434,10 @@ class GenerationBatch:
         while save_points and save_points[0] <= current_len:
             save_point = save_points.pop(0)
             if save_point == current_len:
-                callback(self.extract_cache(idx), list(self.tokens[idx]))
+                prompt_cache = self.extract_cache(idx)
+                if prompt_cache is None:
+                    return
+                callback(prompt_cache, list(self.tokens[idx]))
                 if not save_points:
                     save_points.append(save_point + DEFAULT_PREFIX_CHUNK_SIZE)
 
@@ -591,15 +594,31 @@ class _PromptPrefill:
             cache=self.prompt_cache,
             inputs_embeds=self._inputs_embeds[:, :n],
             n_to_process=n,
-            **self._prompt_kwargs,
+            **self._prompt_kwargs_for_next(n),
         )
         mx.eval([c.state for c in self.prompt_cache])
         self._inputs_embeds = self._inputs_embeds[:, n:]
         self._input_ids = self._input_ids[:, n:]
+        self._drop_processed_prompt_kwargs(n)
         self._processed_prefix_len += n
         self._emit_cache_save_snapshots()
         mx.clear_cache()
         return n
+
+    def _prompt_kwargs_for_next(self, n: int) -> dict:
+        if "position_ids" not in self._prompt_kwargs:
+            return self._prompt_kwargs
+
+        prompt_kwargs = dict(self._prompt_kwargs)
+        # Qwen MRoPE prompt positions are per token, so chunk them with embeds.
+        prompt_kwargs["position_ids"] = prompt_kwargs["position_ids"][:, :, :n]
+        return prompt_kwargs
+
+    def _drop_processed_prompt_kwargs(self, n: int) -> None:
+        if "position_ids" in self._prompt_kwargs:
+            self._prompt_kwargs["position_ids"] = self._prompt_kwargs["position_ids"][
+                :, :, n:
+            ]
 
     def _next_cache_save_point(self) -> Optional[int]:
         return self._cache_save_points[0] if self._cache_save_points else None
@@ -707,7 +726,7 @@ class BatchGenerator:
         self._steps_counter = 0
 
         self._wire_stack = contextlib.ExitStack()
-        self._wire_stack.enter_context(wired_limit(model, [_generation_stream]))
+        self._wire_stack.enter_context(wired_limit(model))
         self._generation_batch = GenerationBatch.empty(
             self.model,
             self.stop_criteria,
@@ -758,29 +777,27 @@ class BatchGenerator:
         return uid
 
     def next(self):
-        with mx.stream(_generation_stream):
-            return self._next()
+        return self._next()
 
     def remove(self, uid) -> bool:
-        with mx.stream(_generation_stream):
-            for i, sequence in enumerate(self._unprocessed_sequences):
-                if sequence.uid == uid:
-                    self._unprocessed_sequences.pop(i)
-                    return True
-
-            if self._prompt_batch is not None and uid == self._prompt_batch.uid:
-                self._prompt_batch.prompt_cache = []
-                self._prompt_batch = None
-                mx.clear_cache()
+        for i, sequence in enumerate(self._unprocessed_sequences):
+            if sequence.uid == uid:
+                self._unprocessed_sequences.pop(i)
                 return True
 
-            if uid in self._generation_batch.uids:
-                idx = self._generation_batch.uids.index(uid)
-                keep = [i for i in range(len(self._generation_batch.uids)) if i != idx]
-                self._generation_batch.filter(keep)
-                return True
+        if self._prompt_batch is not None and uid == self._prompt_batch.uid:
+            self._prompt_batch.prompt_cache = []
+            self._prompt_batch = None
+            mx.clear_cache()
+            return True
 
-            return False
+        if uid in self._generation_batch.uids:
+            idx = self._generation_batch.uids.index(uid)
+            keep = [i for i in range(len(self._generation_batch.uids)) if i != idx]
+            self._generation_batch.filter(keep)
+            return True
+
+        return False
 
     def _next(self):
         generation_responses = []

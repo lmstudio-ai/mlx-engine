@@ -31,7 +31,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_WRITE_ORDER,
     RecordKind,
-    StoredPromptState,
+    LoadedPromptState,
     make_record_key,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.blob_store import (
@@ -80,7 +80,7 @@ class VlmPromptCacheStore:
         self,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
-    ) -> StoredPromptState | None:
+    ) -> LoadedPromptState | None:
         """Load the longest matching cacheable prefix.
 
         The final prompt token stays uncached so generation has a suffix to
@@ -131,10 +131,9 @@ class VlmPromptCacheStore:
         cached_prefix_len: int,
         chunks: list[PromptPrefixChunk],
         record_keys_by_chunk_key: dict[str, list[str]],
-    ) -> StoredPromptState:
+    ) -> LoadedPromptState:
         """Load a selected prompt-cache restore chain."""
-        layout = self._layout
-        assert layout is not None
+        layout = self._require_layout()
 
         chunk_prompt_caches = []
 
@@ -173,7 +172,7 @@ class VlmPromptCacheStore:
             miss_chunks=0,
         )
 
-        return StoredPromptState(
+        return LoadedPromptState(
             cached_prefix_len=cached_prefix_len,
             prompt_cache=prompt_cache,
         )
@@ -185,7 +184,7 @@ class VlmPromptCacheStore:
     ) -> list[Any]:
         prompt_cache: list[Any] = [None] * len(layout.layer_kinds)
         for record_key in record_keys:
-            record_prompt_cache = self._blob_store.load_prompt_cache(record_key)
+            record_prompt_cache = self._blob_store.load_record(record_key)
             record_metadata = self._record_metadata_by_key[record_key]
 
             for layer_idx, cache in zip(
@@ -444,13 +443,16 @@ class VlmPromptCacheStore:
 
     def _cache_restore_planner(self) -> PromptCacheRestorePlanner:
         """Return a short-lived read-only view over committed indexes."""
-        layout = self._layout
-        assert layout is not None
         return PromptCacheRestorePlanner(
-            layout=layout,
+            layout=self._require_layout(),
             record_metadata_by_key=self._record_metadata_by_key,
             record_exists=self._blob_store.exists,
         )
+
+    def _require_layout(self) -> PromptCacheLayout:
+        if self._layout is None:
+            raise RuntimeError("prompt cache layout is not initialized")
+        return self._layout
 
     def _evict_key(self, key: str) -> None:
         self._total_bytes -= self._key_sizes.pop(key, 0)
