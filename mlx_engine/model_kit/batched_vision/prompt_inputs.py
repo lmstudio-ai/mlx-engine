@@ -14,6 +14,8 @@ from mlx_engine.utils.image_utils import convert_to_pil
 
 @dataclass
 class PreparedPrompt:
+    """Prompt tokens plus optional mlx-vlm multimodal processor inputs."""
+
     prompt_input_ids: list[int]
     raw_inputs: dict[str, Any] | None
     image_spans: list[PromptImageSpan]
@@ -27,6 +29,7 @@ def prepare_prompt_inputs(
     processor,
     config: dict,
 ) -> PreparedPrompt:
+    """Prepare one request for local batched VLM prompt processing."""
     if len(prompt_tokens) == 0:
         prompt_tokens = _tokenize(tokenizer, " ")
 
@@ -49,7 +52,7 @@ def prepare_prompt_inputs(
         resize_shape=None,
     )
     prompt_input_ids = raw_inputs["input_ids"].squeeze(0).tolist()
-    image_hashes = [_hash_resized_image(image) for image in images]
+    image_hashes = [_hash_prompt_image(image) for image in images]
     return PreparedPrompt(
         prompt_input_ids=prompt_input_ids,
         raw_inputs=raw_inputs,
@@ -62,6 +65,7 @@ def prepare_prompt_inputs(
 
 
 def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
+    """Build model kwargs for a full prompt prefill."""
     if prepared_prompt.raw_inputs is None:
         input_ids = mx.array(prepared_prompt.prompt_input_ids, dtype=mx.int32)[None, :]
         embedding_output = model.get_input_embeddings(input_ids)
@@ -109,6 +113,7 @@ def build_cached_prompt_kwargs(
     cached_prefix_len: int,
     rope_deltas: Any | None,
 ) -> dict:
+    """Build model kwargs for the uncached suffix after a prefix restore."""
     prompt_input_ids = prepared_prompt.prompt_input_ids[cached_prefix_len:]
     if prepared_prompt.raw_inputs is not None:
         prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
@@ -171,7 +176,7 @@ def _tokenize(tokenizer, prompt: str) -> list[int]:
     return ids
 
 
-def _hash_resized_image(image) -> str:
+def _hash_prompt_image(image) -> str:
     digest = hashlib.sha256()
     digest.update(image.mode.encode())
     digest.update(f"{image.size[0]}x{image.size[1]}".encode())
