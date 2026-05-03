@@ -1,13 +1,63 @@
 import argparse
 import logging
+import os
+import sys
+import time
 
 import mlx.core as mx
 
-from mlx_engine import load_model, unload
-from mlx_engine.distributed_rank import assert_not_source_checkout_runtime, run_worker_loop
-
 
 logger = logging.getLogger(__name__)
+
+distributed_init_started_at_env = "MLX_ENGINE_DISTRIBUTED_WORKER_INIT_STARTED_AT"
+source_checkout_runtime_path_segments = (
+    "/electron/vendor/llm-engine/build/",
+    "/electron/vendor/llm-engine/src/",
+)
+
+
+def normalized_runtime_path(path_value: str) -> str:
+    return path_value.replace("\\", "/")
+
+
+def assert_not_source_checkout_runtime() -> None:
+    python_executable = normalized_runtime_path(sys.executable)
+    for source_path_segment in source_checkout_runtime_path_segments:
+        if source_path_segment in python_executable:
+            raise RuntimeError(
+                "MLX distributed packaged rank is running from source-checkout "
+                f"Python {sys.executable}. Rebuild or stage the packaged MLX "
+                "runtime so ranks use the installed Amphibian Python."
+            )
+
+
+def init_distributed_with_retry(timeout_seconds: float):
+    started_at = float(os.environ.get(distributed_init_started_at_env, time.monotonic()))
+    os.environ[distributed_init_started_at_env] = str(started_at)
+
+    try:
+        return mx.distributed.init()
+    except RuntimeError as error:
+        elapsed_seconds = time.monotonic() - started_at
+        if elapsed_seconds >= timeout_seconds:
+            raise
+        logger.info(
+            "Distributed init failed while waiting for rank 0 after %.1fs: %s",
+            elapsed_seconds,
+            error,
+        )
+        time.sleep(min(2.0, max(0.0, timeout_seconds - elapsed_seconds)))
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "mlx_engine.distributed_worker",
+                *sys.argv[1:],
+            ],
+        )
+        raise
 
 
 def main() -> None:
@@ -18,6 +68,7 @@ def main() -> None:
     parser.add_argument("--max-kv-size", type=int, default=4096)
     parser.add_argument("--prefill-step-size", type=int, default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--distributed-init-timeout-seconds", type=float, default=120.0)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -26,13 +77,16 @@ def main() -> None:
     )
     assert_not_source_checkout_runtime()
 
-    group = mx.distributed.init()
+    group = init_distributed_with_retry(args.distributed_init_timeout_seconds)
     rank = group.rank()
     size = group.size()
     if rank == 0:
         raise RuntimeError(
             "Packaged distributed worker loop can only run on non-coordinator ranks."
         )
+
+    from mlx_engine import load_model, unload
+    from mlx_engine.distributed_rank import run_worker_loop
 
     logger.info("Starting packaged distributed worker rank %s/%s", rank, size)
     model_kit = load_model(
