@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 from typing import Any, Optional
 
 import mlx.core as mx
@@ -13,6 +14,25 @@ logger = logging.getLogger(__name__)
 RANK_PROTOCOL_VERSION = 1
 MESSAGE_TYPE_GENERATE = "generate"
 MESSAGE_TYPE_SHUTDOWN = "shutdown"
+SOURCE_CHECKOUT_RUNTIME_PATH_SEGMENTS = (
+    "/electron/vendor/llm-engine/build/",
+    "/electron/vendor/llm-engine/src/",
+)
+
+
+def normalized_runtime_path(path_value: str) -> str:
+    return path_value.replace("\\", "/")
+
+
+def assert_not_source_checkout_runtime() -> None:
+    python_executable = normalized_runtime_path(sys.executable)
+    for source_path_segment in SOURCE_CHECKOUT_RUNTIME_PATH_SEGMENTS:
+        if source_path_segment in python_executable:
+            raise RuntimeError(
+                "MLX distributed packaged rank is running from source-checkout "
+                f"Python {sys.executable}. Rebuild or stage the packaged MLX "
+                "runtime so ranks use the installed Amphibian Python."
+            )
 
 
 def require_object(value: Any, label: str) -> dict[str, Any]:
@@ -239,6 +259,7 @@ def run_generation_request(model_kit, request: dict[str, Any]) -> None:
 
 
 def run_worker_loop(rank: int, model_kit) -> None:
+    assert_not_source_checkout_runtime()
     logger.info("Native distributed rank %s waiting for rank 0 requests", rank)
     while True:
         try:
