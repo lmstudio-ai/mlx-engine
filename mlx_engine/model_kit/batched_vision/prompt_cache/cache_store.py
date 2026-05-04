@@ -175,10 +175,16 @@ class VlmPromptCacheStore:
             prompt_cache=prompt_cache,
         )
 
-    def record_restore_tokens(self, *, hit_tokens: int, miss_tokens: int) -> None:
-        """Record combined hot/disk prompt-cache efficiency for one request."""
+    def record_restore_tokens(
+        self,
+        *,
+        hit_tokens: int,
+        miss_tokens: int,
+    ) -> tuple[int, int]:
+        """Record one request and return lifetime hit/miss token totals."""
         self._restore_hit_tokens += hit_tokens
         self._restore_miss_tokens += miss_tokens
+        return self._restore_hit_tokens, self._restore_miss_tokens
 
     def _load_one_chunk(
         self,

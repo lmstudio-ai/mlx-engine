@@ -40,8 +40,12 @@ class _FakeCacheStore:
         self.loaded_plans.append(plan)
         return self.loaded_state
 
-    def record_restore_tokens(self, *, hit_tokens: int, miss_tokens: int) -> None:
+    def record_restore_tokens(self, *, hit_tokens: int, miss_tokens: int):
         self.recorded_tokens.append((hit_tokens, miss_tokens))
+        return (
+            sum(hit for hit, _miss in self.recorded_tokens),
+            sum(miss for _hit, miss in self.recorded_tokens),
+        )
 
     def can_store_records(self) -> bool:
         return True

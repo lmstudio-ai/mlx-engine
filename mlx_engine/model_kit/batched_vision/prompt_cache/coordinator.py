@@ -80,9 +80,23 @@ class VlmPromptCacheCoordinator:
         )
         hit_tokens = 0 if restored is None else restored.cached_prefix_len
         prefill_tokens = max(0, len(prompt_input_ids) - 1)
-        self._cache_store.record_restore_tokens(
-            hit_tokens=hit_tokens,
-            miss_tokens=prefill_tokens - hit_tokens,
+        miss_tokens = prefill_tokens - hit_tokens
+        lifetime_hit_tokens, lifetime_miss_tokens = (
+            self._cache_store.record_restore_tokens(
+                hit_tokens=hit_tokens,
+                miss_tokens=miss_tokens,
+            )
+        )
+        lifetime_tokens = lifetime_hit_tokens + lifetime_miss_tokens
+        lifetime_efficiency = (
+            100.0 * lifetime_hit_tokens / lifetime_tokens if lifetime_tokens else 0.0
+        )
+        logger.info(
+            "Prompt cache restore: cached_tokens=%s uncached_tokens=%s "
+            "lifetime_efficiency=%.2f%%",
+            hit_tokens,
+            miss_tokens,
+            lifetime_efficiency,
         )
         return restored
 

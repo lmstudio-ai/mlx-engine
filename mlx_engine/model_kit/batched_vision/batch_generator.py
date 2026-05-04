@@ -631,6 +631,15 @@ class _PromptPrefill:
         if remaining_tokens > self.prefill_step_size:
             return min(self.prefill_step_size, remaining_tokens - 1)
 
+        if any(type(cache).__name__ == "ArraysCache" for cache in self.prompt_cache):
+            # Opaque state caches are restorable only at exact saved boundaries.
+            max_reusable_prefix_len = self._processed_prefix_len + remaining_tokens - 1
+            target_prefix_len = (
+                max_reusable_prefix_len // DEFAULT_PREFIX_CHUNK_SIZE
+            ) * DEFAULT_PREFIX_CHUNK_SIZE
+            if target_prefix_len > self._processed_prefix_len:
+                return target_prefix_len - self._processed_prefix_len
+
         return 0
 
     def _prompt_kwargs_for_next(self, n: int) -> dict:

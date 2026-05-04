@@ -73,6 +73,10 @@ class _FakeBatchCache:
         self.filtered.append(keep.tolist())
 
 
+class ArraysCache(_FakeBatchCache):
+    pass
+
+
 class _FakeScalarCache:
     def __init__(self, name: str = "scalar"):
         self.name = name
@@ -306,3 +310,50 @@ def test_batch_generator_aligns_restored_prefill_to_step_boundary(monkeypatch):
         generator.close()
 
     assert [call["n_to_process"] for call in model.calls] == [2, 4, None]
+
+
+def test_batch_generator_state_cache_lands_on_reusable_tail_boundary(monkeypatch):
+    """Opaque state caches need an exact checkpoint at the final 256 boundary."""
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "_make_cache",
+        lambda _model, _padding: [ArraysCache()],
+    )
+    model = _FakeModel()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=2048,
+    )
+    snapshots = []
+    prompt = list(range(1795))
+    prefix_chunks = build_prefix_cache_chunks(prompt, [])
+
+    def save_snapshot(cache, chunks, start_chunk_idx, end_chunk_idx, snapshot_len):
+        snapshots.append((cache, chunks, start_chunk_idx, end_chunk_idx, snapshot_len))
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=prefix_chunks,
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+            prompt_cache_save_callback=save_snapshot,
+        )
+
+        generator.next()
+        generator.next()
+    finally:
+        generator.close()
+
+    assert [call["n_to_process"] for call in model.calls] == [1792, None]
+    assert [
+        (start_chunk_idx, end_chunk_idx, snapshot_len)
+        for _, _, start_chunk_idx, end_chunk_idx, snapshot_len in snapshots
+    ] == [(0, 7, 1792)]
