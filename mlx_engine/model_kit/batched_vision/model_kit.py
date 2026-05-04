@@ -25,6 +25,10 @@ from mlx_engine.model_kit.batched_vision.batch_generator import (
 from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     VlmPromptCacheCoordinator,
 )
+from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
+    build_prefix_cache_chunks,
+    first_unsaved_prefix_cache_chunk_index,
+)
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
     VlmPromptCacheStore,
 )
@@ -326,7 +330,7 @@ class BatchedVisionModelKit:
         prompt_kwargs = None
         inputs_embeds = None
         cache = None
-        all_tokens = None
+        all_tokens = []
         rope_deltas = None
         prompt_progress = 0
         with use_generation_stream():
@@ -347,22 +351,24 @@ class BatchedVisionModelKit:
                 prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
                 inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
-        save_point_progress = prompt_progress
         if getattr(self.model, "no_chunked_prefill", False):
             # One-shot prefill skips exact intermediate prompt boundaries.
-            save_point_progress = prompt_token_count
-        cache_save_points = self._prompt_cache_coordinator.save_points_after(
-            prompt_input_ids=full_prompt_input_ids,
-            image_spans=prepared_prompt.image_spans,
-            prompt_progress=save_point_progress,
+            prompt_progress_for_cache_chunks = prompt_token_count
+        else:
+            prompt_progress_for_cache_chunks = prompt_progress
+        prefix_cache_chunks = build_prefix_cache_chunks(
+            full_prompt_input_ids,
+            prepared_prompt.image_spans,
         )
-        prompt_cache_save_callback = None
-        if cache_save_points:
-            prompt_cache_save_callback = (
-                self._prompt_cache_coordinator.make_save_callback(
-                    image_spans=prepared_prompt.image_spans
-                )
-            )
+        next_prefix_cache_chunk_idx = first_unsaved_prefix_cache_chunk_index(
+            prefix_cache_chunks,
+            prompt_progress_for_cache_chunks,
+        )
+        prompt_cache_save_callback = (
+            self._prompt_cache_coordinator.save_prompt_cache_snapshot
+            if self._prompt_cache_store.can_store_records()
+            else None
+        )
 
         request.rqueue.put((prompt_progress, prompt_token_count))
         uid = batch_generator.insert(
@@ -375,7 +381,9 @@ class BatchedVisionModelKit:
             all_tokens=all_tokens,
             rope_deltas=rope_deltas,
             prompt_kwargs=prompt_kwargs,
-            cache_save_points=cache_save_points,
+            prefix_cache_chunks=prefix_cache_chunks,
+            next_prefix_cache_chunk_idx=next_prefix_cache_chunk_idx,
+            image_spans=prepared_prompt.image_spans,
             prompt_cache_save_callback=prompt_cache_save_callback,
         )
 

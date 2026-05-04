@@ -40,10 +40,10 @@ class LoadedPromptState:
 class PromptPrefixChunk:
     """Logical identity for one reusable prompt-prefix chunk.
 
-    `key` is the rolling chunk hash. It includes prior chunks plus image hashes
-    whose placeholder spans are inside this chunk, so appending a later image
-    does not invalidate earlier chunks. Physical safetensor blobs are keyed
-    separately with `make_record_key(key, record_kind)`.
+    `key` is the rolling chunk hash. It includes prior chunks plus image spans
+    that overlap this chunk, so appending a later image does not invalidate
+    earlier chunks. Physical safetensor blobs are keyed separately with
+    `make_record_key(key, record_kind)`.
     """
 
     start: int

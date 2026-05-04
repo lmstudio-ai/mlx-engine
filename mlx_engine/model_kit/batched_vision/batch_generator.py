@@ -10,8 +10,13 @@ from typing import Any, Callable, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
+    extend_prefix_cache_chunks,
+)
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     DEFAULT_PREFIX_CHUNK_SIZE,
+    PromptImageSpan,
+    PromptPrefixChunk,
 )
 from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
@@ -22,8 +27,18 @@ from mlx_vlm.generate import (
     wired_limit,
 )
 
-PromptCacheSaveCallback = Callable[[list[Any], list[int]], None]
+PromptCacheSaveCallback = Callable[
+    [list[Any], list[PromptPrefixChunk], int, int, int], None
+]
 LogitsProcessor = Callable[[mx.array, mx.array], mx.array]
+
+
+@dataclass
+class _PrefixCacheSaveState:
+    chunks: list[PromptPrefixChunk]
+    next_chunk_idx: int
+    image_spans: list[PromptImageSpan]
+    callback: PromptCacheSaveCallback | None
 
 
 @contextlib.contextmanager
@@ -44,8 +59,7 @@ class _PendingSequence:
     all_tokens: list[int]
     rope_deltas: Any | None
     prompt_kwargs: dict
-    cache_save_points: list[int]
-    prompt_cache_save_callback: Optional[PromptCacheSaveCallback]
+    prefix_cache_save_state: _PrefixCacheSaveState
 
 
 def _batch_single_cache(cache: list[Any]) -> list[Any]:
@@ -204,12 +218,11 @@ class GenerationBatch:
         samplers: list[Callable[[mx.array], mx.array]],
         stop_criteria,
         max_tokens: list[int],
+        logits_processors: list[list[LogitsProcessor]],
+        prefix_cache_save_states: list[_PrefixCacheSaveState],
         top_logprobs_k: int = 0,
         all_tokens: Optional[list[list[int]]] = None,
         rope_deltas: Any | None = None,
-        logits_processors: Optional[list[list[LogitsProcessor]]] = None,
-        cache_save_points: Optional[list[list[int]]] = None,
-        prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
         self.model = model
         self.uids = uids
@@ -232,13 +245,8 @@ class GenerationBatch:
             if all_tokens is not None
             else [[] for _ in uids]
         )
-        self.logits_processors = logits_processors or [[] for _ in uids]
-        self._cache_save_points = (
-            [list(save_points) for save_points in cache_save_points]
-            if cache_save_points is not None
-            else [[] for _ in uids]
-        )
-        self._cache_save_callbacks = [prompt_cache_save_callback for _ in uids]
+        self.logits_processors = logits_processors
+        self._prefix_cache_save_states = list(prefix_cache_save_states)
         self._rope_deltas = _normalize_rope_deltas(rope_deltas)
 
     def __len__(self):
@@ -383,8 +391,7 @@ class GenerationBatch:
         )
 
         self.tokens.extend(prefilled.tokens)
-        self._cache_save_points.extend(prefilled._cache_save_points)
-        self._cache_save_callbacks.extend(prefilled._cache_save_callbacks)
+        self._prefix_cache_save_states.extend(prefilled._prefix_cache_save_states)
 
     def filter(self, keep: list[int]):
         self.uids = [self.uids[idx] for idx in keep]
@@ -393,8 +400,9 @@ class GenerationBatch:
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
         self._num_tokens = [self._num_tokens[idx] for idx in keep]
         self.tokens = [self.tokens[idx] for idx in keep]
-        self._cache_save_points = [self._cache_save_points[idx] for idx in keep]
-        self._cache_save_callbacks = [self._cache_save_callbacks[idx] for idx in keep]
+        self._prefix_cache_save_states = [
+            self._prefix_cache_save_states[idx] for idx in keep
+        ]
 
         if not keep:
             self.prompt_cache.clear()
@@ -425,21 +433,39 @@ class GenerationBatch:
             self._rope_deltas = self._rope_deltas[keep_arr]
 
     def _emit_cache_save_snapshot(self, idx: int) -> None:
-        callback = self._cache_save_callbacks[idx]
-        if callback is None:
+        save_state = self._prefix_cache_save_states[idx]
+        if save_state.callback is None:
             return
 
         current_len = len(self.tokens[idx])
-        save_points = self._cache_save_points[idx]
-        while save_points and save_points[0] <= current_len:
-            save_point = save_points.pop(0)
-            if save_point == current_len:
-                prompt_cache = self.extract_cache(idx)
-                if prompt_cache is None:
-                    return
-                callback(prompt_cache, list(self.tokens[idx]))
-                if not save_points:
-                    save_points.append(save_point + DEFAULT_PREFIX_CHUNK_SIZE)
+        chunks = save_state.chunks
+        next_chunk_idx = save_state.next_chunk_idx
+        next_chunk_end = (
+            chunks[next_chunk_idx].end
+            if next_chunk_idx < len(chunks)
+            else (chunks[-1].end if chunks else 0) + DEFAULT_PREFIX_CHUNK_SIZE
+        )
+        if current_len < next_chunk_end:
+            return
+
+        extend_prefix_cache_chunks(
+            self.tokens[idx],
+            save_state.image_spans,
+            chunks,
+        )
+        end_chunk_idx = len(chunks)
+        save_state.next_chunk_idx = end_chunk_idx
+
+        prompt_cache = self.extract_cache(idx)
+        if prompt_cache is None:
+            return
+        save_state.callback(
+            prompt_cache,
+            chunks,
+            next_chunk_idx,
+            end_chunk_idx,
+            current_len,
+        )
 
     def next(self) -> list[Response]:
         if not self.uids:
@@ -499,6 +525,8 @@ class GenerationBatch:
             stop_criteria=stop_criteria,
             max_tokens=[],
             top_logprobs_k=top_logprobs_k,
+            logits_processors=[],
+            prefix_cache_save_states=[],
         )
 
 
@@ -520,12 +548,11 @@ class _PromptPrefill:
         logits_processors: list[LogitsProcessor],
         inputs_embeds: mx.array,
         prompt_kwargs: dict,
+        prefix_cache_save_state: _PrefixCacheSaveState,
         prefill_step_size: Optional[int] = DEFAULT_PREFILL_STEP_SIZE,
         cache: Optional[list[Any]] = None,
         all_tokens: Optional[list[int]] = None,
         rope_deltas: Any | None = None,
-        cache_save_points: Optional[list[int]] = None,
-        prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ):
         self.model = model
         self.uid = uid
@@ -540,8 +567,7 @@ class _PromptPrefill:
         self._prompt_token_ids = list(input_ids)
         self._all_tokens = list(all_tokens) if all_tokens is not None else []
         self._processed_prefix_len = len(self._all_tokens)
-        self._cache_save_points = list(cache_save_points or [])
-        self._prompt_cache_save_callback = prompt_cache_save_callback
+        self._prefix_cache_save_state = prefix_cache_save_state
         # Restored exact hot caches may carry an existing row. Trimmed/disk
         # restores pass None and let prompt prep recompute it.
         self._rope_deltas = _normalize_rope_deltas(rope_deltas)
@@ -561,34 +587,10 @@ class _PromptPrefill:
         ]
 
     def needs_processing(self):
-        if self.prefill_step_size is None:
-            return False
-
-        remaining_tokens = self._inputs_embeds.shape[1]
-        if remaining_tokens <= 1:
-            return False
-
-        next_save_point = self._next_cache_save_point()
-        if (
-            next_save_point is not None
-            and next_save_point < self._processed_prefix_len + remaining_tokens
-        ):
-            return True
-
-        return remaining_tokens > self.prefill_step_size
+        return self._next_prompt_step_size() > 0
 
     def prompt_step(self) -> int:
-        if not self.needs_processing():
-            return 0
-
-        remaining_tokens = self._inputs_embeds.shape[1]
-        n = min(self.prefill_step_size, remaining_tokens - 1)
-        next_save_point = self._next_cache_save_point()
-        if next_save_point is not None:
-            save_point_delta = next_save_point - self._processed_prefix_len
-            if 0 < save_point_delta < remaining_tokens:
-                n = min(n, save_point_delta)
-
+        n = self._next_prompt_step_size()
         self.model(
             self._input_ids[:, :n],
             cache=self.prompt_cache,
@@ -605,6 +607,32 @@ class _PromptPrefill:
         mx.clear_cache()
         return n
 
+    def _next_prompt_step_size(self) -> int:
+        """Return the next chunked prefill size.
+
+        A restored prefix can start between normal prefill boundaries, so the
+        first step may be short to land back on the regular step grid. That
+        keeps state-cache snapshots at predictable model-call boundaries.
+        """
+        if self.prefill_step_size is None:
+            return 0
+
+        remaining_tokens = self._inputs_embeds.shape[1]
+        if remaining_tokens <= 1:
+            return 0
+
+        processed_remainder = self._processed_prefix_len % self.prefill_step_size
+        if processed_remainder:
+            # After a partial restore, land on the next normal prefill boundary.
+            alignment_step = self.prefill_step_size - processed_remainder
+            if alignment_step < remaining_tokens:
+                return min(alignment_step, remaining_tokens - 1)
+
+        if remaining_tokens > self.prefill_step_size:
+            return min(self.prefill_step_size, remaining_tokens - 1)
+
+        return 0
+
     def _prompt_kwargs_for_next(self, n: int) -> dict:
         if "position_ids" not in self._prompt_kwargs:
             return self._prompt_kwargs
@@ -620,29 +648,32 @@ class _PromptPrefill:
                 :, :, n:
             ]
 
-    def _next_cache_save_point(self) -> Optional[int]:
-        return self._cache_save_points[0] if self._cache_save_points else None
-
     def _emit_cache_save_snapshots(self) -> None:
-        if self._prompt_cache_save_callback is None:
+        save_state = self._prefix_cache_save_state
+        if save_state.callback is None:
             return
 
         processed = self._processed_prefix_len
-        save_points = self._cache_save_points
-        while save_points and save_points[0] <= processed:
-            save_point = save_points.pop(0)
-            if save_point == processed:
-                suffix_len = processed - len(self._all_tokens)
-                snapshot_tokens = self._all_tokens + self._prompt_token_ids[:suffix_len]
-                self._prompt_cache_save_callback(
-                    [
-                        cache.extract(0) if hasattr(cache, "extract") else cache
-                        for cache in self.prompt_cache
-                    ],
-                    snapshot_tokens,
-                )
-                if not save_points:
-                    save_points.append(save_point + DEFAULT_PREFIX_CHUNK_SIZE)
+        start_chunk_idx = save_state.next_chunk_idx
+        end_chunk_idx = min(
+            processed // DEFAULT_PREFIX_CHUNK_SIZE,
+            len(save_state.chunks),
+        )
+        if start_chunk_idx >= end_chunk_idx:
+            return
+
+        save_state.next_chunk_idx = end_chunk_idx
+        # One large prefill can backfill several crossed cache chunks.
+        save_state.callback(
+            [
+                cache.extract(0) if hasattr(cache, "extract") else cache
+                for cache in self.prompt_cache
+            ],
+            save_state.chunks,
+            start_chunk_idx,
+            end_chunk_idx,
+            processed,
+        )
 
     def generate(
         self, stop_criteria, top_logprobs_k=0
@@ -681,8 +712,7 @@ class _PromptPrefill:
             all_tokens=[self._all_tokens + self._prompt_token_ids],
             rope_deltas=self._rope_deltas,
             logits_processors=[self.logits_processors],
-            cache_save_points=[list(self._cache_save_points)],
-            prompt_cache_save_callback=self._prompt_cache_save_callback,
+            prefix_cache_save_states=[self._prefix_cache_save_state],
         )
         gen_batch._next_token_logprobs = first_logprobs
         gen_batch._next_top_idx = top_idx
@@ -746,14 +776,16 @@ class BatchGenerator:
         prompt: list[int],
         *,
         inputs_embeds: mx.array,
-        max_tokens: int | None = None,
-        cache: Optional[list[Any]] = None,
-        all_tokens: Optional[list[int]] = None,
-        rope_deltas: Any | None = None,
         sampler: Callable[[mx.array], mx.array],
         logits_processors: list[LogitsProcessor],
-        prompt_kwargs: Optional[dict] = None,
-        cache_save_points: Optional[list[int]] = None,
+        prompt_kwargs: dict,
+        prefix_cache_chunks: list[PromptPrefixChunk],
+        image_spans: list[PromptImageSpan],
+        max_tokens: int | None = None,
+        cache: Optional[list[Any]] = None,
+        all_tokens: list[int],
+        rope_deltas: Any | None = None,
+        next_prefix_cache_chunk_idx: int,
         prompt_cache_save_callback: Optional[PromptCacheSaveCallback] = None,
     ) -> int:
         uid = self.uid_count
@@ -767,11 +799,15 @@ class BatchGenerator:
                 logits_processors=list(logits_processors),
                 inputs_embeds=inputs_embeds,
                 cache=cache,
-                all_tokens=list(all_tokens or []),
+                all_tokens=list(all_tokens),
                 rope_deltas=rope_deltas,
-                prompt_kwargs=prompt_kwargs or {},
-                cache_save_points=list(cache_save_points or []),
-                prompt_cache_save_callback=prompt_cache_save_callback,
+                prompt_kwargs=prompt_kwargs,
+                prefix_cache_save_state=_PrefixCacheSaveState(
+                    chunks=list(prefix_cache_chunks),
+                    next_chunk_idx=next_prefix_cache_chunk_idx,
+                    image_spans=list(image_spans),
+                    callback=prompt_cache_save_callback,
+                ),
             )
         )
         return uid
@@ -841,12 +877,11 @@ class BatchGenerator:
                 logits_processors=sequence.logits_processors,
                 inputs_embeds=sequence.inputs_embeds,
                 prompt_kwargs=sequence.prompt_kwargs,
+                prefix_cache_save_state=sequence.prefix_cache_save_state,
                 prefill_step_size=self.prefill_step_size,
                 cache=sequence.cache,
                 all_tokens=sequence.all_tokens,
                 rope_deltas=sequence.rope_deltas,
-                cache_save_points=sequence.cache_save_points,
-                prompt_cache_save_callback=sequence.prompt_cache_save_callback,
             )
 
             if self._prompt_batch.needs_processing():

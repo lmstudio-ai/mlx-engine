@@ -13,44 +13,72 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptPrefixChunk,
 )
 
+_INITIAL_PREFIX_HASH = hashlib.sha256(b"prompt-prefix-v1").hexdigest()
+
 
 def build_prefix_cache_chunks(
     prompt_input_ids: list[int],
     image_spans: list[PromptImageSpan],
-    chunk_size: int = DEFAULT_PREFIX_CHUNK_SIZE,
 ) -> list[PromptPrefixChunk]:
-    """Return rolling-hash prompt chunks, growing chunks to avoid split images."""
-    chunk_offsets = _build_prefix_cache_chunk_offsets(
-        len(prompt_input_ids),
-        image_spans,
-        chunk_size,
-    )
-    prefix_hash = hashlib.sha256(b"prompt-prefix-v1").hexdigest()
+    """Return fixed-size rolling-hash prompt chunks."""
     chunks = []
+    extend_prefix_cache_chunks(prompt_input_ids, image_spans, chunks)
+    return chunks
 
-    previous_chunk_end = 0
-    for chunk_end in chunk_offsets:
-        chunk_tokens = prompt_input_ids[previous_chunk_end:chunk_end]
-        image_fingerprint = _image_fingerprint_for_chunk(
+
+def extend_prefix_cache_chunks(
+    prompt_input_ids: list[int],
+    image_spans: list[PromptImageSpan],
+    chunks: list[PromptPrefixChunk],
+) -> None:
+    """Append newly complete 256-token chunks in place."""
+    chunk_start = chunks[-1].end if chunks else 0
+    previous_chunk_key = chunks[-1].key if chunks else _INITIAL_PREFIX_HASH
+
+    while chunk_start + DEFAULT_PREFIX_CHUNK_SIZE <= len(prompt_input_ids):
+        chunk_end = chunk_start + DEFAULT_PREFIX_CHUNK_SIZE
+        chunk = _make_prefix_cache_chunk(
+            previous_chunk_key,
+            prompt_input_ids,
             image_spans,
-            previous_chunk_end,
+            chunk_start,
             chunk_end,
         )
-        hash_input = (
-            f"{prefix_hash}|{','.join(map(str, chunk_tokens))}|{image_fingerprint}"
-        )
-        prefix_hash = hashlib.sha256(hash_input.encode()).hexdigest()
-        chunk_key = prefix_hash
-        chunks.append(
-            PromptPrefixChunk(
-                start=previous_chunk_end,
-                end=chunk_end,
-                key=chunk_key,
-            )
-        )
-        previous_chunk_end = chunk_end
+        chunks.append(chunk)
+        previous_chunk_key = chunk.key
+        chunk_start = chunk_end
 
-    return chunks
+
+def first_unsaved_prefix_cache_chunk_index(
+    chunks: list[PromptPrefixChunk],
+    prompt_progress: int,
+) -> int:
+    """Return the first chunk ending after the already-cached prefix."""
+    return min(prompt_progress // DEFAULT_PREFIX_CHUNK_SIZE, len(chunks))
+
+
+def _make_prefix_cache_chunk(
+    previous_chunk_key: str,
+    prompt_input_ids: list[int],
+    image_spans: list[PromptImageSpan],
+    chunk_start: int,
+    chunk_end: int,
+) -> PromptPrefixChunk:
+    chunk_tokens = prompt_input_ids[chunk_start:chunk_end]
+    image_fingerprint = _image_fingerprint_for_chunk(
+        image_spans,
+        chunk_start,
+        chunk_end,
+    )
+    hash_input = (
+        f"{previous_chunk_key}|{','.join(map(str, chunk_tokens))}|{image_fingerprint}"
+    )
+    chunk_key = hashlib.sha256(hash_input.encode()).hexdigest()
+    return PromptPrefixChunk(
+        start=chunk_start,
+        end=chunk_end,
+        key=chunk_key,
+    )
 
 
 def _image_fingerprint_for_chunk(
@@ -58,38 +86,14 @@ def _image_fingerprint_for_chunk(
     chunk_start: int,
     chunk_end: int,
 ) -> str:
-    """Return image identities contained in this chunk.
+    """Return image identities whose placeholder spans overlap this chunk.
 
-    Prompt token ids only contain image placeholders, so the chunk hash must
-    also include the image hash. Image spans are atomic chunks, so position and
-    length are already implied by the chunk's tokens and bounds.
+    Token ids locate image placeholders; this only adds image content identity.
     """
-    image_hashes = []
+    image_fingerprints = []
     for span in image_spans:
-        if chunk_start <= span.start and span.end <= chunk_end:
-            image_hashes.append(span.image_hash)
-    return ",".join(image_hashes)
-
-
-def _build_prefix_cache_chunk_offsets(
-    prompt_len: int,
-    image_spans: list[PromptImageSpan],
-    chunk_size: int,
-) -> list[int]:
-    """Return prefix lengths where cache chunks should end."""
-    sorted_image_spans = sorted(image_spans, key=lambda item: item.start)
-    chunk_ends = []
-    cursor = 0
-    while cursor + chunk_size <= prompt_len:
-        chunk_end = cursor + chunk_size
-        for span in sorted_image_spans:
-            if chunk_end <= span.start:
-                break
-            if span.start < chunk_end < span.end:
-                # Keep image placeholders atomic by growing this disk chunk.
-                chunk_end = span.end
-                break
-        chunk_ends.append(chunk_end)
-        cursor = chunk_end
-
-    return chunk_ends
+        if span.start >= chunk_end:
+            break
+        if span.start < chunk_end and chunk_start < span.end:
+            image_fingerprints.append(span.image_hash)
+    return ",".join(image_fingerprints)

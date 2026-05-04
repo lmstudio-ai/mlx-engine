@@ -3,16 +3,13 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Callable
 
-from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
-    build_prefix_cache_chunks,
-)
 from mlx_engine.model_kit.batched_vision.prompt_cache.image_spans import (
     image_safe_common_prefix_len,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
-    DEFAULT_PREFIX_CHUNK_SIZE,
     PendingPromptCacheSave,
     PromptImageSpan,
+    PromptPrefixChunk,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
     PromptCacheRestorePlan,
@@ -233,67 +230,28 @@ class VlmPromptCacheCoordinator:
             rope_deltas=None,
         )
 
-    def save_points_after(
+    def save_prompt_cache_snapshot(
         self,
-        *,
-        prompt_input_ids: list[int],
-        image_spans: list[PromptImageSpan],
-        prompt_progress: int,
-    ) -> list[int]:
-        """Return prompt save points plus one future decode save point.
+        prompt_cache: list[Any],
+        prefix_chunks: list[PromptPrefixChunk],
+        start_chunk_idx: int,
+        end_chunk_idx: int,
+        snapshot_len: int,
+    ) -> None:
+        """Prepare and enqueue crossed prompt-cache chunks from one snapshot."""
+        if not self._cache_store.can_store_records():
+            return
 
-        prompt_progress is the prefix length already present in the runtime
-        cache, usually from a restore, so earlier save points are skipped.
-        """
-        save_points = []
-        last_save_point = 0
-        for chunk in build_prefix_cache_chunks(prompt_input_ids, image_spans):
-            if chunk.end <= prompt_progress:
-                last_save_point = chunk.end
-            else:
-                save_points.append(chunk.end)
-
-        if save_points:
-            last_save_point = save_points[-1]
-
-        if prompt_progress > last_save_point:
-            skipped_chunks = (
-                prompt_progress - last_save_point
-            ) // DEFAULT_PREFIX_CHUNK_SIZE
-            last_save_point += skipped_chunks * DEFAULT_PREFIX_CHUNK_SIZE
-
-        save_points.append(last_save_point + DEFAULT_PREFIX_CHUNK_SIZE)
-        return save_points
-
-    def make_save_callback(
-        self,
-        *,
-        image_spans: list[PromptImageSpan],
-    ) -> Callable[[list[Any], list[int]], None]:
-        image_spans = list(image_spans)
-
-        def _callback(
-            prompt_cache: list[Any],
-            snapshot_input_ids: list[int],
-        ) -> None:
-            if not self._cache_store.can_store_records():
-                return
-            snapshot_input_ids = list(snapshot_input_ids)
-            chunks = build_prefix_cache_chunks(
-                snapshot_input_ids,
-                image_spans,
-            )
-            if not chunks:
-                return
-
+        for chunk_idx in range(start_chunk_idx, end_chunk_idx):
+            chunk = prefix_chunks[chunk_idx]
             pending_save = self._cache_store.prepare_save(
-                chunk=chunks[-1],
-                prefix_chunks=chunks,
+                chunk=chunk,
+                prefix_chunks=prefix_chunks[: chunk_idx + 1],
                 prompt_cache=prompt_cache,
+                # Opaque state caches are only exact at this model-call end.
+                save_state_checkpoint=chunk.end == snapshot_len,
             )
             self._enqueue_pending_save(pending_save)
-
-        return _callback
 
     def store_hot_prompt_cache(
         self,

@@ -7,8 +7,6 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     LoadedPromptState,
-    PendingPromptCacheSave,
-    PromptCacheLayout,
 )
 from mlx_lm.models.cache import KVCache
 
@@ -34,7 +32,6 @@ class _FakeCacheStore:
         )
         self.recorded_tokens = []
         self.loaded_plans = []
-        self.prepared_saves = []
 
     def plan_longest_prefix_restore(self, prompt_input_ids, image_spans):
         return self.restore_plan
@@ -48,18 +45,6 @@ class _FakeCacheStore:
 
     def can_store_records(self) -> bool:
         return True
-
-    def prepare_save(self, *, chunk, prefix_chunks, prompt_cache):
-        pending_save = PendingPromptCacheSave(
-            prefix_chunks=prefix_chunks,
-            cache_layout=PromptCacheLayout(
-                layer_kinds=[],
-                layer_indices_by_kind={},
-            ),
-            records=[],
-        )
-        self.prepared_saves.append((chunk, prefix_chunks, prompt_cache))
-        return pending_save
 
 
 def _coordinator(cache_store):
@@ -149,35 +134,3 @@ def test_coordinator_prefers_longer_disk_restore():
     assert restored.rope_deltas is None
     assert cache_store.loaded_plans == [cache_store.restore_plan]
     assert cache_store.recorded_tokens == [(512, 187)]
-
-
-def test_coordinator_save_points_skip_restored_prefix():
-    """Save points skip already-restored prompt chunks and add decode point."""
-    cache_store = _FakeCacheStore()
-    coordinator, _ = _coordinator(cache_store)
-
-    assert coordinator.save_points_after(
-        prompt_input_ids=list(range(900)),
-        image_spans=[],
-        prompt_progress=512,
-    ) == [768, 1024]
-
-
-def test_coordinator_save_callback_enqueues_latest_chunk():
-    """The save callback prepares the latest chunk and hands it to cache I/O."""
-    cache_store = _FakeCacheStore()
-    coordinator, enqueued_saves = _coordinator(cache_store)
-    prompt_cache = ["runtime-cache"]
-
-    callback = coordinator.make_save_callback(image_spans=[])
-    callback(prompt_cache, list(range(600)))
-
-    assert len(enqueued_saves) == 1
-    pending_save = enqueued_saves[0]
-    prepared_chunk, prepared_prefix_chunks, prepared_cache = cache_store.prepared_saves[
-        0
-    ]
-    assert pending_save.prefix_chunks[-1].end == 512
-    assert prepared_chunk.end == 512
-    assert [chunk.end for chunk in prepared_prefix_chunks] == [256, 512]
-    assert prepared_cache is prompt_cache

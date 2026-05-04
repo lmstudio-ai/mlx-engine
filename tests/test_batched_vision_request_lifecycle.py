@@ -83,7 +83,8 @@ def _controller(
         insert_prepared_request=insert_prepared_request
         or (lambda _batch_generator, _prepared_insert, _active: None),
         emit_response=emit_response or (lambda _active_request, response: response),
-        finish_response=finish_response or (lambda _active_request, _response: None),
+        finish_response=finish_response
+        or (lambda _active_request, _response, _keep_hot_cache: None),
     )
 
 
@@ -188,7 +189,9 @@ def test_request_lifecycle_steps_generation_and_stores_finished_hot_cache():
     controller = _controller(
         state,
         emit_response=lambda _request_state, response: f"token:{response.token}",
-        finish_response=lambda active, response: finished.append((active, response)),
+        finish_response=lambda active, response, _keep_hot_cache: finished.append(
+            (active, response)
+        ),
     )
 
     controller.step_generation()

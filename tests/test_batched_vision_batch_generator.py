@@ -7,6 +7,10 @@ from mlx_engine.model_kit.batched_vision import batch_generator as batcher
 from mlx_engine.model_kit.batched_vision.batch_generator import (
     BatchGenerator,
     GenerationBatch,
+    _PrefixCacheSaveState,
+)
+from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
+    build_prefix_cache_chunks,
 )
 
 
@@ -22,6 +26,10 @@ def _bump(logits, token: int):
     bump = [0.0] * logits.shape[-1]
     bump[token] = 100.0
     return logits + mx.array([bump], dtype=mx.float32)
+
+
+def _prefix_cache_save_states(count: int):
+    return [_PrefixCacheSaveState([], 0, [], None) for _ in range(count)]
 
 
 class _HistoryProcessor:
@@ -119,6 +127,7 @@ def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
         top_logprobs_k=2,
         all_tokens=[[100], [200]],
         logits_processors=[[history_processor], [last_token_processor]],
+        prefix_cache_save_states=_prefix_cache_save_states(2),
     )
 
     first = batch.next()
@@ -144,6 +153,8 @@ def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():
         max_tokens=[1],
         all_tokens=[[1, 2]],
         rope_deltas=mx.array([5], dtype=mx.int32),
+        logits_processors=[[]],
+        prefix_cache_save_states=_prefix_cache_save_states(1),
     )
 
     response = batch.next()[0]
@@ -167,6 +178,8 @@ def test_generation_batch_extends_mixed_rope_rows_without_broadcasting():
         max_tokens=[3],
         all_tokens=[[5]],
         rope_deltas=mx.array([9], dtype=mx.int32),
+        logits_processors=[[]],
+        prefix_cache_save_states=_prefix_cache_save_states(1),
     )
     text_only = GenerationBatch(
         model=model,
@@ -177,6 +190,8 @@ def test_generation_batch_extends_mixed_rope_rows_without_broadcasting():
         stop_criteria=lambda _token: False,
         max_tokens=[3],
         all_tokens=[[6]],
+        logits_processors=[[]],
+        prefix_cache_save_states=_prefix_cache_save_states(1),
     )
 
     batch.append_prefilled_sequence(text_only)
@@ -199,18 +214,23 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     generator = BatchGenerator(
         model=model,
         stop_criteria=lambda _token: False,
-        prefill_step_size=2,
+        prefill_step_size=256,
     )
     snapshots = []
-    prompt = [10, 11, 12, 13, 14]
+    prompt = list(range(513))
     position_ids = mx.array(
         [
-            [[0, 1, 2, 3, 4]],
-            [[10, 11, 12, 13, 14]],
-            [[20, 21, 22, 23, 24]],
+            [list(range(513))],
+            [list(range(1000, 1513))],
+            [list(range(2000, 2513))],
         ],
         dtype=mx.int32,
     )
+
+    prefix_chunks = build_prefix_cache_chunks(prompt, [])
+
+    def save_snapshot(cache, chunks, start_chunk_idx, end_chunk_idx, snapshot_len):
+        snapshots.append((cache, chunks, start_chunk_idx, end_chunk_idx, snapshot_len))
 
     try:
         generator.insert(
@@ -219,10 +239,11 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
             sampler=_argmax_sampler,
             logits_processors=[],
             prompt_kwargs={"position_ids": position_ids},
-            cache_save_points=[2, 4],
-            prompt_cache_save_callback=lambda cache, tokens: snapshots.append(
-                (cache, tokens)
-            ),
+            prefix_cache_chunks=prefix_chunks,
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+            prompt_cache_save_callback=save_snapshot,
         )
 
         generator.next()
@@ -231,8 +252,57 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     finally:
         generator.close()
 
-    assert [call["n_to_process"] for call in model.calls] == [2, 2, None]
-    assert model.calls[0]["position_ids"] == [[[0, 1]], [[10, 11]], [[20, 21]]]
-    assert model.calls[1]["position_ids"] == [[[2, 3]], [[12, 13]], [[22, 23]]]
-    assert model.calls[2]["position_ids"] == [[[4]], [[14]], [[24]]]
-    assert [tokens for _, tokens in snapshots] == [prompt[:2], prompt[:4]]
+    assert [call["n_to_process"] for call in model.calls] == [256, 256, None]
+    assert [len(call["position_ids"][0][0]) for call in model.calls] == [256, 256, 1]
+    assert model.calls[0]["position_ids"][0][0][0] == 0
+    assert model.calls[0]["position_ids"][0][0][-1] == 255
+    assert model.calls[1]["position_ids"][0][0][0] == 256
+    assert model.calls[1]["position_ids"][0][0][-1] == 511
+    assert model.calls[2]["position_ids"][0][0] == [512]
+    assert [
+        (start_chunk_idx, end_chunk_idx, snapshot_len)
+        for _, _, start_chunk_idx, end_chunk_idx, snapshot_len in snapshots
+    ] == [
+        (0, 1, 256),
+        (1, 2, 512),
+    ]
+
+
+def test_batch_generator_aligns_restored_prefill_to_step_boundary(monkeypatch):
+    """A restored prefix may take one short step before large prefill resumes."""
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "_make_cache",
+        lambda _model, _padding: [_FakeBatchCache()],
+    )
+    model = _FakeModel()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=4,
+    )
+    prompt = [10, 11, 12, 13, 14, 15, 16]
+    restored_tokens = [0, 1]
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=[],
+            image_spans=[],
+            cache=[_FakeScalarCache()],
+            all_tokens=restored_tokens,
+            next_prefix_cache_chunk_idx=0,
+        )
+
+        generator.next()
+        generator.next()
+        generator.next()
+    finally:
+        generator.close()
+
+    assert [call["n_to_process"] for call in model.calls] == [2, 4, None]

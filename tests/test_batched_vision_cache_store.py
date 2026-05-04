@@ -59,7 +59,14 @@ def _rotating_prompt_cache(prefix_len: int):
     return [_kv_cache(prefix_len), _rotating_cache(prefix_len)]
 
 
-def _save_chunk(cache_store, chunk, chunks, prompt_cache):
+def _save_chunk(
+    cache_store,
+    chunk,
+    chunks,
+    prompt_cache,
+    *,
+    save_state_checkpoint=True,
+):
     chunk_idx = chunks.index(chunk)
     # Production does prepare on generation thread, then commit on cache I/O.
     cache_store.commit_pending_save(
@@ -67,6 +74,7 @@ def _save_chunk(cache_store, chunk, chunks, prompt_cache):
             chunk=chunk,
             prefix_chunks=chunks[: chunk_idx + 1],
             prompt_cache=prompt_cache,
+            save_state_checkpoint=save_state_checkpoint,
         )
     )
 
@@ -148,6 +156,40 @@ def test_cache_store_eviction_preserves_shorter_prefix_restore(cache_store):
     assert not stats.chunk_records_available_by_key.get(second_chunk.key, False)
     assert loaded.cached_prefix_len == first_chunk.end
     assert stats.total_bytes <= stats.max_bytes
+
+
+def test_cache_store_skips_state_for_backfilled_chunks(cache_store):
+    """Backfilled KV chunks do not advertise stale opaque state checkpoints."""
+    prompt_input_ids = list(range(700))
+    chunks = build_prefix_cache_chunks(prompt_input_ids, [])
+
+    # A 512-token model call can backfill the 256 chunk KV, but its opaque state
+    # is exact only at 512.
+    _save_chunk(
+        cache_store,
+        chunks[0],
+        chunks,
+        _prompt_cache(512),
+        save_state_checkpoint=False,
+    )
+    _save_chunk(cache_store, chunks[1], chunks, _prompt_cache(512))
+
+    stats = cache_store.snapshot_stats()
+    old_state_record_key = make_record_key(
+        chunks[0].key,
+        RECORD_KIND_STATE_CHECKPOINT,
+    )
+    target_state_record_key = make_record_key(
+        chunks[1].key,
+        RECORD_KIND_STATE_CHECKPOINT,
+    )
+    assert old_state_record_key not in stats.record_sizes_by_key
+    assert target_state_record_key in stats.record_sizes_by_key
+
+    restore_plan = cache_store.plan_longest_prefix_restore(prompt_input_ids, [])
+    assert restore_plan is not None
+    loaded = cache_store.load_restore_plan(restore_plan)
+    _assert_two_chunk_restore(loaded)
 
 
 def test_cache_store_rotating_restore_uses_target_window(cache_store):

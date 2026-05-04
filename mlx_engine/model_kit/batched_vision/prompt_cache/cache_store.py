@@ -207,6 +207,7 @@ class VlmPromptCacheStore:
         chunk: PromptPrefixChunk,
         prefix_chunks: list[PromptPrefixChunk],
         prompt_cache: list[Any],
+        save_state_checkpoint: bool = True,
     ) -> PendingPromptCacheSave:
         """Prepare a cache save for the cache I/O thread."""
         record_caches, record_kinds = prepare_prompt_cache_records_for_chunk(
@@ -217,6 +218,11 @@ class VlmPromptCacheStore:
         layout = make_prompt_cache_layout(record_caches, record_kinds)
         records = []
         for record_kind in RECORD_WRITE_ORDER:
+            if (
+                record_kind == RECORD_KIND_STATE_CHECKPOINT
+                and not save_state_checkpoint
+            ):
+                continue
             layer_indices = layout.layer_indices_by_kind.get(record_kind, [])
             if not layer_indices:
                 continue
