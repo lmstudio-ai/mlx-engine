@@ -45,6 +45,20 @@ class _PrefixCacheSaveState:
     callback: PromptCacheSaveCallback | None
 
 
+@dataclass
+class _GenerationRow:
+    """Python-side state for one row in a decode batch."""
+
+    uid: int
+    sampler: Callable[[mx.array], mx.array]
+    logits_processors: list[LogitsProcessor]
+    max_tokens: int
+    top_logprobs: int
+    tokens: list[int]
+    prefix_cache_save_state: _PrefixCacheSaveState
+    num_tokens: int = 0
+
+
 @contextlib.contextmanager
 def use_generation_stream():
     """Generation-thread MLX work uses that thread's default stream."""
@@ -280,18 +294,50 @@ class GenerationBatch:
         rope_deltas: Any | None = None,
     ):
         self.model = model
-        self.uids = uids
         self.prompt_cache = prompt_cache
-        self.samplers = samplers
         self.stop_criteria = stop_criteria
-        self.max_tokens = max_tokens
-        self._num_tokens = [0] * len(uids)
-        self.top_logprobs = (
+        top_logprobs_by_row = (
             list(top_logprobs)
             if top_logprobs is not None
             else [top_logprobs_k] * len(uids)
         )
-        self.top_logprobs_k = max(self.top_logprobs, default=0)
+        tokens_by_row = (
+            [list(tokens) for tokens in all_tokens]
+            if all_tokens is not None
+            else [[] for _ in uids]
+        )
+        self._rows = [
+            _GenerationRow(
+                uid=uid,
+                sampler=sampler,
+                logits_processors=processors,
+                max_tokens=max_token_count,
+                top_logprobs=row_top_logprobs,
+                tokens=tokens,
+                prefix_cache_save_state=save_state,
+            )
+            for (
+                uid,
+                sampler,
+                processors,
+                max_token_count,
+                row_top_logprobs,
+                tokens,
+                save_state,
+            ) in zip(
+                uids,
+                samplers,
+                logits_processors,
+                max_tokens,
+                top_logprobs_by_row,
+                tokens_by_row,
+                prefix_cache_save_states,
+            )
+        ]
+        self.top_logprobs_k = max(
+            (row.top_logprobs for row in self._rows),
+            default=0,
+        )
 
         self._current_tokens = None
         self._current_token_logprobs = None
@@ -300,17 +346,14 @@ class GenerationBatch:
         self._next_top_idx = None
         self._next_top_logprobs = None
         self._rope_deltas = None
-        self.tokens = (
-            [list(tokens) for tokens in all_tokens]
-            if all_tokens is not None
-            else [[] for _ in uids]
-        )
-        self.logits_processors = logits_processors
-        self._prefix_cache_save_states = list(prefix_cache_save_states)
         self._rope_deltas = _normalize_rope_deltas(rope_deltas)
 
     def __len__(self):
-        return len(self.uids)
+        return len(self._rows)
+
+    @property
+    def uids(self) -> list[int]:
+        return [row.uid for row in self._rows]
 
     def _step(self):
         # Decode-ahead: emit the token sampled last step while scheduling the next.
@@ -332,14 +375,16 @@ class GenerationBatch:
         logits = output.logits if hasattr(output, "logits") else output
         logits = logits[:, -1, :]
 
-        if any(self.logits_processors):
+        row_tokens = [row.tokens for row in self._rows]
+        row_logits_processors = [row.logits_processors for row in self._rows]
+        if any(row_logits_processors):
             last_tokens = inputs.tolist()
-            for seq_tokens, token in zip(self.tokens, last_tokens):
+            for seq_tokens, token in zip(row_tokens, last_tokens):
                 seq_tokens.append(token)
             logits = _apply_logits_processors(
                 logits,
-                self.tokens,
-                self.logits_processors,
+                row_tokens,
+                row_logits_processors,
                 last_tokens=last_tokens,
             )
         else:
@@ -347,7 +392,9 @@ class GenerationBatch:
 
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         sampled, sampled_logprobs, top_idx, top_logprobs = _sample_next_token(
-            logprobs, self.samplers, self.top_logprobs_k
+            logprobs,
+            [row.sampler for row in self._rows],
+            self.top_logprobs_k,
         )
 
         self._next_tokens = sampled
@@ -370,7 +417,7 @@ class GenerationBatch:
         )
 
         if last_tokens is None:
-            for seq_tokens, token in zip(self.tokens, tokens):
+            for seq_tokens, token in zip(row_tokens, tokens):
                 seq_tokens.append(token)
         return tokens, token_logprob_list, top_idx_list, top_logprob_list
 
@@ -391,16 +438,14 @@ class GenerationBatch:
 
     def append_prefilled_sequence(self, prefilled: "GenerationBatch"):
         """Append the one sequence that just finished prompt prefill."""
-        count = len(self.uids)
-        prefilled_count = len(prefilled.uids)
-        self.uids.extend(prefilled.uids)
+        count = len(self)
+        prefilled_count = len(prefilled)
+        self._rows.extend(prefilled._rows)
         self.prompt_cache = _extend_cache(self.prompt_cache, prefilled.prompt_cache)
-        self.samplers.extend(prefilled.samplers)
-        self.logits_processors.extend(prefilled.logits_processors)
-        self.max_tokens.extend(prefilled.max_tokens)
-        self.top_logprobs.extend(prefilled.top_logprobs)
-        next_top_logprobs_k = max(self.top_logprobs, default=0)
-        self._num_tokens.extend(prefilled._num_tokens)
+        next_top_logprobs_k = max(
+            (row.top_logprobs for row in self._rows),
+            default=0,
+        )
 
         if self._current_tokens is None:
             self._current_tokens = prefilled._current_tokens
@@ -464,22 +509,14 @@ class GenerationBatch:
             prefilled_count,
         )
 
-        self.tokens.extend(prefilled.tokens)
-        self._prefix_cache_save_states.extend(prefilled._prefix_cache_save_states)
         self.top_logprobs_k = next_top_logprobs_k
 
     def filter(self, keep: list[int]):
-        self.uids = [self.uids[idx] for idx in keep]
-        self.samplers = [self.samplers[idx] for idx in keep]
-        self.logits_processors = [self.logits_processors[idx] for idx in keep]
-        self.max_tokens = [self.max_tokens[idx] for idx in keep]
-        self.top_logprobs = [self.top_logprobs[idx] for idx in keep]
-        self.top_logprobs_k = max(self.top_logprobs, default=0)
-        self._num_tokens = [self._num_tokens[idx] for idx in keep]
-        self.tokens = [self.tokens[idx] for idx in keep]
-        self._prefix_cache_save_states = [
-            self._prefix_cache_save_states[idx] for idx in keep
-        ]
+        self._rows = [self._rows[idx] for idx in keep]
+        self.top_logprobs_k = max(
+            (row.top_logprobs for row in self._rows),
+            default=0,
+        )
 
         if not keep:
             self.prompt_cache.clear()
@@ -490,7 +527,6 @@ class GenerationBatch:
             self._next_top_idx = None
             self._next_top_logprobs = None
             self._rope_deltas = None
-            self.logits_processors = []
             return
 
         keep_arr = mx.array(keep, mx.int32)
@@ -516,11 +552,12 @@ class GenerationBatch:
             self._rope_deltas = self._rope_deltas[keep_arr]
 
     def _emit_cache_save_snapshot(self, idx: int) -> None:
-        save_state = self._prefix_cache_save_states[idx]
+        row = self._rows[idx]
+        save_state = row.prefix_cache_save_state
         if save_state.callback is None:
             return
 
-        current_len = len(self.tokens[idx])
+        current_len = len(row.tokens)
         chunks = save_state.chunks
         next_chunk_idx = save_state.next_chunk_idx
         next_chunk_end = (
@@ -532,7 +569,7 @@ class GenerationBatch:
             return
 
         extend_prefix_cache_chunks(
-            self.tokens[idx],
+            row.tokens,
             save_state.image_spans,
             chunks,
         )
@@ -551,21 +588,21 @@ class GenerationBatch:
         )
 
     def next(self) -> list[Response]:
-        if not self.uids:
+        if not self._rows:
             return []
 
         tokens, token_logprob_list, top_idx_list, top_logprob_list = self._step()
 
         keep = []
         responses = []
-        for i in range(len(self.uids)):
+        for i, row in enumerate(self._rows):
             finish_reason = None
-            self._num_tokens[i] += 1
+            row.num_tokens += 1
             tok = tokens[i]
 
             if self.stop_criteria(tok):
                 finish_reason = "stop"
-            elif self._num_tokens[i] >= self.max_tokens[i]:
+            elif row.num_tokens >= row.max_tokens:
                 finish_reason = "length"
 
             if finish_reason is None:
@@ -579,7 +616,7 @@ class GenerationBatch:
 
             responses.append(
                 self.Response(
-                    uid=self.uids[i],
+                    uid=row.uid,
                     token=tok,
                     token_logprob=(
                         token_logprob_list[i] if token_logprob_list is not None else 0.0
@@ -587,12 +624,12 @@ class GenerationBatch:
                     finish_reason=finish_reason,
                     top_logprobs=top_logprobs,
                     prompt_cache=self.extract_cache(i) if finish_reason else None,
-                    all_tokens=list(self.tokens[i]) if finish_reason else None,
+                    all_tokens=list(row.tokens) if finish_reason else None,
                     rope_deltas=self.extract_rope_deltas(i) if finish_reason else None,
                 )
             )
 
-        if len(keep) < len(self.uids):
+        if len(keep) < len(self._rows):
             self.filter(keep)
 
         return responses

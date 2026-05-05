@@ -256,7 +256,7 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     finally:
         generator.close()
 
-    assert [call["n_to_process"] for call in model.calls] == [256, 256, None]
+    assert [len(call["input_ids"][0]) for call in model.calls] == [256, 256, 1]
     assert [len(call["position_ids"][0][0]) for call in model.calls] == [256, 256, 1]
     assert model.calls[0]["position_ids"][0][0][0] == 0
     assert model.calls[0]["position_ids"][0][0][-1] == 255
@@ -309,7 +309,7 @@ def test_batch_generator_aligns_restored_prefill_to_step_boundary(monkeypatch):
     finally:
         generator.close()
 
-    assert [call["n_to_process"] for call in model.calls] == [2, 4, None]
+    assert [len(call["input_ids"][0]) for call in model.calls] == [2, 4, 1]
 
 
 def test_batch_generator_state_cache_lands_on_reusable_tail_boundary(monkeypatch):
@@ -352,7 +352,7 @@ def test_batch_generator_state_cache_lands_on_reusable_tail_boundary(monkeypatch
     finally:
         generator.close()
 
-    assert [call["n_to_process"] for call in model.calls] == [1792, None]
+    assert [len(call["input_ids"][0]) for call in model.calls] == [1792, 3]
     assert [
         (start_chunk_idx, end_chunk_idx, snapshot_len)
         for _, _, start_chunk_idx, end_chunk_idx, snapshot_len in snapshots
