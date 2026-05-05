@@ -24,6 +24,10 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 
 
+class PromptCacheRecordCoverageError(ValueError):
+    """Raised when a live cache snapshot cannot cover the requested chunk."""
+
+
 def prepare_prompt_cache_records_for_chunk(
     prompt_cache: list[Any],
     chunk_start: int,
@@ -97,6 +101,12 @@ def _slice_rotating_kv_cache(
 ) -> RotatingKVCache:
     keys, values = cache.state
     window_start = cache.offset - keys.shape[2]
+    if chunk_start < window_start or chunk_end > cache.offset:
+        raise PromptCacheRecordCoverageError(
+            "rotating cache snapshot covers "
+            f"[{window_start}, {cache.offset}), not [{chunk_start}, {chunk_end})"
+        )
+
     local_start = max(0, chunk_start - window_start)
     local_end = min(keys.shape[2], chunk_end - window_start)
 

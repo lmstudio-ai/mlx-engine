@@ -15,6 +15,9 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
     PromptCacheRestorePlan,
     VlmPromptCacheStore,
 )
+from mlx_engine.model_kit.batched_vision.prompt_cache.records import (
+    PromptCacheRecordCoverageError,
+)
 from mlx_lm.models.cache import can_trim_prompt_cache, trim_prompt_cache
 
 logger = logging.getLogger(__name__)
@@ -258,13 +261,23 @@ class VlmPromptCacheCoordinator:
 
         for chunk_idx in range(start_chunk_idx, end_chunk_idx):
             chunk = prefix_chunks[chunk_idx]
-            pending_save = self._cache_store.prepare_save(
-                chunk=chunk,
-                prefix_chunks=prefix_chunks[: chunk_idx + 1],
-                prompt_cache=prompt_cache,
-                # Opaque state caches are only exact at this model-call end.
-                save_state_checkpoint=chunk.end == snapshot_len,
-            )
+            try:
+                pending_save = self._cache_store.prepare_save(
+                    chunk=chunk,
+                    prefix_chunks=prefix_chunks[: chunk_idx + 1],
+                    prompt_cache=prompt_cache,
+                    # Opaque state caches are only exact at this model-call end.
+                    save_state_checkpoint=chunk.end == snapshot_len,
+                )
+            except PromptCacheRecordCoverageError as exc:
+                logger.warning(
+                    "Skipping prompt cache save for chunk [%s, %s) at snapshot %s: %s",
+                    chunk.start,
+                    chunk.end,
+                    snapshot_len,
+                    exc,
+                )
+                continue
             self._enqueue_pending_save(pending_save)
 
     def store_hot_prompt_cache(
