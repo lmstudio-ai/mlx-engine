@@ -86,6 +86,12 @@ def record_kind_for_prompt_cache(cache: Any) -> RecordKind:
 
 def _slice_kv_cache(cache: Any, chunk_start: int, chunk_end: int) -> KVCache:
     keys, values = cache.state
+    if keys.shape[2] != values.shape[2] or chunk_end > keys.shape[2]:
+        raise PromptCacheRecordCoverageError(
+            "kv cache snapshot covers "
+            f"[0, {keys.shape[2]}), not [{chunk_start}, {chunk_end})"
+        )
+
     chunk_cache = KVCache()
     chunk_cache.state = (
         mx.contiguous(keys[..., chunk_start:chunk_end, :]),
