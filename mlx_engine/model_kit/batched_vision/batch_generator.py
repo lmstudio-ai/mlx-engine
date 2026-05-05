@@ -52,6 +52,7 @@ class _PendingSequence:
     uid: int
     prompt: list[int]
     max_tokens: int
+    top_logprobs: int
     sampler: Callable[[mx.array], mx.array]
     logits_processors: list[LogitsProcessor]
     inputs_embeds: mx.array
@@ -161,6 +162,40 @@ def _top_logprobs(
     return top_idx, mx.take_along_axis(logprobs, top_idx, axis=-1)
 
 
+def _pad_top_logprobs(
+    top_idx: mx.array | None,
+    top_logprobs: mx.array | None,
+    rows: int,
+    target_k: int,
+    *,
+    idx_dtype=mx.int32,
+    logprob_dtype=mx.float32,
+) -> tuple[mx.array | None, mx.array | None]:
+    if target_k <= 0:
+        return None, None
+    if top_idx is None:
+        return (
+            mx.zeros((rows, target_k), dtype=idx_dtype),
+            mx.zeros((rows, target_k), dtype=logprob_dtype),
+        )
+    if top_idx.shape[1] > target_k:
+        return top_idx[:, :target_k], top_logprobs[:, :target_k]
+    if top_idx.shape[1] == target_k:
+        return top_idx, top_logprobs
+
+    pad_k = target_k - top_idx.shape[1]
+    return (
+        mx.concatenate(
+            [top_idx, mx.zeros((rows, pad_k), dtype=top_idx.dtype)],
+            axis=1,
+        ),
+        mx.concatenate(
+            [top_logprobs, mx.zeros((rows, pad_k), dtype=top_logprobs.dtype)],
+            axis=1,
+        ),
+    )
+
+
 def _sample_next_token(
     logprobs: mx.array,
     samplers: list[Callable[[mx.array], mx.array]],
@@ -221,6 +256,7 @@ class GenerationBatch:
         logits_processors: list[list[LogitsProcessor]],
         prefix_cache_save_states: list[_PrefixCacheSaveState],
         top_logprobs_k: int = 0,
+        top_logprobs: list[int] | None = None,
         all_tokens: Optional[list[list[int]]] = None,
         rope_deltas: Any | None = None,
     ):
@@ -231,7 +267,12 @@ class GenerationBatch:
         self.stop_criteria = stop_criteria
         self.max_tokens = max_tokens
         self._num_tokens = [0] * len(uids)
-        self.top_logprobs_k = top_logprobs_k
+        self.top_logprobs = (
+            list(top_logprobs)
+            if top_logprobs is not None
+            else [top_logprobs_k] * len(uids)
+        )
+        self.top_logprobs_k = max(self.top_logprobs, default=0)
 
         self._current_tokens = None
         self._current_token_logprobs = None
@@ -338,6 +379,8 @@ class GenerationBatch:
         self.samplers.extend(prefilled.samplers)
         self.logits_processors.extend(prefilled.logits_processors)
         self.max_tokens.extend(prefilled.max_tokens)
+        self.top_logprobs.extend(prefilled.top_logprobs)
+        next_top_logprobs_k = max(self.top_logprobs, default=0)
         self._num_tokens.extend(prefilled._num_tokens)
 
         if self._current_tokens is None:
@@ -375,12 +418,24 @@ class GenerationBatch:
                     [self._next_token_logprobs, prefilled._next_token_logprobs]
                 )
 
+            self._next_top_idx, self._next_top_logprobs = _pad_top_logprobs(
+                self._next_top_idx,
+                self._next_top_logprobs,
+                count,
+                next_top_logprobs_k,
+            )
+            prefilled_top_idx, prefilled_top_logprobs = _pad_top_logprobs(
+                prefilled._next_top_idx,
+                prefilled._next_top_logprobs,
+                prefilled_count,
+                next_top_logprobs_k,
+            )
             if self._next_top_idx is not None:
                 self._next_top_idx = mx.concatenate(
-                    [self._next_top_idx, prefilled._next_top_idx]
+                    [self._next_top_idx, prefilled_top_idx]
                 )
                 self._next_top_logprobs = mx.concatenate(
-                    [self._next_top_logprobs, prefilled._next_top_logprobs]
+                    [self._next_top_logprobs, prefilled_top_logprobs]
                 )
 
         self._rope_deltas = _extend_optional_rope_deltas(
@@ -392,12 +447,15 @@ class GenerationBatch:
 
         self.tokens.extend(prefilled.tokens)
         self._prefix_cache_save_states.extend(prefilled._prefix_cache_save_states)
+        self.top_logprobs_k = next_top_logprobs_k
 
     def filter(self, keep: list[int]):
         self.uids = [self.uids[idx] for idx in keep]
         self.samplers = [self.samplers[idx] for idx in keep]
         self.logits_processors = [self.logits_processors[idx] for idx in keep]
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
+        self.top_logprobs = [self.top_logprobs[idx] for idx in keep]
+        self.top_logprobs_k = max(self.top_logprobs, default=0)
         self._num_tokens = [self._num_tokens[idx] for idx in keep]
         self.tokens = [self.tokens[idx] for idx in keep]
         self._prefix_cache_save_states = [
@@ -426,6 +484,12 @@ class GenerationBatch:
         if self._next_top_idx is not None:
             self._next_top_idx = self._next_top_idx[keep_arr]
             self._next_top_logprobs = self._next_top_logprobs[keep_arr]
+            self._next_top_idx, self._next_top_logprobs = _pad_top_logprobs(
+                self._next_top_idx,
+                self._next_top_logprobs,
+                len(keep),
+                self.top_logprobs_k,
+            )
         if self._rope_deltas is not None:
             # Matches external/src/mlx-vlm/mlx_vlm/generate.py:
             # GenerationBatch.filter:
@@ -525,6 +589,7 @@ class GenerationBatch:
             stop_criteria=stop_criteria,
             max_tokens=[],
             top_logprobs_k=top_logprobs_k,
+            top_logprobs=[],
             logits_processors=[],
             prefix_cache_save_states=[],
         )
@@ -544,6 +609,7 @@ class _PromptPrefill:
         uid: int,
         input_ids: list[int],
         max_tokens: int,
+        top_logprobs: int,
         sampler: Callable[[mx.array], mx.array],
         logits_processors: list[LogitsProcessor],
         inputs_embeds: mx.array,
@@ -557,6 +623,7 @@ class _PromptPrefill:
         self.model = model
         self.uid = uid
         self.max_tokens = max_tokens
+        self.top_logprobs = top_logprobs
         self.sampler = sampler
         self.logits_processors = logits_processors
         self.prefill_step_size = prefill_step_size
@@ -684,9 +751,7 @@ class _PromptPrefill:
             processed,
         )
 
-    def generate(
-        self, stop_criteria, top_logprobs_k=0
-    ) -> tuple[GenerationBatch, list[Response]]:
+    def generate(self, stop_criteria) -> tuple[GenerationBatch, list[Response]]:
         output = self.model(
             self._input_ids,
             cache=self.prompt_cache,
@@ -706,7 +771,7 @@ class _PromptPrefill:
             )
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         first_tokens, first_logprobs, top_idx, top_logprobs = _sample_next_token(
-            logprobs, [self.sampler], top_logprobs_k
+            logprobs, [self.sampler], self.top_logprobs
         )
 
         gen_batch = GenerationBatch(
@@ -717,7 +782,7 @@ class _PromptPrefill:
             samplers=[self.sampler],
             stop_criteria=stop_criteria,
             max_tokens=[self.max_tokens],
-            top_logprobs_k=top_logprobs_k,
+            top_logprobs=[self.top_logprobs],
             all_tokens=[self._all_tokens + self._prompt_token_ids],
             rope_deltas=self._rope_deltas,
             logits_processors=[self.logits_processors],
@@ -753,7 +818,7 @@ class BatchGenerator:
     ):
         self.model = model
         self.max_tokens = max_tokens
-        self.top_logprobs_k = top_logprobs_k
+        self._default_top_logprobs = top_logprobs_k
         self.stop_criteria = stop_criteria
         self.uid_count = 0
         self.prefill_step_size = prefill_step_size
@@ -769,7 +834,6 @@ class BatchGenerator:
         self._generation_batch = GenerationBatch.empty(
             self.model,
             self.stop_criteria,
-            top_logprobs_k=self.top_logprobs_k,
         )
 
     def close(self):
@@ -791,6 +855,7 @@ class BatchGenerator:
         prefix_cache_chunks: list[PromptPrefixChunk],
         image_spans: list[PromptImageSpan],
         max_tokens: int | None = None,
+        top_logprobs: int | None = None,
         cache: Optional[list[Any]] = None,
         all_tokens: list[int],
         rope_deltas: Any | None = None,
@@ -804,6 +869,9 @@ class BatchGenerator:
                 uid=uid,
                 prompt=prompt,
                 max_tokens=self.max_tokens if max_tokens is None else max_tokens,
+                top_logprobs=(
+                    self._default_top_logprobs if top_logprobs is None else top_logprobs
+                ),
                 sampler=sampler,
                 logits_processors=list(logits_processors),
                 inputs_embeds=inputs_embeds,
@@ -864,8 +932,7 @@ class BatchGenerator:
                 return prompt_responses, generation_responses
 
             gen_batch, prompt_responses = self._prompt_batch.generate(
-                self.stop_criteria,
-                top_logprobs_k=self.top_logprobs_k,
+                self.stop_criteria
             )
             self._generation_batch.append_prefilled_sequence(gen_batch)
             self._prompt_batch = None
@@ -882,6 +949,7 @@ class BatchGenerator:
                 uid=sequence.uid,
                 input_ids=sequence.prompt,
                 max_tokens=sequence.max_tokens,
+                top_logprobs=sequence.top_logprobs,
                 sampler=sequence.sampler,
                 logits_processors=sequence.logits_processors,
                 inputs_embeds=sequence.inputs_embeds,
@@ -898,8 +966,7 @@ class BatchGenerator:
                 prompt_responses = self._prompt_batch.progress_responses()
             else:
                 gen_batch, prompt_responses = self._prompt_batch.generate(
-                    self.stop_criteria,
-                    top_logprobs_k=self.top_logprobs_k,
+                    self.stop_criteria
                 )
                 self._generation_batch.append_prefilled_sequence(gen_batch)
                 self._prompt_batch = None

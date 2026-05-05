@@ -46,7 +46,6 @@ from mlx_engine.model_kit.batched_vision.request_lifecycle import (
     GenerationRequest,
     PreparedInsert,
 )
-from mlx_engine.utils.generation_helpers import MAX_TOP_LOGPROBS
 from mlx_engine.utils.token import Token
 from mlx_engine.vision_model_kit._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
@@ -116,13 +115,13 @@ class BatchedVisionModelKit:
             eos_token_ids=self._get_eos_token_ids(),
             trust_remote_code=self._trust_remote_code,
         )
-        self._ensure_channel_first_if_fast_processor()
         image_processor = mlx_vlm.utils.load_image_processor(
             self._model_path,
             trust_remote_code=self._trust_remote_code,
         )
         if image_processor is not None:
             self.processor.image_processor = image_processor
+        self._ensure_channel_first_if_fast_processor()
 
     def _get_eos_token_ids(self) -> list[int] | None:
         eos_token_ids_raw = self.config.get("eos_token_id")
@@ -293,7 +292,6 @@ class BatchedVisionModelKit:
                 if getattr(self.model, "no_chunked_prefill", False)
                 else self.prefill_step_size
             ),
-            top_logprobs_k=MAX_TOP_LOGPROBS,
         )
 
     def _prepare_request_for_insert(self, request: GenerationRequest) -> PreparedInsert:
@@ -375,6 +373,7 @@ class BatchedVisionModelKit:
             prompt_input_ids,
             inputs_embeds=inputs_embeds,
             max_tokens=request.max_tokens,
+            top_logprobs=request.top_logprobs,
             sampler=request.sampler,
             logits_processors=request.logits_processors,
             cache=cache,
