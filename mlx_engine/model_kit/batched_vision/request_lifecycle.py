@@ -11,6 +11,7 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 )
 from mlx_engine.model_kit.batched_vision.batch_generator import (
     BatchGenerator as LocalVlmBatchGenerator,
+    PromptPrefillFailure,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     RestoredPromptCache,
@@ -177,11 +178,14 @@ class GenerationThreadController:
         next_ready = []
         for prepared_insert in state.ready:
             if len(state.active) < self._max_seq_nums:
-                self._insert_prepared_request(
-                    state.batch_generator,
-                    prepared_insert,
-                    state.active,
-                )
+                try:
+                    self._insert_prepared_request(
+                        state.batch_generator,
+                        prepared_insert,
+                        state.active,
+                    )
+                except Exception as exc:
+                    prepared_insert.request.rqueue.put(exc)
             else:
                 next_ready.append(prepared_insert)
         state.ready = next_ready
@@ -207,6 +211,12 @@ class GenerationThreadController:
 
         prompt_responses, generation_responses = state.batch_generator.next()
         for response in prompt_responses:
+            if isinstance(response, PromptPrefillFailure):
+                result = state.active.pop(response.uid, None)
+                if result is not None:
+                    result.rqueue.put(response.error)
+                continue
+
             result = state.active.get(response.uid)
             if result is None:
                 continue

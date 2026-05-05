@@ -279,9 +279,7 @@ class BatchedVisionModelKit:
             if hasattr(self.processor, "tokenizer")
             else self.processor
         )
-        vlm_tokenizer.stopping_criteria.add_eos_token_ids(
-            list(self.tokenizer.eos_token_ids)
-        )
+        vlm_tokenizer.stopping_criteria.reset(list(self.tokenizer.eos_token_ids))
         return LocalVlmBatchGenerator(
             getattr(self.model, "language_model", self.model),
             vlm_tokenizer.stopping_criteria,
@@ -367,6 +365,8 @@ class BatchedVisionModelKit:
             if self._prompt_cache_store.can_store_records()
             else None
         )
+        detokenizer = self.tokenizer.detokenizer
+        detokenizer.reset()
 
         request.rqueue.put((prompt_progress, prompt_token_count))
         uid = batch_generator.insert(
@@ -386,8 +386,6 @@ class BatchedVisionModelKit:
             prompt_cache_save_callback=prompt_cache_save_callback,
         )
 
-        detokenizer = self.tokenizer.detokenizer
-        detokenizer.reset()
         active[uid] = ActiveRequest(
             rqueue=request.rqueue,
             detokenizer=detokenizer,

@@ -38,6 +38,14 @@ LogitsProcessor = Callable[[mx.array, mx.array], mx.array]
 
 
 @dataclass
+class PromptPrefillFailure:
+    """Request-local prompt prefill failure from the batch generator."""
+
+    uid: int
+    error: Exception
+
+
+@dataclass
 class _PrefixCacheSaveState:
     chunks: list[PromptPrefixChunk]
     next_chunk_idx: int
@@ -934,6 +942,7 @@ class BatchGenerator:
                     self._default_top_logprobs if top_logprobs is None else top_logprobs
                 ),
                 sampler=sampler,
+                # Stateful processors are request-owned; callers must not share them.
                 logits_processors=list(logits_processors),
                 inputs_embeds=inputs_embeds,
                 cache=cache,
@@ -977,6 +986,13 @@ class BatchGenerator:
         generation_responses = []
         prompt_responses = []
 
+        def fail_prompt_prefill(uid: int, error: Exception):
+            if self._prompt_batch is not None:
+                self._prompt_batch.prompt_cache = []
+                self._prompt_batch = None
+            mx.clear_cache()
+            return [PromptPrefillFailure(uid, error)], generation_responses
+
         if len(self._generation_batch) > 0:
             generation_responses = self._generation_batch.next()
             self._steps_counter += 1
@@ -988,13 +1004,19 @@ class BatchGenerator:
 
         if self._prompt_batch is not None:
             if self._prompt_batch.needs_processing():
-                self._prompt_batch.prompt_step()
+                try:
+                    self._prompt_batch.prompt_step()
+                except Exception as exc:
+                    return fail_prompt_prefill(self._prompt_batch.uid, exc)
                 prompt_responses = self._prompt_batch.progress_responses()
                 return prompt_responses, generation_responses
 
-            gen_batch, prompt_responses = self._prompt_batch.generate(
-                self.stop_criteria
-            )
+            try:
+                gen_batch, prompt_responses = self._prompt_batch.generate(
+                    self.stop_criteria
+                )
+            except Exception as exc:
+                return fail_prompt_prefill(self._prompt_batch.uid, exc)
             self._generation_batch.append_prefilled_sequence(gen_batch)
             self._prompt_batch = None
             mx.clear_cache()
@@ -1005,30 +1027,41 @@ class BatchGenerator:
         if self._unprocessed_sequences and num_to_add >= 1:
             sequence = self._unprocessed_sequences.pop(0)
 
-            self._prompt_batch = _PromptPrefill(
-                model=self.model,
-                uid=sequence.uid,
-                input_ids=sequence.prompt,
-                max_tokens=sequence.max_tokens,
-                top_logprobs=sequence.top_logprobs,
-                sampler=sequence.sampler,
-                logits_processors=sequence.logits_processors,
-                inputs_embeds=sequence.inputs_embeds,
-                prompt_kwargs=sequence.prompt_kwargs,
-                prefix_cache_save_state=sequence.prefix_cache_save_state,
-                prefill_step_size=self.prefill_step_size,
-                cache=sequence.cache,
-                all_tokens=sequence.all_tokens,
-                rope_deltas=sequence.rope_deltas,
-            )
+            try:
+                self._prompt_batch = _PromptPrefill(
+                    model=self.model,
+                    uid=sequence.uid,
+                    input_ids=sequence.prompt,
+                    max_tokens=sequence.max_tokens,
+                    top_logprobs=sequence.top_logprobs,
+                    sampler=sequence.sampler,
+                    logits_processors=sequence.logits_processors,
+                    inputs_embeds=sequence.inputs_embeds,
+                    prompt_kwargs=sequence.prompt_kwargs,
+                    prefix_cache_save_state=sequence.prefix_cache_save_state,
+                    prefill_step_size=self.prefill_step_size,
+                    cache=sequence.cache,
+                    all_tokens=sequence.all_tokens,
+                    rope_deltas=sequence.rope_deltas,
+                )
+            except Exception as exc:
+                self._prompt_batch = None
+                mx.clear_cache()
+                return [PromptPrefillFailure(sequence.uid, exc)], generation_responses
 
             if self._prompt_batch.needs_processing():
-                self._prompt_batch.prompt_step()
+                try:
+                    self._prompt_batch.prompt_step()
+                except Exception as exc:
+                    return fail_prompt_prefill(sequence.uid, exc)
                 prompt_responses = self._prompt_batch.progress_responses()
             else:
-                gen_batch, prompt_responses = self._prompt_batch.generate(
-                    self.stop_criteria
-                )
+                try:
+                    gen_batch, prompt_responses = self._prompt_batch.generate(
+                        self.stop_criteria
+                    )
+                except Exception as exc:
+                    return fail_prompt_prefill(sequence.uid, exc)
                 self._generation_batch.append_prefilled_sequence(gen_batch)
                 self._prompt_batch = None
                 mx.clear_cache()
