@@ -118,19 +118,11 @@ def build_cached_prompt_kwargs(
     prompt_input_ids = prepared_prompt.prompt_input_ids[cached_prefix_len:]
     if prepared_prompt.raw_inputs is not None:
         prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
-        # Keep full-prompt model side state, but prefill only the suffix.
-        prompt_kwargs["inputs_embeds"] = prompt_kwargs["inputs_embeds"][
-            :, cached_prefix_len:
-        ]
-        if "position_ids" in prompt_kwargs:
-            # MRoPE image positions are request-local; slice them with embeds.
-            prompt_kwargs["position_ids"] = prompt_kwargs["position_ids"][
-                :, :, cached_prefix_len:
-            ]
-        if "mask" in prompt_kwargs:
-            # Gemma-style 4D masks are query-local; keep full key coverage.
-            prompt_kwargs["mask"] = prompt_kwargs["mask"][:, :, cached_prefix_len:, :]
-        return prompt_kwargs
+        return slice_prompt_kwargs(
+            prompt_kwargs,
+            cached_prefix_len,
+            len(prepared_prompt.prompt_input_ids),
+        )
 
     input_ids = mx.array(prompt_input_ids, dtype=mx.int32)[None, :]
     embedding_output = model.get_input_embeddings(input_ids)
@@ -140,11 +132,64 @@ def build_cached_prompt_kwargs(
         if value is not None
     }
 
-    # Prefix restores carry the tiny RoPE delta side state in memory.
+    if cached_prefix_len > 0 and _add_qwen_text_restore_rope_state(
+        model,
+        prompt_kwargs,
+        cached_prefix_len,
+        len(prompt_input_ids),
+        input_ids.dtype,
+        rope_deltas,
+    ):
+        return prompt_kwargs
+
+    # Non-Qwen prefix restores carry the tiny RoPE delta side state in memory.
     if rope_deltas is not None and prompt_kwargs.get("rope_deltas") is None:
         prompt_kwargs["rope_deltas"] = rope_deltas
 
     return prompt_kwargs
+
+
+def slice_prompt_kwargs(
+    prompt_kwargs: dict,
+    start: int,
+    end: int,
+    *,
+    mask_key_end: int | None = None,
+) -> dict:
+    """Return prompt kwargs for token range `[start, end)`."""
+    sliced = dict(prompt_kwargs)
+
+    if "inputs_embeds" in sliced:
+        sliced["inputs_embeds"] = sliced["inputs_embeds"][:, start:end]
+    if "position_ids" in sliced:
+        # Qwen MRoPE positions are token-local and use shape (3, B, S).
+        sliced["position_ids"] = sliced["position_ids"][:, :, start:end]
+    if "mask" in sliced:
+        # Multimodal masks are query-local; chunked prefill clips future keys.
+        sliced["mask"] = sliced["mask"][:, :, start:end, :mask_key_end]
+    if "per_layer_inputs" in sliced:
+        sliced["per_layer_inputs"] = sliced["per_layer_inputs"][:, start:end]
+
+    visual_pos_masks = prompt_kwargs.get("visual_pos_masks")
+    if visual_pos_masks is not None:
+        sliced["visual_pos_masks"] = visual_pos_masks[:, start:end]
+        if "deepstack_visual_embeds" in sliced:
+            sliced["deepstack_visual_embeds"] = _slice_deepstack_visual_embeds(
+                sliced["deepstack_visual_embeds"],
+                visual_pos_masks,
+                start,
+                end,
+            )
+
+    return sliced
+
+
+def drop_prompt_kwargs_prefix(prompt_kwargs: dict, length: int) -> dict:
+    """Drop `length` already-prefilled tokens from prompt-local kwargs."""
+    total_len = _prompt_kwargs_token_len(prompt_kwargs)
+    if total_len is None:
+        return prompt_kwargs
+    return slice_prompt_kwargs(prompt_kwargs, length, total_len)
 
 
 def _use_language_model_attention_mask(prompt_kwargs: dict) -> None:
@@ -167,6 +212,69 @@ def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
     rope_deltas = getattr(language_model, "_rope_deltas", None)
     if rope_deltas is not None:
         prompt_kwargs["rope_deltas"] = rope_deltas
+
+
+def _add_qwen_text_restore_rope_state(
+    model,
+    prompt_kwargs: dict,
+    cached_prefix_len: int,
+    suffix_len: int,
+    dtype,
+    rope_deltas: Any | None,
+) -> bool:
+    language_model = getattr(model, "language_model", None)
+    model_type = str(getattr(language_model, "model_type", ""))
+    if language_model is None or not model_type.startswith("qwen"):
+        return False
+
+    # Text restores start from a nonzero KV offset, so pass explicit text MRoPE
+    # positions. Reset model-side deltas so later decode capture is not stale.
+    if rope_deltas is None:
+        rope_deltas = mx.zeros((1, 1), dtype=dtype)
+    language_model._rope_deltas = rope_deltas
+    prompt_kwargs["position_ids"] = mx.broadcast_to(
+        mx.arange(
+            cached_prefix_len,
+            cached_prefix_len + suffix_len,
+            dtype=dtype,
+        ).reshape(1, 1, suffix_len),
+        (3, 1, suffix_len),
+    )
+    return True
+
+
+def _slice_deepstack_visual_embeds(
+    deepstack_visual_embeds,
+    visual_pos_masks: mx.array,
+    start: int,
+    end: int,
+):
+    # DeepStack embeds are packed by visual-token order, not sequence position.
+    visual_start = int(mx.sum(visual_pos_masks[:, :start]).item())
+    visual_count = int(mx.sum(visual_pos_masks[:, start:end]).item())
+    visual_end = visual_start + visual_count
+
+    if isinstance(deepstack_visual_embeds, tuple):
+        return tuple(
+            embed[visual_start:visual_end] for embed in deepstack_visual_embeds
+        )
+    if isinstance(deepstack_visual_embeds, list):
+        return [embed[visual_start:visual_end] for embed in deepstack_visual_embeds]
+    return deepstack_visual_embeds[visual_start:visual_end]
+
+
+def _prompt_kwargs_token_len(prompt_kwargs: dict) -> int | None:
+    if "position_ids" in prompt_kwargs:
+        return prompt_kwargs["position_ids"].shape[-1]
+    if "visual_pos_masks" in prompt_kwargs:
+        return prompt_kwargs["visual_pos_masks"].shape[1]
+    if "per_layer_inputs" in prompt_kwargs:
+        return prompt_kwargs["per_layer_inputs"].shape[1]
+    if "inputs_embeds" in prompt_kwargs:
+        return prompt_kwargs["inputs_embeds"].shape[1]
+    if "mask" in prompt_kwargs:
+        return prompt_kwargs["mask"].shape[-2]
+    return None
 
 
 def get_image_token_index(config: dict) -> int | None:

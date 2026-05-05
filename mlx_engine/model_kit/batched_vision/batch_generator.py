@@ -18,6 +18,10 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptImageSpan,
     PromptPrefixChunk,
 )
+from mlx_engine.model_kit.batched_vision.prompt_inputs import (
+    drop_prompt_kwargs_prefix,
+    slice_prompt_kwargs,
+)
 from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
     DEFAULT_MAX_TOKENS,
@@ -119,6 +123,21 @@ def _extend_optional_rope_deltas(
     if other_rope_deltas is None:
         other_rope_deltas = _empty_rope_deltas_like(rope_deltas, other_count)
     return mx.concatenate([rope_deltas, other_rope_deltas])
+
+
+def _capture_rope_deltas(model, rows: int) -> Any | None:
+    language_model = getattr(model, "language_model", model)
+    if not hasattr(language_model, "_rope_deltas"):
+        return None
+
+    rope_deltas = getattr(language_model, "_rope_deltas", None)
+    if rope_deltas is None:
+        return mx.zeros((rows, 1), dtype=mx.int32)
+
+    rope_deltas = _normalize_rope_deltas(rope_deltas)
+    if rope_deltas.shape[0] == 1 and rows > 1:
+        return mx.broadcast_to(rope_deltas, (rows, 1))
+    return rope_deltas
 
 
 def _sample_with_samplers(
@@ -662,7 +681,6 @@ class _PromptPrefill:
             self._input_ids[:, :n],
             cache=self.prompt_cache,
             inputs_embeds=self._inputs_embeds[:, :n],
-            n_to_process=n,
             **self._prompt_kwargs_for_next(n),
         )
         mx.eval([c.state for c in self.prompt_cache])
@@ -710,19 +728,16 @@ class _PromptPrefill:
         return 0
 
     def _prompt_kwargs_for_next(self, n: int) -> dict:
-        if "position_ids" not in self._prompt_kwargs:
-            return self._prompt_kwargs
-
-        prompt_kwargs = dict(self._prompt_kwargs)
-        # Qwen MRoPE prompt positions are per token, so chunk them with embeds.
-        prompt_kwargs["position_ids"] = prompt_kwargs["position_ids"][:, :, :n]
-        return prompt_kwargs
+        # Slice locally instead of relying on model-specific n_to_process hacks.
+        return slice_prompt_kwargs(
+            self._prompt_kwargs,
+            0,
+            n,
+            mask_key_end=self._processed_prefix_len + n,
+        )
 
     def _drop_processed_prompt_kwargs(self, n: int) -> None:
-        if "position_ids" in self._prompt_kwargs:
-            self._prompt_kwargs["position_ids"] = self._prompt_kwargs["position_ids"][
-                :, :, n:
-            ]
+        self._prompt_kwargs = drop_prompt_kwargs_prefix(self._prompt_kwargs, n)
 
     def _emit_cache_save_snapshots(self) -> None:
         save_state = self._prefix_cache_save_state
@@ -796,7 +811,7 @@ class _PromptPrefill:
         # PromptProcessingBatch.generate. Qwen model get_input_embeddings
         # primes language_model._rope_deltas via get_rope_index; see
         # external/src/mlx-vlm/mlx_vlm/models/qwen3_5/qwen3_5.py.
-        rope_deltas = _normalize_rope_deltas(getattr(self.model, "_rope_deltas", None))
+        rope_deltas = _capture_rope_deltas(self.model, len(gen_batch.uids))
         if rope_deltas is not None:
             gen_batch._rope_deltas = rope_deltas
 
