@@ -27,9 +27,9 @@ from mlx_vlm.generate import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_PREFILL_STEP_SIZE,
     _left_pad_prompts,
-    _make_cache,
     wired_limit,
 )
+from mlx_lm.models.cache import make_prompt_cache
 
 PromptCacheSaveCallback = Callable[
     [list[Any], list[PromptPrefixChunk], int, int, int], None
@@ -101,11 +101,25 @@ def _batch_single_cache(cache: list[Any]) -> list[Any]:
     return batch_cache
 
 
+def _is_scalar_prompt_cache(prompt_cache: list[Any]) -> bool:
+    """Return True for ordinary one-request caches, not batch-aware caches."""
+    return any(not hasattr(cache, "filter") for cache in prompt_cache)
+
+
+def _ensure_batch_cache(prompt_cache: list[Any]) -> list[Any]:
+    if _is_scalar_prompt_cache(prompt_cache):
+        return _batch_single_cache(prompt_cache)
+    return prompt_cache
+
+
 def _extend_cache(cache_a, cache_b):
     if not cache_a:
         return cache_b
     if not cache_b:
         return cache_a
+    # Stay scalar for one row; promote only when another row actually joins.
+    cache_a = _ensure_batch_cache(cache_a)
+    cache_b = _ensure_batch_cache(cache_b)
     for ca, cb in zip(cache_a, cache_b):
         ca.extend(cb)
     return cache_a
@@ -434,6 +448,8 @@ class GenerationBatch:
         return tokens, token_logprob_list, top_idx_list, top_logprob_list
 
     def extract_cache(self, idx: int) -> list[Any] | None:
+        if idx == 0 and _is_scalar_prompt_cache(self.prompt_cache):
+            return self.prompt_cache
         extracted = []
         for cache in self.prompt_cache:
             if not hasattr(cache, "extract") or getattr(cache, "keys", True) is None:
@@ -543,7 +559,12 @@ class GenerationBatch:
 
         keep_arr = mx.array(keep, mx.int32)
         for cache in self.prompt_cache:
-            cache.filter(keep_arr)
+            if hasattr(cache, "filter"):
+                cache.filter(keep_arr)
+        if len(keep) == 1 and not _is_scalar_prompt_cache(self.prompt_cache):
+            extracted = self.extract_cache(0)
+            if extracted is not None:
+                self.prompt_cache = extracted
         if self._next_tokens is not None:
             self._next_tokens = self._next_tokens[keep_arr]
         if self._next_token_logprobs is not None:
@@ -713,9 +734,10 @@ class _PromptPrefill:
         self._rope_deltas = _normalize_rope_deltas(rope_deltas)
 
         if cache is None:
-            self.prompt_cache = _make_cache(model, [0])
+            # Prompt prefill handles one request, so scalar caches avoid batch overhead.
+            self.prompt_cache = make_prompt_cache(model)
         else:
-            self.prompt_cache = _batch_single_cache(cache)
+            self.prompt_cache = cache
 
     def progress_responses(self) -> list[Response]:
         total = len(self._all_tokens) + len(self._prompt_token_ids)

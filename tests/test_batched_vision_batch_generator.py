@@ -80,6 +80,7 @@ class ArraysCache(_FakeBatchCache):
 class _FakeScalarCache:
     def __init__(self, name: str = "scalar"):
         self.name = name
+        self.state = mx.array([0], dtype=mx.int32)
         self.merge_calls = []
 
     def merge(self, caches):
@@ -211,8 +212,8 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
-        "_make_cache",
-        lambda _model, _padding: [_FakeBatchCache()],
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
     )
     model = _FakeModel()
     generator = BatchGenerator(
@@ -277,8 +278,8 @@ def test_batch_generator_aligns_restored_prefill_to_step_boundary(monkeypatch):
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
-        "_make_cache",
-        lambda _model, _padding: [_FakeBatchCache()],
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
     )
     model = _FakeModel()
     generator = BatchGenerator(
@@ -317,8 +318,8 @@ def test_batch_generator_state_cache_lands_on_reusable_tail_boundary(monkeypatch
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
-        "_make_cache",
-        lambda _model, _padding: [ArraysCache()],
+        "make_prompt_cache",
+        lambda _model: [ArraysCache()],
     )
     model = _FakeModel()
     generator = BatchGenerator(
