@@ -58,10 +58,11 @@ class _FakeConfig:
 
 
 class _FakeModel:
-    def __init__(self, *, inputs_embeds=None):
+    def __init__(self, *, inputs_embeds=None, embedding_kwargs=None):
         self.calls = []
         self.config = _FakeConfig()
         self.language_model = _FakeLanguageModel()
+        self.embedding_kwargs = embedding_kwargs or {}
         self.inputs_embeds = (
             inputs_embeds
             if inputs_embeds is not None
@@ -73,6 +74,7 @@ class _FakeModel:
         return _EmbeddingOutput(
             inputs_embeds=self.inputs_embeds,
             unused=None,
+            **self.embedding_kwargs,
         )
 
 
@@ -153,7 +155,11 @@ def test_prepare_prompt_inputs_falls_back_to_whole_prompt_on_image_span_mismatch
 def test_build_prompt_kwargs_image_adds_qwen_position_state():
     """Image prefill exports Qwen MRoPE side state for chunked prefill."""
     input_ids = mx.array([[101, 20, 20, 102]], dtype=mx.int32)
-    model = _FakeModel(inputs_embeds=mx.zeros((1, 4, 2), dtype=mx.float32))
+    attention_mask_4d = mx.ones((1, 1, 4, 4), dtype=mx.int32)
+    model = _FakeModel(
+        inputs_embeds=mx.zeros((1, 4, 2), dtype=mx.float32),
+        embedding_kwargs={"attention_mask_4d": attention_mask_4d},
+    )
     prepared_prompt = PreparedPrompt(
         prompt_input_ids=input_ids.squeeze(0).tolist(),
         raw_inputs={
@@ -177,17 +183,21 @@ def test_build_prompt_kwargs_image_adds_qwen_position_state():
         [[0, 1, 2, 3]],
     ]
     assert prompt_kwargs["rope_deltas"].item() == 0
+    assert prompt_kwargs["mask"] is attention_mask_4d
+    assert "attention_mask_4d" not in prompt_kwargs
 
 
 def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeypatch):
     """Image restores recompute full side state, then prefill only the suffix."""
     inputs_embeds = mx.arange(12, dtype=mx.float32).reshape(1, 6, 2)
     position_ids = mx.arange(18, dtype=mx.int32).reshape(3, 1, 6)
+    mask = mx.arange(36, dtype=mx.int32).reshape(1, 1, 6, 6)
 
     def build_prompt_kwargs(_model, _prepared_prompt):
         return {
             "inputs_embeds": inputs_embeds,
             "position_ids": position_ids,
+            "mask": mask,
             "rope_deltas": mx.array([5], dtype=mx.int32),
         }
 
@@ -210,4 +220,5 @@ def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeyp
 
     assert prompt_kwargs["inputs_embeds"].tolist() == inputs_embeds[:, 4:].tolist()
     assert prompt_kwargs["position_ids"].tolist() == position_ids[:, :, 4:].tolist()
+    assert prompt_kwargs["mask"].tolist() == mask[:, :, 4:, :].tolist()
     assert prompt_kwargs["rope_deltas"].tolist() == [5]

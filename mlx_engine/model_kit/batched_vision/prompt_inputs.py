@@ -103,6 +103,7 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
             if value is not None
         },
     }
+    _use_language_model_attention_mask(prompt_kwargs)
     _add_language_model_rope_state(model, prompt_kwargs)
     return prompt_kwargs
 
@@ -126,6 +127,9 @@ def build_cached_prompt_kwargs(
             prompt_kwargs["position_ids"] = prompt_kwargs["position_ids"][
                 :, :, cached_prefix_len:
             ]
+        if "mask" in prompt_kwargs:
+            # Gemma-style 4D masks are query-local; keep full key coverage.
+            prompt_kwargs["mask"] = prompt_kwargs["mask"][:, :, cached_prefix_len:, :]
         return prompt_kwargs
 
     input_ids = mx.array(prompt_input_ids, dtype=mx.int32)[None, :]
@@ -141,6 +145,14 @@ def build_cached_prompt_kwargs(
         prompt_kwargs["rope_deltas"] = rope_deltas
 
     return prompt_kwargs
+
+
+def _use_language_model_attention_mask(prompt_kwargs: dict) -> None:
+    # Gemma get_input_embeddings returns attention_mask_4d; the language model
+    # only consumes it as `mask`, matching the mlx-vlm model.__call__ wrapper.
+    attention_mask_4d = prompt_kwargs.pop("attention_mask_4d", None)
+    if attention_mask_4d is not None:
+        prompt_kwargs["mask"] = attention_mask_4d
 
 
 def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
