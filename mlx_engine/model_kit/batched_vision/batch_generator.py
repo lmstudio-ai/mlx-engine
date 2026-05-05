@@ -150,7 +150,11 @@ def _capture_rope_deltas(model, rows: int) -> Any | None:
 
     rope_deltas = _normalize_rope_deltas(rope_deltas)
     if rope_deltas.shape[0] == 1 and rows > 1:
-        return mx.broadcast_to(rope_deltas, (rows, 1))
+        rope_deltas = mx.broadcast_to(rope_deltas, (rows, 1))
+    if rope_deltas.shape[0] != rows:
+        raise RuntimeError(
+            f"_rope_deltas shape {rope_deltas.shape} does not match batch size {rows}"
+        )
     return rope_deltas
 
 
@@ -611,8 +615,13 @@ class GenerationBatch:
             self._emit_cache_save_snapshot(i)
 
             top_logprobs = None
-            if top_idx_list is not None:
-                top_logprobs = list(zip(top_idx_list[i], top_logprob_list[i]))
+            if row.top_logprobs > 0 and top_idx_list is not None:
+                top_logprobs = list(
+                    zip(
+                        top_idx_list[i][: row.top_logprobs],
+                        top_logprob_list[i][: row.top_logprobs],
+                    )
+                )
 
             responses.append(
                 self.Response(
