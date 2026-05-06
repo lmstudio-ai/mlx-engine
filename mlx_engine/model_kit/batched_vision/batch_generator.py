@@ -5,6 +5,7 @@ The batcher only owns language-model prefill/decode plus RoPE delta handoff.
 """
 
 import contextlib
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -30,6 +31,8 @@ from mlx_vlm.generate import (
     wired_limit,
 )
 from mlx_lm.models.cache import make_prompt_cache
+
+logger = logging.getLogger(__name__)
 
 PromptCacheSaveCallback = Callable[
     [list[Any], list[PromptPrefixChunk], int, int, int], None
@@ -587,40 +590,43 @@ class GenerationBatch:
             self._rope_deltas = self._rope_deltas[keep_arr]
 
     def _emit_cache_save_snapshot(self, idx: int) -> None:
-        row = self._rows[idx]
-        save_state = row.prefix_cache_save_state
-        if save_state.callback is None:
-            return
+        try:
+            row = self._rows[idx]
+            save_state = row.prefix_cache_save_state
+            if save_state.callback is None:
+                return
 
-        current_len = len(row.tokens)
-        chunks = save_state.chunks
-        next_chunk_idx = save_state.next_chunk_idx
-        next_chunk_end = (
-            chunks[next_chunk_idx].end
-            if next_chunk_idx < len(chunks)
-            else (chunks[-1].end if chunks else 0) + DEFAULT_PREFIX_CHUNK_SIZE
-        )
-        if current_len < next_chunk_end:
-            return
+            current_len = len(row.tokens)
+            chunks = save_state.chunks
+            next_chunk_idx = save_state.next_chunk_idx
+            next_chunk_end = (
+                chunks[next_chunk_idx].end
+                if next_chunk_idx < len(chunks)
+                else (chunks[-1].end if chunks else 0) + DEFAULT_PREFIX_CHUNK_SIZE
+            )
+            if current_len < next_chunk_end:
+                return
 
-        extend_prefix_cache_chunks(
-            row.tokens,
-            save_state.image_spans,
-            chunks,
-        )
-        end_chunk_idx = len(chunks)
-        save_state.next_chunk_idx = end_chunk_idx
+            extend_prefix_cache_chunks(
+                row.tokens,
+                save_state.image_spans,
+                chunks,
+            )
+            end_chunk_idx = len(chunks)
+            save_state.next_chunk_idx = end_chunk_idx
 
-        prompt_cache = self.extract_cache(idx)
-        if prompt_cache is None:
-            return
-        save_state.callback(
-            prompt_cache,
-            chunks,
-            next_chunk_idx,
-            end_chunk_idx,
-            current_len,
-        )
+            prompt_cache = self.extract_cache(idx)
+            if prompt_cache is None:
+                return
+            save_state.callback(
+                prompt_cache,
+                chunks,
+                next_chunk_idx,
+                end_chunk_idx,
+                current_len,
+            )
+        except Exception:
+            logger.debug("Skipping decode prompt-cache snapshot.", exc_info=True)
 
     def next(self) -> list[Response]:
         if not self._rows:
@@ -773,9 +779,9 @@ class _PromptPrefill:
     def _next_prompt_step_size(self) -> int:
         """Return the next chunked prefill size.
 
-        A restored prefix can start between normal prefill boundaries, so the
-        first step may be short to land back on the regular step grid. That
-        keeps state-cache snapshots at predictable model-call boundaries.
+        When disk checkpointing is active, a restored prefix can start between
+        normal prefill boundaries, so the first step may be short to land back
+        on the regular step grid.
         """
         if self.prefill_step_size is None:
             return 0
@@ -784,8 +790,9 @@ class _PromptPrefill:
         if remaining_tokens <= 1:
             return 0
 
+        saving_prompt_cache = self._prefix_cache_save_state.callback is not None
         processed_remainder = self._processed_prefix_len % self.prefill_step_size
-        if processed_remainder:
+        if saving_prompt_cache and processed_remainder:
             # After a partial restore, land on the next normal prefill boundary.
             alignment_step = self.prefill_step_size - processed_remainder
             if alignment_step < remaining_tokens:
@@ -794,7 +801,9 @@ class _PromptPrefill:
         if remaining_tokens > self.prefill_step_size:
             return min(self.prefill_step_size, remaining_tokens - 1)
 
-        if any(type(cache).__name__ == "ArraysCache" for cache in self.prompt_cache):
+        if saving_prompt_cache and any(
+            type(cache).__name__ == "ArraysCache" for cache in self.prompt_cache
+        ):
             # Opaque state caches are restorable only at exact saved boundaries.
             max_reusable_prefix_len = self._processed_prefix_len + remaining_tokens - 1
             target_prefix_len = (
@@ -818,31 +827,34 @@ class _PromptPrefill:
         self._prompt_kwargs = drop_prompt_kwargs_prefix(self._prompt_kwargs, n)
 
     def _emit_cache_save_snapshots(self) -> None:
-        save_state = self._prefix_cache_save_state
-        if save_state.callback is None:
-            return
+        try:
+            save_state = self._prefix_cache_save_state
+            if save_state.callback is None:
+                return
 
-        processed = self._processed_prefix_len
-        start_chunk_idx = save_state.next_chunk_idx
-        end_chunk_idx = min(
-            processed // DEFAULT_PREFIX_CHUNK_SIZE,
-            len(save_state.chunks),
-        )
-        if start_chunk_idx >= end_chunk_idx:
-            return
+            processed = self._processed_prefix_len
+            start_chunk_idx = save_state.next_chunk_idx
+            end_chunk_idx = min(
+                processed // DEFAULT_PREFIX_CHUNK_SIZE,
+                len(save_state.chunks),
+            )
+            if start_chunk_idx >= end_chunk_idx:
+                return
 
-        save_state.next_chunk_idx = end_chunk_idx
-        # One large prefill can backfill several crossed cache chunks.
-        save_state.callback(
-            [
-                cache.extract(0) if hasattr(cache, "extract") else cache
-                for cache in self.prompt_cache
-            ],
-            save_state.chunks,
-            start_chunk_idx,
-            end_chunk_idx,
-            processed,
-        )
+            save_state.next_chunk_idx = end_chunk_idx
+            # One large prefill can backfill several crossed cache chunks.
+            save_state.callback(
+                [
+                    cache.extract(0) if hasattr(cache, "extract") else cache
+                    for cache in self.prompt_cache
+                ],
+                save_state.chunks,
+                start_chunk_idx,
+                end_chunk_idx,
+                processed,
+            )
+        except Exception:
+            logger.debug("Skipping prefill prompt-cache snapshot.", exc_info=True)
 
     def generate(self, stop_criteria) -> tuple[GenerationBatch, list[Response]]:
         output = self.model(
