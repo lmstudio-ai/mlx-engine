@@ -213,8 +213,12 @@ class BatchedVisionModelKit:
                     raise response
                 if isinstance(response, tuple):
                     if prompt_progress_callback is not None:
-                        if prompt_progress_callback(*response) is False:
-                            # Prompt cancellation is cooperative at chunk boundaries.
+                        try:
+                            should_continue = prompt_progress_callback(*response)
+                        except Exception:
+                            self.remove(request_id)
+                            raise
+                        if should_continue is False:
                             self.remove(request_id)
                             raise RequestCancelled()
                     continue

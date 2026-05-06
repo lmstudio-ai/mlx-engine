@@ -269,6 +269,7 @@ class VlmPromptCacheCoordinator:
                     # Opaque state caches are only exact at this model-call end.
                     save_state_checkpoint=chunk.end == snapshot_len,
                 )
+                self._enqueue_pending_save(pending_save)
             except PromptCacheRecordCoverageError as exc:
                 logger.warning(
                     "Skipping prompt cache save for chunk [%s, %s) at snapshot %s: %s",
@@ -278,7 +279,15 @@ class VlmPromptCacheCoordinator:
                     exc,
                 )
                 continue
-            self._enqueue_pending_save(pending_save)
+            except Exception:
+                logger.debug(
+                    "Skipping prompt cache save for chunk [%s, %s) at snapshot %s.",
+                    chunk.start,
+                    chunk.end,
+                    snapshot_len,
+                    exc_info=True,
+                )
+                continue
 
     def store_hot_prompt_cache(
         self,
