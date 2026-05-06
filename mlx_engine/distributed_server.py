@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 RANK_PROTOCOL_VERSION = 1
 MESSAGE_TYPE_CHAT_COMPLETIONS = "chat.completions"
 MESSAGE_TYPE_SHUTDOWN = "shutdown"
+HTTP_DEBUG_SERVER_ENV_VAR = "LMSTUDIO_MLX_DISTRIBUTED_HTTP_DEBUG_SERVER"
+
+
+def require_http_debug_server_opt_in() -> None:
+    if os.environ.get(HTTP_DEBUG_SERVER_ENV_VAR) == "1":
+        logger.warning(
+            "Starting deprecated MLX distributed HTTP debug harness. "
+            "Product distributed inference must use the native llm-engine path."
+        )
+        return
+
+    raise RuntimeError(
+        "mlx_engine.distributed_server is a debug/parity harness only. "
+        f"Set {HTTP_DEBUG_SERVER_ENV_VAR}=1 only from an explicit debug harness."
+    )
 
 
 def require_object(value: Any, label: str) -> dict[str, Any]:
@@ -626,7 +641,9 @@ def parse_chat_template_args(value: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Minimal distributed mlx-engine server.")
+    parser = argparse.ArgumentParser(
+        description="Deprecated distributed mlx-engine HTTP debug harness."
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--model", required=True)
@@ -639,6 +656,7 @@ def main() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
         level=logging.INFO,
     )
+    require_http_debug_server_opt_in()
     default_template_args = parse_chat_template_args(args.chat_template_args)
 
     group = mx.distributed.init()
