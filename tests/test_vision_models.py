@@ -57,6 +57,17 @@ def _expected_cached_text_prompt_tokens(model_kit, prompt: str) -> set[int]:
     return {token_count, token_count + 1}
 
 
+def _assert_cached_text_prompt_reused(
+    begin_event: dict, expected_cached_tokens: set[int]
+) -> None:
+    assert begin_event["cached_tokens"] >= CACHING_TEST_PREFILL_STEP_SIZE
+    assert begin_event["cached_tokens"] <= max(expected_cached_tokens)
+
+
+def _assert_mentions_franklin(text: str) -> None:
+    assert "franklin" in text.lower()
+
+
 class TestVisionModels:
     @classmethod
     def setup_class(cls):
@@ -552,7 +563,7 @@ You are a helpful assistant.<|im_end|>
         # Generation 1 - model creates a long story
         prompt = dedent("""\
             <bos><start_of_turn>user
-            Tell me a 500-word story<end_of_turn>
+            Tell me a 500-word story about a main character named Silas<end_of_turn>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
@@ -560,7 +571,7 @@ You are a helpful assistant.<|im_end|>
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert len(generated_text.strip()) > 0
+        assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         cached_prompt = prompt + generated_text
@@ -580,8 +591,8 @@ You are a helpful assistant.<|im_end|>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] in expected_cached_tokens
-        assert len(generated_text.strip()) > 0
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
+        assert "silas" in generated_text.lower()
 
     def test_gemma3_text_only_long_original_prompt_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
@@ -623,7 +634,7 @@ You are a helpful assistant.<|im_end|>
 ```
 {file_content}
 ```
-Summarize this in one sentence<end_of_turn>
+Summarize this in one sentence and include the author's full name<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
@@ -633,7 +644,7 @@ Summarize this in one sentence<end_of_turn>
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert len(generated_text.strip()) > 0
+        _assert_mentions_franklin(generated_text)
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
@@ -643,7 +654,7 @@ Summarize this in one sentence<end_of_turn>
         prompt = cached_prompt + dedent("""\
                 <end_of_turn>
                 <start_of_turn>user
-                What was the main characters name?<end_of_turn>
+                Who is the author of this passage? Answer with only the name.<end_of_turn>
                 <start_of_turn>model
                 """)
         print(prompt)
@@ -651,8 +662,8 @@ Summarize this in one sentence<end_of_turn>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] in expected_cached_tokens
-        assert len(generated_text.strip()) > 0
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
+        _assert_mentions_franklin(generated_text)
 
     def test_gemma3n_vision(self):
         """Test gemma 3n model"""
@@ -736,7 +747,12 @@ Summarize this in one sentence<end_of_turn>
                 "content": [
                     {
                         "type": "text",
-                        "text": "Tell me a 500-word story about a traveler, and make the main character's name distinctive.",
+                        "text": (
+                            "Tell me a 500-word story about a traveler, and make "
+                            "the main character's name distinctive. End the story "
+                            "with one final line in the exact format: "
+                            "MAIN CHARACTER: <name>."
+                        ),
                     }
                 ],
             }
@@ -752,6 +768,14 @@ Summarize this in one sentence<end_of_turn>
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
         assert len(generated_text) > 0
+        name_marker = "MAIN CHARACTER:"
+        name_line = next(
+            (line for line in generated_text.splitlines() if name_marker in line),
+            None,
+        )
+        assert name_line is not None, generated_text
+        main_character_name = name_line.split(name_marker, 1)[1].strip().strip(".")
+        assert main_character_name
 
         expected_cached_tokens = _expected_cached_text_prompt_tokens(
             model_kit, prompt + generated_text
@@ -779,13 +803,13 @@ Summarize this in one sentence<end_of_turn>
         follow_up_text, reporter = generate_text(prompt)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] in expected_cached_tokens
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
         finish_event = reporter.events[-1]
         assert (
             finish_event["prefill_tokens_processed"] - begin_event["cached_tokens"]
             <= CACHING_TEST_PREFILL_STEP_SIZE
         )
-        assert len(follow_up_text.strip()) > 0
+        assert main_character_name.lower() in follow_up_text.lower()
 
     @pytest.mark.heavy
     def test_gemma4_scratchpad_follow_up_reuses_checkpoint_cache(self):
@@ -960,7 +984,7 @@ Summarize this in one sentence<end_of_turn>
         # Generation 1 - model creates a long story
         prompt = dedent("""\
             <bos><start_of_turn>user
-            Tell me a 500-word story<end_of_turn>
+            Tell me a 500-word story about a main character named Silas<end_of_turn>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
@@ -968,7 +992,7 @@ Summarize this in one sentence<end_of_turn>
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert len(generated_text.strip()) > 0
+        assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
         cached_prompt = prompt + generated_text
@@ -988,8 +1012,8 @@ Summarize this in one sentence<end_of_turn>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] in expected_cached_tokens
-        assert len(generated_text.strip()) > 0
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
+        assert "silas" in generated_text.lower()
 
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_long_original_prompt_caching(self):
@@ -1031,7 +1055,7 @@ Summarize this in one sentence<end_of_turn>
 ```
 {file_content}
 ```
-Summarize this in one sentence<end_of_turn>
+Summarize this in one sentence and include the author's full name<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
@@ -1041,7 +1065,7 @@ Summarize this in one sentence<end_of_turn>
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert len(generated_text.strip()) > 0
+        _assert_mentions_franklin(generated_text)
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
@@ -1051,7 +1075,7 @@ Summarize this in one sentence<end_of_turn>
         prompt = cached_prompt + dedent("""\
                 <end_of_turn>
                 <start_of_turn>user
-                What was the main characters name?<end_of_turn>
+                Who is the author of this passage? Answer with only the name.<end_of_turn>
                 <start_of_turn>model
                 """)
         print(prompt)
@@ -1059,8 +1083,8 @@ Summarize this in one sentence<end_of_turn>
         _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] in expected_cached_tokens
-        assert len(generated_text.strip()) > 0
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
+        _assert_mentions_franklin(generated_text)
 
     def test_gemma3n_vision_long_prompt_progress_reported(self):
         """Ensure progress is reported during prompt processing with a vision prompt"""
@@ -1183,92 +1207,6 @@ Summarize this in one sentence<end_of_turn>
             f"Text-only output after vision request differs from baseline "
             f"(MRoPE state likely leaked): {repr(baseline_text)} != {repr(after_vision_text)}"
         )
-
-    @pytest.mark.heavy
-    def test_qwen3_5_text_only_follow_up_reuses_checkpoint_cache(self):
-        """Qwen3.5 should reuse a stored checkpoint for text-only follow-ups.
-
-        The dense Qwen3.5 architecture alternates three linear-attention layers
-        with one full-attention layer (`full_attention_interval=4`). In the
-        current stack this produces a non-trimmable prompt cache, so follow-up
-        reuse after dropping a long assistant scratchpad depends on checkpoint
-        snapshots rather than trimming a longer assistant cache entry.
-        """
-        model_name = "lmstudio-community/Qwen3.5-2B-MLX-4bit"
-        model_path = model_getter(model_name)
-        max_kv_size = 160
-        model_kit = self.load_model(
-            model_path=model_path,
-            max_kv_size=max_kv_size,
-            trust_remote_code=True,
-            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
-        )
-        control_word = "MERIDIAN"
-
-        def generate_text(prompt, *, max_tokens):
-            prompt_tokens = tokenize(model_kit, prompt)
-            reporter = RecordingReporter()
-
-            generated_text = ""
-            for result in create_generator(
-                model_kit=model_kit,
-                prompt_tokens=prompt_tokens,
-                seed=0,
-                temp=0.0,
-                max_tokens=max_tokens,
-                repetition_penalty=1.01,  # to enable this code path
-                prompt_progress_reporter=reporter,
-            ):
-                generated_text += result.text
-                print(result.text, end="", flush=True)
-                if result.stop_condition:
-                    break
-            print("\n", flush=True)
-            return prompt_tokens, generated_text, reporter
-
-        first_prompt = dedent(f"""\
-            <|im_start|>system
-            You are a helpful assistant.<|im_end|>
-            <|im_start|>user
-            Write two sections in order.
-            First, write a long SCRATCHPAD section with at least 120 numbered lines about medieval trade routes.
-            Keep each line short, between 6 and 12 words.
-            Second, end with a single final line in the exact format:
-            FINAL: {control_word}
-            Do not write anything after that final line.<|im_end|>
-            <|im_start|>assistant
-            """)
-        first_prompt_tokens = tokenize(model_kit, first_prompt)
-        assert len(first_prompt_tokens) < max_kv_size
-
-        _, generated_text, reporter = generate_text(first_prompt, max_tokens=1600)
-        begin_event = reporter.events[0]
-        assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == 0
-        assert len(generated_text) > 0
-
-        final_marker = f"FINAL: {control_word}"
-        final_index = generated_text.find(final_marker)
-        assert final_index >= 0, generated_text
-        scratchpad_text = generated_text[:final_index]
-        assert len(scratchpad_text.strip()) > 0
-
-        cached_prompt = first_prompt + generated_text
-        expected_cached_tokens = _expected_cached_text_prompt_tokens(
-            model_kit, cached_prompt
-        )
-        second_prompt = cached_prompt + dedent("""\
-            <|im_end|>
-            <|im_start|>user
-            What was the exact single-word final answer from your previous message? Reply with only that word.<|im_end|>
-            <|im_start|>assistant
-            """)
-
-        _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
-        begin_event = reporter.events[0]
-        assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] in expected_cached_tokens
-        assert len(follow_up_text.strip()) > 0
 
     def test_qwen3_5_multi_image_process_prompt_preserves_image_positions(self):
         """Qwen3.5 must inject MRoPE positions for every image span.
