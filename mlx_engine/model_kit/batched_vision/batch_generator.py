@@ -112,6 +112,15 @@ def _ensure_batch_cache(prompt_cache: list[Any]) -> list[Any]:
     return prompt_cache
 
 
+def _sync_scalar_rope_deltas(model: nn.Module, prompt_cache: list[Any], rope_deltas):
+    if not _is_scalar_prompt_cache(prompt_cache) or rope_deltas is None:
+        return
+    language_model = getattr(model, "language_model", model)
+    if hasattr(language_model, "_rope_deltas"):
+        # Some Qwen scalar decode paths ignore the kwarg and read this side state.
+        language_model._rope_deltas = rope_deltas
+
+
 def _extend_cache(cache_a, cache_b):
     if not cache_a:
         return cache_b
@@ -396,6 +405,7 @@ class GenerationBatch:
             # when deriving decode position_ids from cache offsets; see
             # external/src/mlx-vlm/mlx_vlm/models/qwen3_5/language.py.
             fwd_kwargs["rope_deltas"] = self._rope_deltas
+            _sync_scalar_rope_deltas(self.model, self.prompt_cache, self._rope_deltas)
 
         output = self.model(inputs[:, None], cache=self.prompt_cache, **fwd_kwargs)
         logits = output.logits if hasattr(output, "logits") else output
