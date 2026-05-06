@@ -69,6 +69,7 @@ def main() -> None:
     parser.add_argument("--prefill-step-size", type=int, default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--distributed-init-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--init-smoke-only", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -84,6 +85,9 @@ def main() -> None:
         raise RuntimeError(
             "Packaged distributed worker loop can only run on non-coordinator ranks."
         )
+    if args.init_smoke_only:
+        logger.info("Packaged distributed worker init smoke completed rank %s/%s", rank, size)
+        return
 
     from mlx_engine import load_model, unload
     from mlx_engine.distributed_rank import run_worker_loop
