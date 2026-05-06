@@ -292,17 +292,7 @@ class VlmPromptCacheStore:
                 self._record_metadata_by_key[record.key] = record.metadata
                 self._touch_cache_entry(record.key)
 
-            chain_record_keys = (
-                self._cache_restore_planner().restore_record_keys_for_chunk_chain(
-                    pending_save.prefix_chunks
-                )
-            )
-            if chain_record_keys is not None:
-                for record_key in self._ordered_record_keys_for_touch(
-                    [chunk.key for chunk in pending_save.prefix_chunks],
-                    chain_record_keys,
-                ):
-                    self._touch_cache_entry(record_key)
+            self._touch_longest_budget_fit_restore_chain(pending_save.prefix_chunks)
         finally:
             self._evict_if_needed()
 
@@ -425,6 +415,31 @@ class VlmPromptCacheStore:
                     ordered_record_keys.append(record_key)
 
         return ordered_record_keys
+
+    def _touch_longest_budget_fit_restore_chain(
+        self,
+        prefix_chunks: list[PromptPrefixChunk],
+    ) -> None:
+        planner = self._cache_restore_planner()
+        for end_idx in range(len(prefix_chunks), 0, -1):
+            candidate_chunks = prefix_chunks[:end_idx]
+            record_keys_by_chunk_key = planner.restore_record_keys_for_chunk_chain(
+                candidate_chunks
+            )
+            if record_keys_by_chunk_key is None:
+                continue
+
+            record_keys = self._ordered_record_keys_for_touch(
+                [chunk.key for chunk in candidate_chunks],
+                record_keys_by_chunk_key,
+            )
+            # Preserve the longest complete restore set that can survive eviction.
+            if sum(self._key_sizes[key] for key in record_keys) <= (
+                self._max_cache_store_bytes
+            ):
+                for record_key in record_keys:
+                    self._touch_cache_entry(record_key)
+                return
 
     def _evict_if_needed(self) -> None:
         while self._total_bytes > self._max_cache_store_bytes:

@@ -158,6 +158,31 @@ def test_cache_store_eviction_preserves_shorter_prefix_restore(cache_store):
     assert stats.total_bytes <= stats.max_bytes
 
 
+def test_cache_store_eviction_preserves_shorter_state_checkpoint_restore(cache_store):
+    """Over-budget suffix saves should not destroy the shorter stateful restore."""
+    prompt_input_ids = list(range(600))
+    chunks = build_prefix_cache_chunks(prompt_input_ids, [])
+    first_chunk, second_chunk = chunks[:2]
+
+    # This budget can keep the first chunk's KV plus exact opaque checkpoint.
+    _save_chunk(cache_store, first_chunk, chunks, _prompt_cache(first_chunk.end))
+    first_size = cache_store.snapshot_stats().total_bytes
+    cache_store.commit_budget_update(first_size + 64)
+
+    _save_chunk(cache_store, second_chunk, chunks, _prompt_cache(second_chunk.end))
+
+    restore_plan = cache_store.plan_longest_prefix_restore(prompt_input_ids, [])
+    assert restore_plan is not None
+    loaded = cache_store.load_restore_plan(restore_plan)
+
+    kv_keys, _ = loaded.prompt_cache[0].state
+    boundary_state = loaded.prompt_cache[1][0]
+    mx.eval(kv_keys, boundary_state)
+    assert loaded.cached_prefix_len == first_chunk.end
+    assert kv_keys.shape[2] == first_chunk.end
+    assert boundary_state.item() == first_chunk.end
+
+
 def test_cache_store_skips_state_for_backfilled_chunks(cache_store):
     """Backfilled KV chunks do not advertise stale opaque state checkpoints."""
     prompt_input_ids = list(range(700))
