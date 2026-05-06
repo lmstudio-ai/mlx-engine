@@ -106,6 +106,9 @@ def _slice_rotating_kv_cache(
     chunk_end: int,
 ) -> RotatingKVCache:
     keys, values = cache.state
+    # Scalar decode stores rotating caches as a ring buffer; slice temporal order.
+    keys = cache._temporal_order(keys)
+    values = cache._temporal_order(values)
     window_start = cache.offset - keys.shape[2]
     if chunk_start < window_start or chunk_end > cache.offset:
         raise PromptCacheRecordCoverageError(

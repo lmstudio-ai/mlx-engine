@@ -36,6 +36,16 @@ def _rotating_cache(prefix_len: int, *, window_size: int = 8, keep: int = 0):
     return cache
 
 
+def _wrapped_rotating_cache(*, window_size: int = 8, decode_tokens: int = 4):
+    cache = RotatingKVCache(max_size=window_size, keep=0)
+    prompt = mx.arange(window_size, dtype=mx.float32).reshape(1, 1, window_size, 1)
+    cache.update_and_fetch(prompt, prompt + 2000)
+    for token in range(window_size, window_size + decode_tokens):
+        decoded = mx.array([[[[token]]]], dtype=mx.float32)
+        cache.update_and_fetch(decoded, decoded + 2000)
+    return cache
+
+
 def _arrays_cache(value: int):
     cache = ArraysCache(size=1)
     cache[0] = mx.array([[value]], dtype=mx.int32)
@@ -105,6 +115,20 @@ def test_records_prepare_slices_chunk_records():
     )
     # Opaque caches are exact-boundary checkpoints, not sliced deltas.
     assert record_caches[2] is state_cache
+
+
+def test_records_prepare_slices_wrapped_rotating_cache_in_temporal_order():
+    """Scalar decode wraps rotating storage, but records stay chronological."""
+    record_caches, _ = prepare_prompt_cache_records_for_chunk(
+        prompt_cache=[_wrapped_rotating_cache()],
+        chunk_start=8,
+        chunk_end=12,
+    )
+
+    assert _values(record_caches[0]) == (
+        [8.0, 9.0, 10.0, 11.0],
+        [2008.0, 2009.0, 2010.0, 2011.0],
+    )
 
 
 def test_records_assemble_prompt_cache_chunks():
