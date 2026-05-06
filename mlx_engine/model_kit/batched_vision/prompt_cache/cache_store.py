@@ -193,7 +193,11 @@ class VlmPromptCacheStore:
     ) -> list[Any]:
         prompt_cache: list[Any] = [None] * len(layout.layer_kinds)
         for record_key in record_keys:
-            record_prompt_cache = self._blob_store.load_record(record_key)
+            try:
+                record_prompt_cache = self._blob_store.load_record(record_key)
+            except Exception:
+                self._evict_key(record_key)
+                raise
             record_metadata = self._record_metadata_by_key[record_key]
 
             for layer_idx, cache in zip(
