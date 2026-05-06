@@ -17,7 +17,12 @@ def apply_qwen_image_mrope_state(
     input_ids: mx.array,
     image_grid_thw: mx.array | None,
 ) -> QwenMropeState | None:
-    """Patch mlx-vlm's model-side Qwen MRoPE state from image token runs."""
+    """Patch Qwen3.5 MRoPE state from expanded image-token runs.
+
+    Current mlx-vlm can assign text-like positions to later image runs in a
+    multi-image prompt. Keep this image-only workaround until upstream uses an
+    mm-token-type walk for Qwen3.5.
+    """
     language_model = getattr(model, "language_model", None)
     config = getattr(model, "config", None)
     if language_model is None or config is None or image_grid_thw is None:
@@ -105,7 +110,9 @@ def build_qwen_image_mrope_state(
         position_ids=mx.array(positions, dtype=input_ids.dtype).reshape(
             3, 1, len(token_list)
         ),
-        rope_deltas=mx.array(position_cursor - len(token_list), dtype=input_ids.dtype),
+        rope_deltas=mx.array(
+            [[position_cursor - len(token_list)]], dtype=input_ids.dtype
+        ),
     )
 
 
