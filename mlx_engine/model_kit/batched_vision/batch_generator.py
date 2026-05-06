@@ -459,7 +459,7 @@ class GenerationBatch:
 
     def extract_cache(self, idx: int) -> list[Any] | None:
         if idx == 0 and _is_scalar_prompt_cache(self.prompt_cache):
-            return self.prompt_cache
+            return list(self.prompt_cache)
         extracted = []
         for cache in self.prompt_cache:
             if not hasattr(cache, "extract") or getattr(cache, "keys", True) is None:
