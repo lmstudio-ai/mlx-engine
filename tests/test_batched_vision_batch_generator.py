@@ -273,44 +273,43 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     ]
 
 
-def test_batch_generator_aligns_restored_prefill_to_step_boundary(monkeypatch):
-    """A restored prefix may take one short step before large prefill resumes."""
+def test_batch_generator_aligns_restored_prefill_only_for_cache_saves(monkeypatch):
+    """Restored prefill alignment is only worth paying for disk snapshots."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
-    monkeypatch.setattr(
-        batcher,
-        "make_prompt_cache",
-        lambda _model: [_FakeBatchCache()],
-    )
-    model = _FakeModel()
-    generator = BatchGenerator(
-        model=model,
-        stop_criteria=lambda _token: False,
-        prefill_step_size=4,
-    )
-    prompt = [10, 11, 12, 13, 14, 15, 16]
-    restored_tokens = [0, 1]
 
-    try:
-        generator.insert(
-            prompt,
-            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
-            sampler=_argmax_sampler,
-            logits_processors=[],
-            prompt_kwargs={},
-            prefix_cache_chunks=[],
-            image_spans=[],
-            cache=[_FakeScalarCache()],
-            all_tokens=restored_tokens,
-            next_prefix_cache_chunk_idx=0,
+    def call_lengths(prompt_cache_save_callback, steps: int):
+        model = _FakeModel()
+        generator = BatchGenerator(
+            model=model,
+            stop_criteria=lambda _token: False,
+            prefill_step_size=4,
         )
+        prompt = [10, 11, 12, 13, 14, 15, 16]
 
-        generator.next()
-        generator.next()
-        generator.next()
-    finally:
-        generator.close()
+        try:
+            generator.insert(
+                prompt,
+                inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+                sampler=_argmax_sampler,
+                logits_processors=[],
+                prompt_kwargs={},
+                prefix_cache_chunks=[],
+                image_spans=[],
+                cache=[_FakeScalarCache()],
+                all_tokens=[0, 1],
+                next_prefix_cache_chunk_idx=0,
+                prompt_cache_save_callback=prompt_cache_save_callback,
+            )
 
-    assert [len(call["input_ids"][0]) for call in model.calls] == [2, 4, 1]
+            for _ in range(steps):
+                generator.next()
+        finally:
+            generator.close()
+
+        return [len(call["input_ids"][0]) for call in model.calls]
+
+    assert call_lengths(None, steps=2) == [4, 3]
+    assert call_lengths(lambda *_args: None, steps=3) == [2, 4, 1]
 
 
 def test_batch_generator_state_cache_lands_on_reusable_tail_boundary(monkeypatch):
