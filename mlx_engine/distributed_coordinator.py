@@ -8,17 +8,29 @@ from typing import Any, Optional
 
 import mlx.core as mx
 
-from mlx_engine.generate import create_generator
-from mlx_engine.distributed_rank import (
-    broadcast_generation_request,
-    shutdown_workers,
-    assert_not_source_checkout_runtime,
-)
-
 
 logger = logging.getLogger(__name__)
 
 distributed_init_started_at_env = "MLX_ENGINE_DISTRIBUTED_COORDINATOR_INIT_STARTED_AT"
+source_checkout_runtime_path_segments = (
+    "/electron/vendor/llm-engine/build/",
+    "/electron/vendor/llm-engine/src/",
+)
+
+
+def normalized_runtime_path(path_value: str) -> str:
+    return path_value.replace("\\", "/")
+
+
+def assert_not_source_checkout_runtime() -> None:
+    python_executable = normalized_runtime_path(sys.executable)
+    for source_path_segment in source_checkout_runtime_path_segments:
+        if source_path_segment in python_executable:
+            raise RuntimeError(
+                "MLX distributed packaged rank is running from source-checkout "
+                f"Python {sys.executable}. Rebuild or stage the packaged MLX "
+                "runtime so ranks use the installed Amphibian Python."
+            )
 
 
 def init_distributed_with_retry(timeout_seconds: float):
@@ -152,6 +164,8 @@ def finish_reason_from_stop_condition(stop_condition) -> Optional[str]:
 
 
 def run_generation_request(model_kit, request: dict[str, Any]) -> tuple[str, str]:
+    from mlx_engine.generate import create_generator
+
     text_parts = []
     finish_reason = None
     sampling = request["sampling"]
@@ -183,6 +197,8 @@ def run_generation_request(model_kit, request: dict[str, Any]) -> tuple[str, str
 
 
 def handle_predict_command(rank: int, model_kit, command: dict[str, Any]) -> None:
+    from mlx_engine.distributed_rank import broadcast_generation_request
+
     prompt_tokens = model_kit.tokenize(command["prompt"])
     request = broadcast_generation_request(
         rank=rank,
@@ -211,6 +227,8 @@ def run_command_loop(rank: int, model_kit) -> None:
         try:
             command = parse_command(stripped_line)
             if command["type"] == "shutdown":
+                from mlx_engine.distributed_rank import shutdown_workers
+
                 shutdown_workers(rank)
                 return
             handle_predict_command(rank, model_kit, command)
