@@ -105,7 +105,7 @@ def _compute_image_mrope_state(
     position_cursor += trailing_text_len
 
     position_ids = mx.array(positions, dtype=input_ids.dtype).reshape(3, 1, seq_length)
-    rope_deltas = mx.array(position_cursor - seq_length, dtype=input_ids.dtype)
+    rope_deltas = mx.array([[position_cursor - seq_length]], dtype=input_ids.dtype)
     return position_ids, rope_deltas
 
 

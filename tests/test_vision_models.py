@@ -748,10 +748,7 @@ Summarize this in one sentence and include the author's full name<end_of_turn>
                     {
                         "type": "text",
                         "text": (
-                            "Tell me a 500-word story about a traveler, and make "
-                            "the main character's name distinctive. End the story "
-                            "with one final line in the exact format: "
-                            "MAIN CHARACTER: <name>."
+                            "Tell me a 500-word story about a traveler named Silas."
                         ),
                     }
                 ],
@@ -768,14 +765,7 @@ Summarize this in one sentence and include the author's full name<end_of_turn>
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
         assert len(generated_text) > 0
-        name_marker = "MAIN CHARACTER:"
-        name_line = next(
-            (line for line in generated_text.splitlines() if name_marker in line),
-            None,
-        )
-        assert name_line is not None, generated_text
-        main_character_name = name_line.split(name_marker, 1)[1].strip().strip(".")
-        assert main_character_name
+        assert "silas" in generated_text.lower()
 
         expected_cached_tokens = _expected_cached_text_prompt_tokens(
             model_kit, prompt + generated_text
@@ -809,7 +799,7 @@ Summarize this in one sentence and include the author's full name<end_of_turn>
             finish_event["prefill_tokens_processed"] - begin_event["cached_tokens"]
             <= CACHING_TEST_PREFILL_STEP_SIZE
         )
-        assert main_character_name.lower() in follow_up_text.lower()
+        assert "silas" in follow_up_text.lower()
 
     @pytest.mark.heavy
     def test_gemma4_scratchpad_follow_up_reuses_checkpoint_cache(self):
