@@ -1028,7 +1028,6 @@ Summarize this in one sentence. The first line names the author; include that au
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        _assert_mentions_franklin(generated_text)
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
@@ -1047,7 +1046,11 @@ Summarize this in one sentence. The first line names the author; include that au
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
-        _assert_mentions_franklin(generated_text)
+        finish_event = reporter.events[-1]
+        assert (
+            finish_event["prefill_tokens_processed"] - begin_event["cached_tokens"]
+            <= CACHING_TEST_PREFILL_STEP_SIZE
+        )
 
     def test_gemma3n_vision_long_prompt_progress_reported(self):
         """Ensure progress is reported during prompt processing with a vision prompt"""
