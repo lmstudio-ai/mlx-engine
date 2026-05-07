@@ -296,8 +296,8 @@ class VlmPromptCacheStore:
                 self._record_metadata_by_key[record.key] = record.metadata
                 self._touch_cache_entry(record.key)
 
-            self._touch_longest_budget_fit_restore_chain(pending_save.prefix_chunks)
         finally:
+            self._touch_longest_budget_fit_restore_chain(pending_save.prefix_chunks)
             self._evict_if_needed()
 
     def snapshot_stats(self) -> PromptCacheStoreStats:
