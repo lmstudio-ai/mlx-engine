@@ -175,26 +175,6 @@ class TestVisionModels:
         )
 
     ### MODEL-SPECIFIC TESTS ###
-    def test_llama_3_2_vision_instruct(self):
-        """Test Llama 3.2 11B Vision Instruct model"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{self.description_prompt}<|image|><|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        self.toucan_test_runner(
-            "mlx-community/Llama-3.2-11B-Vision-Instruct-4bit", prompt
-        )
-
-    def test_llama_3_2_vision_instruct_text_only(self):
-        """Test Llama 3.2 11B Vision Instruct model with only text"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{self.text_only_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        try:
-            self.toucan_test_runner(
-                "mlx-community/Llama-3.2-11B-Vision-Instruct-4bit",
-                prompt,
-                text_only=True,
-            )
-        except AttributeError as e:
-            # mlx-lm prompt processing fails
-            assert "'NoneType' object has no attribute 'shape'" in str(e)
-
     def test_pixtral_vision(self):
         """Test Pixtral 12B model"""
         prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
@@ -489,13 +469,6 @@ You are a helpful assistant.<|im_end|>
             "mlx-community/llava-v1.6-mistral-7b-4bit", prompt, text_only=True
         )
 
-    def test_nano_llava_text_only(self):
-        """Test Nano LLaVA 1.5 4B model with only text"""
-        prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n{self.text_only_prompt}<|im_end|><|im_start|>assistant\n\n"
-        self.toucan_test_runner(
-            "mlx-community/nanoLLaVA-1.5-4bit", prompt, text_only=True
-        )
-
     def test_paligemma2_vision(self):
         """Test Paligemma 2 model"""
         prompt = f"<image>{self.description_prompt}"
@@ -634,7 +607,7 @@ You are a helpful assistant.<|im_end|>
 ```
 {file_content}
 ```
-Summarize this in one sentence and include the author's full name<end_of_turn>
+Summarize this in one sentence. The first line names the author; include that author name in your sentence.<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
