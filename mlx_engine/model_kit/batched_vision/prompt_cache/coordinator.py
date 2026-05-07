@@ -12,7 +12,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptPrefixChunk,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
-    PromptCacheRestorePlan,
+    DiskPromptCacheRestorePlan,
     VlmPromptCacheStore,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.records import (
@@ -43,7 +43,7 @@ class _HotPromptCacheEntry:
 
 
 @dataclass
-class _HotRestorePlan:
+class _HotRestoreCandidate:
     """Taken hot cache plus the prefix length it can serve for this request."""
 
     entry: _HotPromptCacheEntry
@@ -163,7 +163,7 @@ class VlmPromptCacheCoordinator:
         self,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
-    ) -> PromptCacheRestorePlan | None:
+    ) -> DiskPromptCacheRestorePlan | None:
         try:
             return self._cache_store.plan_longest_prefix_restore(
                 prompt_input_ids,
@@ -191,7 +191,7 @@ class VlmPromptCacheCoordinator:
         entry: _HotPromptCacheEntry | None,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
-    ) -> _HotRestorePlan | None:
+    ) -> _HotRestoreCandidate | None:
         if entry is None:
             return None
         target_prefix_len = image_safe_common_prefix_len(
@@ -204,14 +204,14 @@ class VlmPromptCacheCoordinator:
         if target_prefix_len <= 0:
             return None
 
-        return _HotRestorePlan(
+        return _HotRestoreCandidate(
             entry=entry,
             cached_prefix_len=target_prefix_len,
         )
 
     def _load_hot_restore_plan(
         self,
-        plan: _HotRestorePlan,
+        plan: _HotRestoreCandidate,
     ) -> RestoredPromptCache | None:
         entry = plan.entry
         trim_count = len(entry.prompt_input_ids) - plan.cached_prefix_len
@@ -230,7 +230,7 @@ class VlmPromptCacheCoordinator:
 
     def _load_disk_restore_plan(
         self,
-        disk_plan: PromptCacheRestorePlan,
+        disk_plan: DiskPromptCacheRestorePlan,
     ) -> RestoredPromptCache | None:
         try:
             cached_state = self._cache_store.load_restore_plan(disk_plan)

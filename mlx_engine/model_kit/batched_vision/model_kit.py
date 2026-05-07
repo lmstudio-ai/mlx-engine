@@ -20,7 +20,6 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 )
 from mlx_engine.model_kit.batched_vision.batch_generator import (
     BatchGenerator as LocalVlmBatchGenerator,
-    use_generation_stream,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     VlmPromptCacheCoordinator,
@@ -333,23 +332,22 @@ class BatchedVisionModelKit:
         all_tokens = []
         rope_deltas = None
         prompt_progress = 0
-        with use_generation_stream():
-            if restored is not None:
-                prompt_input_ids = full_prompt_input_ids[restored.cached_prefix_len :]
-                prompt_kwargs = build_cached_prompt_kwargs(
-                    self.model,
-                    prepared_prompt,
-                    restored.cached_prefix_len,
-                    restored.rope_deltas,
-                )
-                inputs_embeds = prompt_kwargs.pop("inputs_embeds")
-                prompt_progress = restored.cached_prefix_len
-                cache = restored.prompt_cache
-                all_tokens = full_prompt_input_ids[: restored.cached_prefix_len]
-                rope_deltas = restored.rope_deltas
-            else:
-                prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
-                inputs_embeds = prompt_kwargs.pop("inputs_embeds")
+        if restored is not None:
+            prompt_input_ids = full_prompt_input_ids[restored.cached_prefix_len :]
+            prompt_kwargs = build_cached_prompt_kwargs(
+                self.model,
+                prepared_prompt,
+                restored.cached_prefix_len,
+                restored.rope_deltas,
+            )
+            inputs_embeds = prompt_kwargs.pop("inputs_embeds")
+            prompt_progress = restored.cached_prefix_len
+            cache = restored.prompt_cache
+            all_tokens = full_prompt_input_ids[: restored.cached_prefix_len]
+            rope_deltas = restored.rope_deltas
+        else:
+            prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
+            inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
         if getattr(self.model, "no_chunked_prefill", False):
             # One-shot prefill skips exact intermediate prompt boundaries.

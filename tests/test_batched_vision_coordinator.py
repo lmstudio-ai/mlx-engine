@@ -1,12 +1,12 @@
 import mlx.core as mx
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
-    PromptCacheRestorePlan,
+    DiskPromptCacheRestorePlan,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     VlmPromptCacheCoordinator,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
-    LoadedPromptState,
+    LoadedDiskPromptCache,
 )
 from mlx_lm.models.cache import KVCache
 
@@ -16,7 +16,7 @@ class _FakeCacheStore:
         self.restore_plan = (
             None
             if disk_prefix_len is None
-            else PromptCacheRestorePlan(
+            else DiskPromptCacheRestorePlan(
                 cached_prefix_len=disk_prefix_len,
                 chunks=[],
                 record_keys_by_chunk_key={},
@@ -25,7 +25,7 @@ class _FakeCacheStore:
         self.loaded_state = (
             None
             if disk_prefix_len is None
-            else LoadedPromptState(
+            else LoadedDiskPromptCache(
                 cached_prefix_len=disk_prefix_len,
                 prompt_cache=["disk-cache"],
             )

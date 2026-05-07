@@ -62,12 +62,6 @@ class _GenerationRow:
     num_tokens: int = 0
 
 
-@contextlib.contextmanager
-def use_generation_stream():
-    """Generation-thread MLX work uses that thread's default stream."""
-    yield
-
-
 @dataclass
 class _PendingSequence:
     uid: int

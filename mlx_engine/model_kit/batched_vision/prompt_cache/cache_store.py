@@ -32,7 +32,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_WRITE_ORDER,
     RecordKind,
-    LoadedPromptState,
+    LoadedDiskPromptCache,
     make_record_key,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.blob_store import (
@@ -49,8 +49,8 @@ _RECORD_RETENTION_PRIORITY: tuple[RecordKind, ...] = (
 
 
 @dataclass
-class PromptCacheRestorePlan:
-    """Same-thread selection of records for one prompt-cache restore.
+class DiskPromptCacheRestorePlan:
+    """Same-thread selection of disk records for one prompt-cache restore.
 
     The caller may compare this with a hot-cache candidate, but any selected
     plan must be loaded without yielding off the cache I/O thread.
@@ -94,7 +94,7 @@ class VlmPromptCacheStore:
         self,
         prompt_input_ids: list[int],
         image_spans: list[PromptImageSpan],
-    ) -> PromptCacheRestorePlan | None:
+    ) -> DiskPromptCacheRestorePlan | None:
         """Select the longest matching cacheable prefix without loading blobs.
 
         The final prompt token stays uncached so generation has a suffix to
@@ -123,7 +123,7 @@ class VlmPromptCacheStore:
                 restore_planner.restore_record_keys_for_chunk_chain(chunks)
             )
             if record_keys_by_chunk_key is not None:
-                return PromptCacheRestorePlan(
+                return DiskPromptCacheRestorePlan(
                     cached_prefix_len=chunks[-1].end,
                     chunks=chunks,
                     record_keys_by_chunk_key=record_keys_by_chunk_key,
@@ -133,8 +133,8 @@ class VlmPromptCacheStore:
 
     def load_restore_plan(
         self,
-        plan: PromptCacheRestorePlan,
-    ) -> LoadedPromptState:
+        plan: DiskPromptCacheRestorePlan,
+    ) -> LoadedDiskPromptCache:
         """Load a restore plan selected on this cache I/O thread."""
         layout = self._require_layout()
 
@@ -170,7 +170,7 @@ class VlmPromptCacheStore:
         ):
             self._touch_cache_entry(record_key)
 
-        return LoadedPromptState(
+        return LoadedDiskPromptCache(
             cached_prefix_len=plan.cached_prefix_len,
             prompt_cache=prompt_cache,
         )
