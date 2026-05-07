@@ -139,9 +139,9 @@ class VlmPromptCacheCoordinator:
             disk_plan is not None
             and disk_plan.cached_prefix_len > hot_plan.cached_prefix_len
         ):
-            # Release hot memory before materializing a better disk prefix.
-            hot_plan = None
-            return self._load_disk_restore_plan(disk_plan)
+            disk_restored = self._load_disk_restore_plan(disk_plan)
+            if disk_restored is not None:
+                return disk_restored
 
         try:
             hot_restored = self._load_hot_restore_plan(hot_plan)
