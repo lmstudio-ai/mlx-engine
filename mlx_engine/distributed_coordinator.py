@@ -6,8 +6,6 @@ import sys
 import time
 from typing import Any, Optional
 
-import mlx.core as mx
-
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +36,17 @@ def init_distributed_with_retry(timeout_seconds: float):
     os.environ[distributed_init_started_at_env] = str(started_at)
 
     try:
-        return mx.distributed.init()
+        logger.info("Importing mlx.core before distributed coordinator init")
+        import mlx.core as mx
+
+        logger.info("Calling distributed coordinator init")
+        group = mx.distributed.init()
+        logger.info(
+            "Distributed coordinator init completed rank %s/%s",
+            group.rank(),
+            group.size(),
+        )
+        return group
     except RuntimeError as error:
         elapsed_seconds = time.monotonic() - started_at
         if elapsed_seconds >= timeout_seconds:

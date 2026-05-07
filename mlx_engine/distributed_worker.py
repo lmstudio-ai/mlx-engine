@@ -4,9 +4,6 @@ import os
 import sys
 import time
 
-import mlx.core as mx
-
-
 logger = logging.getLogger(__name__)
 
 distributed_init_started_at_env = "MLX_ENGINE_DISTRIBUTED_WORKER_INIT_STARTED_AT"
@@ -36,7 +33,17 @@ def init_distributed_with_retry(timeout_seconds: float):
     os.environ[distributed_init_started_at_env] = str(started_at)
 
     try:
-        return mx.distributed.init()
+        logger.info("Importing mlx.core before distributed worker init")
+        import mlx.core as mx
+
+        logger.info("Calling distributed worker init")
+        group = mx.distributed.init()
+        logger.info(
+            "Distributed worker init completed rank %s/%s",
+            group.rank(),
+            group.size(),
+        )
+        return group
     except RuntimeError as error:
         elapsed_seconds = time.monotonic() - started_at
         if elapsed_seconds >= timeout_seconds:
