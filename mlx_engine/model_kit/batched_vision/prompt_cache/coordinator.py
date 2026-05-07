@@ -129,6 +129,12 @@ class VlmPromptCacheCoordinator:
             )
             hot_plan = None
 
+        if self._hot_restore_covers_max_prefix_without_trim(
+            hot_plan,
+            max_prefix_len=len(prompt_input_ids) - 1,
+        ):
+            return self._load_hot_restore_plan(hot_plan)
+
         disk_plan = self._plan_disk_restore(prompt_input_ids, image_spans)
         if hot_plan is None:
             return (
@@ -158,6 +164,18 @@ class VlmPromptCacheCoordinator:
             return self._load_disk_restore_plan(disk_plan)
 
         return None
+
+    def _hot_restore_covers_max_prefix_without_trim(
+        self,
+        hot_plan: _HotRestoreCandidate | None,
+        *,
+        max_prefix_len: int,
+    ) -> bool:
+        return (
+            hot_plan is not None
+            and hot_plan.cached_prefix_len == max_prefix_len
+            and len(hot_plan.entry.prompt_input_ids) == hot_plan.cached_prefix_len
+        )
 
     def _plan_disk_restore(
         self,

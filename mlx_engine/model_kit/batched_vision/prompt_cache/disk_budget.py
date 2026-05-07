@@ -6,6 +6,7 @@ cache. This keeps model-architecture guessing out of the main cache store
 implementation.
 """
 
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.records import (
 from mlx.utils import tree_flatten
 
 
+logger = logging.getLogger(__name__)
+
 _GIB_BYTES = 1024 * 1024 * 1024
 _MIN_FREE_BYTES = 10 * _GIB_BYTES
 _PROVISIONAL_BUDGET_BYTES = 30 * _GIB_BYTES
@@ -32,7 +35,12 @@ def provisional_cache_store_budget_bytes(cache_dir: Path) -> int:
     - if free disk is under 10 GiB, disable disk records
     - otherwise allow min(30 GiB, free disk / 4)
     """
-    return _apply_disk_space_limit(cache_dir, _PROVISIONAL_BUDGET_BYTES)
+    budget_bytes, _ = _apply_disk_space_limit(cache_dir, _PROVISIONAL_BUDGET_BYTES)
+    logger.info(
+        "VLM prompt cache disk budget: stage=provisional cap_gib=%.2f",
+        _bytes_to_gib(budget_bytes),
+    )
+    return budget_bytes
 
 
 def final_cache_store_budget_bytes(
@@ -54,15 +62,32 @@ def final_cache_store_budget_bytes(
         prompt_cache,
         max_kv_size,
     )
-    return _apply_disk_space_limit(cache_dir, desired_bytes)
+    budget_bytes, limited_by_free_disk = _apply_disk_space_limit(
+        cache_dir,
+        desired_bytes,
+    )
+    logger.info(
+        "VLM prompt cache disk budget: stage=final cap_gib=%.2f limiter=%s",
+        _bytes_to_gib(budget_bytes),
+        "free_disk_space" if limited_by_free_disk else "max_kv_size",
+    )
+    return budget_bytes
 
 
-def _apply_disk_space_limit(cache_dir: Path, desired_bytes: int) -> int:
+def _apply_disk_space_limit(cache_dir: Path, desired_bytes: int) -> tuple[int, bool]:
     """Apply the global free-disk guard to a desired cache size."""
     free_bytes = shutil.disk_usage(cache_dir).free
     if free_bytes < _MIN_FREE_BYTES:
-        return 0
-    return min(max(0, desired_bytes), free_bytes // 4)
+        return 0, True
+    desired_bytes = max(0, desired_bytes)
+    free_disk_budget = free_bytes // 4
+    if free_disk_budget < desired_bytes:
+        return free_disk_budget, True
+    return desired_bytes, False
+
+
+def _bytes_to_gib(value: int) -> float:
+    return value / _GIB_BYTES
 
 
 def _estimate_model_sized_prompt_cache_bytes(

@@ -4,6 +4,7 @@ from typing import Any
 
 import mlx.core as mx
 import mlx_vlm
+from mlx.utils import tree_flatten
 
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
 from mlx_engine.model_kit.batched_vision.qwen_mrope import (
@@ -51,6 +52,7 @@ def prepare_prompt_inputs(
         image_token_index=image_token_index,
         resize_shape=None,
     )
+    _eval_mlx_arrays(raw_inputs)
     prompt_input_ids = raw_inputs["input_ids"].squeeze(0).tolist()
     image_hashes = [_hash_prompt_image(image) for image in images]
     return PreparedPrompt(
@@ -62,6 +64,13 @@ def prepare_prompt_inputs(
             image_token_index,
         ),
     )
+
+
+def _eval_mlx_arrays(value: Any) -> None:
+    """Materialize processor tensors before handing them to another thread."""
+    arrays = [leaf for _, leaf in tree_flatten(value) if isinstance(leaf, mx.array)]
+    if arrays:
+        mx.eval(arrays)
 
 
 def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
