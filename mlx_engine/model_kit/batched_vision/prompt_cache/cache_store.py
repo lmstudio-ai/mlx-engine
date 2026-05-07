@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,9 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.blob_store import (
     TemporarySafetensorBlobStore,
 )
 from mlx.utils import tree_flatten
+
+
+logger = logging.getLogger(__name__)
 
 
 _RECORD_RETENTION_PRIORITY: tuple[RecordKind, ...] = (
@@ -257,11 +261,19 @@ class VlmPromptCacheStore:
         if self._empirical_budget_set:
             return None
 
-        return final_cache_store_budget_bytes(
-            self._base_dir,
-            prompt_cache,
-            self._max_kv_size,
-        )
+        try:
+            return final_cache_store_budget_bytes(
+                self._base_dir,
+                prompt_cache,
+                self._max_kv_size,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to estimate VLM prompt cache disk budget; "
+                "disabling disk records",
+                exc_info=True,
+            )
+            return 0
 
     def commit_budget_update(self, max_cache_store_bytes: int) -> None:
         """Set the empirical budget and evict records from the cache I/O thread."""

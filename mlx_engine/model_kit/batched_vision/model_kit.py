@@ -434,20 +434,14 @@ class BatchedVisionModelKit:
         if response.prompt_cache is None or response.all_tokens is None:
             return
 
-        try:
-            cache_store_budget_update = (
-                self._prompt_cache_store.budget_update_from_completed_cache(
-                    response.prompt_cache
-                )
+        cache_store_budget_update = (
+            self._prompt_cache_store.budget_update_from_completed_cache(
+                response.prompt_cache
             )
-            self._cache_io_thread.enqueue_cache_store_budget_update(
-                cache_store_budget_update
-            )
-        except Exception:
-            logger.warning(
-                "Failed to update VLM prompt cache disk budget",
-                exc_info=True,
-            )
+        )
+        self._cache_io_thread.enqueue_cache_store_budget_update(
+            cache_store_budget_update
+        )
 
         if keep_hot_cache:
             self._prompt_cache_coordinator.store_hot_prompt_cache(
