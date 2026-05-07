@@ -1009,7 +1009,7 @@ The first line names the author. Answer with only that author's full name.<end_o
             print("\n", flush=True)
             return generated_text, reporter
 
-        # Generation 1 - send model a long excerpt to summarize
+        # Generation 1 - send model a long excerpt and identify the author
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
         # don't use dedent below b/c file content doesn't match indentation on each newline
@@ -1018,7 +1018,7 @@ The first line names the author. Answer with only that author's full name.<end_o
 ```
 {file_content}
 ```
-Summarize this in one sentence. The first line names the author; include that author name in your sentence.<end_of_turn>
+The first line names the author. Answer with only that author's full name.<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
