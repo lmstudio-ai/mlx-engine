@@ -1018,7 +1018,7 @@ Summarize this in one sentence. The first line names the author; include that au
 ```
 {file_content}
 ```
-Summarize this in one sentence and include the author's full name<end_of_turn>
+Summarize this in one sentence. The first line names the author; include that author name in your sentence.<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
