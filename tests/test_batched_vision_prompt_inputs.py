@@ -155,10 +155,8 @@ def test_prepare_prompt_inputs_falls_back_to_whole_prompt_on_image_span_mismatch
 def test_build_prompt_kwargs_image_adds_qwen_position_state():
     """Image prefill exports Qwen MRoPE side state for chunked prefill."""
     input_ids = mx.array([[101, 20, 20, 102]], dtype=mx.int32)
-    attention_mask_4d = mx.ones((1, 1, 4, 4), dtype=mx.int32)
     model = _FakeModel(
         inputs_embeds=mx.zeros((1, 4, 2), dtype=mx.float32),
-        embedding_kwargs={"attention_mask_4d": attention_mask_4d},
     )
     prepared_prompt = PreparedPrompt(
         prompt_input_ids=input_ids.squeeze(0).tolist(),
@@ -183,7 +181,28 @@ def test_build_prompt_kwargs_image_adds_qwen_position_state():
         [[0, 1, 2, 3]],
     ]
     assert prompt_kwargs["rope_deltas"].item() == 0
-    assert prompt_kwargs["mask"] is attention_mask_4d
+
+
+def test_build_prompt_kwargs_drops_gemma3_attention_mask_4d():
+    """Gemma3's dense padding mask must not replace the causal attention mask."""
+    attention_mask_4d = mx.ones((1, 1, 2, 2), dtype=mx.int32)
+    model = _FakeModel(
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        embedding_kwargs={"attention_mask_4d": attention_mask_4d},
+    )
+    prepared_prompt = PreparedPrompt(
+        prompt_input_ids=[1, 2],
+        raw_inputs={
+            "input_ids": mx.array([[1, 2]], dtype=mx.int32),
+            "pixel_values": mx.array([1], dtype=mx.float32),
+            "attention_mask": mx.array([[1, 1]], dtype=mx.int32),
+        },
+        image_spans=[],
+    )
+
+    prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+
+    assert "mask" not in prompt_kwargs
     assert "attention_mask_4d" not in prompt_kwargs
 
 

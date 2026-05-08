@@ -112,7 +112,7 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
             if value is not None
         },
     }
-    _use_language_model_attention_mask(prompt_kwargs)
+    _drop_gemma3_padding_mask(prompt_kwargs)
     _add_language_model_rope_state(model, prompt_kwargs)
     return prompt_kwargs
 
@@ -201,12 +201,10 @@ def drop_prompt_kwargs_prefix(prompt_kwargs: dict, length: int) -> dict:
     return slice_prompt_kwargs(prompt_kwargs, length, total_len)
 
 
-def _use_language_model_attention_mask(prompt_kwargs: dict) -> None:
-    # Gemma get_input_embeddings returns attention_mask_4d; the language model
-    # only consumes it as `mask`, matching the mlx-vlm model.__call__ wrapper.
-    attention_mask_4d = prompt_kwargs.pop("attention_mask_4d", None)
-    if attention_mask_4d is not None:
-        prompt_kwargs["mask"] = attention_mask_4d
+def _drop_gemma3_padding_mask(prompt_kwargs: dict) -> None:
+    # mlx-vlm generate_step calls the language model directly and does not use
+    # Gemma3's dense padding mask as the causal attention mask.
+    prompt_kwargs.pop("attention_mask_4d", None)
 
 
 def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:

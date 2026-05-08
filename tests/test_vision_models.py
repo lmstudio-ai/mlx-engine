@@ -104,6 +104,7 @@ class TestVisionModels:
         prompt: str,
         text_only=False,
         supplemental_accept_phrases=None,
+        max_tokens=30,
     ):
         """Helper method to test a single vision model"""
         print(f"Testing model {model_name}")
@@ -128,7 +129,7 @@ class TestVisionModels:
                 prompt_tokens=prompt_tokens,
                 images_b64=([self.toucan_image_b64] if not text_only else None),
                 seed=0,
-                max_tokens=30,
+                max_tokens=max_tokens,
                 temp=0.0,
                 repetition_penalty=1.01,  # enable the logits processor code path
             ):
@@ -493,8 +494,22 @@ You are a helpful assistant.<|im_end|>
 
     def test_gemma3_vision(self):
         """Test Gemma 3 model"""
-        prompt = f"<bos><start_of_turn>user\n{self.description_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n"
-        self.toucan_test_runner("mlx-community/gemma-3-4b-it-4bit", prompt)
+        description_prompt = (
+            "Describe this image in 2-3 short sentences. Mention the bird, "
+            "its large colorful beak, and the natural photographic tone. "
+            "Do not use bullet points."
+        )
+        prompt = f"<bos><start_of_turn>user\n{description_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n"
+        generated_text = self.toucan_test_runner(
+            "mlx-community/gemma-3-4b-it-4bit",
+            prompt,
+            max_tokens=80,
+        )
+        assert any(word in generated_text.lower() for word in ["beak", "bill"])
+        assert not any(
+            line.lstrip().startswith(("-", "*", "•"))
+            for line in generated_text.splitlines()
+        )
 
     def test_gemma3_text_only_short(self):
         """Test Gemma 3 model"""
