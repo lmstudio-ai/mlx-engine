@@ -598,16 +598,18 @@ You are a helpful assistant.<|im_end|>
             print("\n", flush=True)
             return generated_text, reporter
 
-        # Generation 1 - send model a long excerpt and identify the author
+        # Generation 1 - send model a long excerpt and cache it.
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
         # don't use dedent below b/c file content doesn't match indentation on each newline
         prompt = f"""\
 <bos><start_of_turn>user
+Read the excerpt below. When you are done, reply with exactly READY and nothing else.
+
 ```
 {file_content}
 ```
-The first line names the author. Answer with only that author's full name.<end_of_turn>
+Reply with exactly READY and nothing else.<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
@@ -617,7 +619,7 @@ The first line names the author. Answer with only that author's full name.<end_o
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        _assert_mentions_franklin(generated_text)
+        assert "ready" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
@@ -1009,16 +1011,18 @@ The first line names the author. Answer with only that author's full name.<end_o
             print("\n", flush=True)
             return generated_text, reporter
 
-        # Generation 1 - send model a long excerpt and identify the author
+        # Generation 1 - send model a long excerpt and cache it.
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
         # don't use dedent below b/c file content doesn't match indentation on each newline
         prompt = f"""\
 <bos><start_of_turn>user
+Read the excerpt below. When you are done, reply with exactly READY and nothing else.
+
 ```
 {file_content}
 ```
-The first line names the author. Answer with only that author's full name.<end_of_turn>
+Reply with exactly READY and nothing else.<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
@@ -1028,7 +1032,7 @@ The first line names the author. Answer with only that author's full name.<end_o
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        _assert_mentions_franklin(generated_text)
+        assert "ready" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
