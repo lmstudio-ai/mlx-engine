@@ -140,8 +140,12 @@ class DistributedModelKit:
 
     def cancel_request(self, request_id: str) -> bool:
         if request_id in self.pending_requests:
-            self.pending_requests[request_id].set()
-            return True
+            logger.warning(
+                "Ignoring local cancellation for distributed request %s. "
+                "Distributed ranks must either drain the request together or be "
+                "torn down by the rank supervisor.",
+                request_id,
+            )
         return False
 
     def shutdown(self) -> None:
