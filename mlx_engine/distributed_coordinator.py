@@ -70,6 +70,20 @@ def init_distributed_with_retry(timeout_seconds: float):
         raise
 
 
+def run_collective_smoke(rank: int, size: int) -> None:
+    import mlx.core as mx
+
+    logger.info("Running coordinator collective smoke rank %s/%s", rank, size)
+    result = mx.distributed.all_sum(mx.array(1.0), stream=mx.cpu)
+    mx.eval(result)
+    logger.info(
+        "Coordinator collective smoke completed rank %s/%s result=%s",
+        rank,
+        size,
+        result.item(),
+    )
+
+
 def write_protocol_message(message: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -272,6 +286,7 @@ def main() -> None:
     if rank != 0:
         raise RuntimeError("Packaged distributed coordinator must run as rank 0.")
     if args.init_smoke_only:
+        run_collective_smoke(rank, size)
         logger.info("Packaged distributed coordinator init smoke completed rank %s/%s", rank, size)
         write_protocol_message({"type": "init-smoke-complete", "rank": rank, "size": size})
         return

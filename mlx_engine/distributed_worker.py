@@ -67,6 +67,20 @@ def init_distributed_with_retry(timeout_seconds: float):
         raise
 
 
+def run_collective_smoke(rank: int, size: int) -> None:
+    import mlx.core as mx
+
+    logger.info("Running worker collective smoke rank %s/%s", rank, size)
+    result = mx.distributed.all_sum(mx.array(1.0), stream=mx.cpu)
+    mx.eval(result)
+    logger.info(
+        "Worker collective smoke completed rank %s/%s result=%s",
+        rank,
+        size,
+        result.item(),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Packaged mlx-engine distributed worker rank loop."
@@ -93,6 +107,7 @@ def main() -> None:
             "Packaged distributed worker loop can only run on non-coordinator ranks."
         )
     if args.init_smoke_only:
+        run_collective_smoke(rank, size)
         logger.info("Packaged distributed worker init smoke completed rank %s/%s", rank, size)
         return
 
