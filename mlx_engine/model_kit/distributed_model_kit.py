@@ -6,7 +6,7 @@ import time
 from typing import Any, List, Optional, Tuple
 
 import mlx.core as mx
-from mlx_lm.utils import sharded_load
+from mlx_lm.utils import _download, load_model, load_tokenizer
 
 from mlx_engine.utils.disable_hf_download import _original_snapshot_download
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
@@ -33,6 +33,116 @@ def _model_snapshot_summary(model_path: Path) -> str:
         )
     except Exception as caught_error:
         return f"snapshotSummaryError={caught_error}"
+
+
+def _instrumented_tensor_sharded_load(
+    repo: str | Path,
+    tensor_group: Any,
+) -> tuple[Any, Any]:
+    rank = tensor_group.rank()
+    size = tensor_group.size()
+    started_at = time.monotonic()
+
+    logger.info("[sharded_load] rank %s/%s resolving metadata files", rank, size)
+    model_path = _download(
+        repo,
+        allow_patterns=[
+            "*.json",
+            "*.py",
+            "tokenizer.model",
+            "*.tiktoken",
+            "tiktoken.model",
+            "*.txt",
+            "*.jsonl",
+            "*.jinja",
+        ],
+    )
+    logger.info(
+        "[sharded_load] rank %s/%s metadata resolved to %s after %.1fs",
+        rank,
+        size,
+        model_path,
+        time.monotonic() - started_at,
+    )
+
+    logger.info("[sharded_load] rank %s/%s lazy-loading model skeleton", rank, size)
+    model, config = load_model(model_path, lazy=True, strict=False)
+    logger.info(
+        "[sharded_load] rank %s/%s model skeleton loaded after %.1fs",
+        rank,
+        size,
+        time.monotonic() - started_at,
+    )
+
+    has_tensor_parallel = hasattr(model, "shard")
+    logger.info(
+        "[sharded_load] rank %s/%s tensorParallel=%s",
+        rank,
+        size,
+        has_tensor_parallel,
+    )
+    if not has_tensor_parallel:
+        raise ValueError("The model does not support tensor parallelism")
+
+    logger.info("[sharded_load] rank %s/%s ensuring weight files", rank, size)
+    _download(repo)
+    logger.info(
+        "[sharded_load] rank %s/%s weight files available after %.1fs",
+        rank,
+        size,
+        time.monotonic() - started_at,
+    )
+
+    logger.info("[sharded_load] rank %s/%s loading tokenizer", rank, size)
+    tokenizer = load_tokenizer(
+        model_path,
+        {"trust_remote_code": True},
+        eos_token_ids=config.get("eos_token_id", None),
+    )
+    logger.info(
+        "[sharded_load] rank %s/%s tokenizer loaded after %.1fs",
+        rank,
+        size,
+        time.monotonic() - started_at,
+    )
+
+    logger.info("[sharded_load] rank %s/%s re-loading model for weights", rank, size)
+    model, _ = load_model(model_path, lazy=True, strict=False)
+    logger.info(
+        "[sharded_load] rank %s/%s weight model loaded lazily after %.1fs",
+        rank,
+        size,
+        time.monotonic() - started_at,
+    )
+
+    logger.info("[sharded_load] rank %s/%s applying tensor shard", rank, size)
+    model.shard(tensor_group)
+    logger.info(
+        "[sharded_load] rank %s/%s tensor shard applied after %.1fs",
+        rank,
+        size,
+        time.monotonic() - started_at,
+    )
+
+    logger.info("[sharded_load] rank %s/%s evaluating model parameters", rank, size)
+    mx.eval(model.parameters())
+    logger.info(
+        "[sharded_load] rank %s/%s model parameters evaluated after %.1fs",
+        rank,
+        size,
+        time.monotonic() - started_at,
+    )
+
+    logger.info("[sharded_load] rank %s/%s synchronizing all_sum", rank, size)
+    mx.eval(mx.distributed.all_sum(mx.array(1.0), stream=mx.cpu))
+    logger.info(
+        "[sharded_load] rank %s/%s all_sum synchronized after %.1fs",
+        rank,
+        size,
+        time.monotonic() - started_at,
+    )
+
+    return model, tokenizer
 
 
 class DistributedModelKit:
@@ -98,10 +208,9 @@ class DistributedModelKit:
             self.group.size(),
         )
         sharded_load_started_at = time.monotonic()
-        self.model, self.tokenizer = sharded_load(
+        self.model, self.tokenizer = _instrumented_tensor_sharded_load(
             self.model_path,
             tensor_group=self.group,
-            pipeline_group=None,
         )
         logger.info(
             "sharded_load returned on rank %s/%s after %.1fs",
