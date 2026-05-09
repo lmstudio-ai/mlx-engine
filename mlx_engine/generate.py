@@ -184,6 +184,13 @@ def load_model(
                 "Distributed loading does not support concurrent predictions; "
                 "set max_concurrent_predictions to 1"
             )
+        logger.info(
+            "Creating DistributedModelKit model_path=%s max_kv_size=%s prefill_step_size=%s distributed_group_provided=%s",
+            model_path,
+            max_kv_size,
+            prefill_step_size,
+            distributed_group is not None,
+        )
         model_kit = DistributedModelKit(
             model_path,
             prefill_step_size=prefill_step_size,
@@ -191,8 +198,11 @@ def load_model(
             trust_remote_code=trust_remote_code,
             distributed_group=distributed_group,
         )
+        logger.info("Sanitizing EOS tokens for DistributedModelKit")
         sanitize_eos_tokens(model_kit)
+        logger.info("Starting DistributedModelKit")
         model_kit.start()
+        logger.info("DistributedModelKit start completed")
         return model_kit
 
     model_path = Path(model_path)

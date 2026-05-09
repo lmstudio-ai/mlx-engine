@@ -278,7 +278,15 @@ def main() -> None:
 
     from mlx_engine import load_model, unload
 
-    logger.info("Starting packaged distributed coordinator rank %s/%s", rank, size)
+    logger.info(
+        "Starting packaged distributed coordinator rank %s/%s model=%s max_kv_size=%s prefill_step_size=%s",
+        rank,
+        size,
+        args.model,
+        args.max_kv_size,
+        args.prefill_step_size,
+    )
+    logger.info("Coordinator rank %s calling mlx_engine.load_model(distributed=True)", rank)
     model_kit = load_model(
         args.model,
         max_kv_size=args.max_kv_size,
@@ -288,10 +296,13 @@ def main() -> None:
         distributed=True,
         distributed_group=group,
     )
+    logger.info("Coordinator rank %s mlx_engine.load_model returned", rank)
     try:
         write_protocol_message({"type": "ready", "rank": rank, "size": size})
+        logger.info("Coordinator rank %s entering command loop", rank)
         run_command_loop(rank, model_kit)
     finally:
+        logger.info("Coordinator rank %s unloading model kit", rank)
         unload(model_kit)
 
 

@@ -99,7 +99,15 @@ def main() -> None:
     from mlx_engine import load_model, unload
     from mlx_engine.distributed_rank import run_worker_loop
 
-    logger.info("Starting packaged distributed worker rank %s/%s", rank, size)
+    logger.info(
+        "Starting packaged distributed worker rank %s/%s model=%s max_kv_size=%s prefill_step_size=%s",
+        rank,
+        size,
+        args.model,
+        args.max_kv_size,
+        args.prefill_step_size,
+    )
+    logger.info("Worker rank %s calling mlx_engine.load_model(distributed=True)", rank)
     model_kit = load_model(
         args.model,
         max_kv_size=args.max_kv_size,
@@ -109,9 +117,12 @@ def main() -> None:
         distributed=True,
         distributed_group=group,
     )
+    logger.info("Worker rank %s mlx_engine.load_model returned", rank)
     try:
+        logger.info("Worker rank %s entering native worker loop", rank)
         run_worker_loop(rank, model_kit)
     finally:
+        logger.info("Worker rank %s unloading model kit", rank)
         unload(model_kit)
 
 

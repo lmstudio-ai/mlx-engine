@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 import threading
+import time
 from typing import Any, List, Optional, Tuple
 
 import mlx.core as mx
@@ -13,6 +14,25 @@ from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 
 
 logger = logging.getLogger(__name__)
+
+
+def _format_size_bytes(size_bytes: int) -> str:
+    gibibytes = size_bytes / (1024 * 1024 * 1024)
+    return f"{gibibytes:.2f} GiB"
+
+
+def _model_snapshot_summary(model_path: Path) -> str:
+    try:
+        safetensor_files = list(model_path.glob("*.safetensors"))
+        total_safetensor_size = sum(
+            safetensor_file.stat().st_size for safetensor_file in safetensor_files
+        )
+        return (
+            f"safetensors={len(safetensor_files)} "
+            f"safetensorsSize={_format_size_bytes(total_safetensor_size)}"
+        )
+    except Exception as caught_error:
+        return f"snapshotSummaryError={caught_error}"
 
 
 class DistributedModelKit:
@@ -44,16 +64,29 @@ class DistributedModelKit:
         self.draft_model = None
         self._cross_prompt_cache_active = False
 
+        logger.info("Resolving distributed model path from %s", model_path)
         self.model_path = self._resolve_model_path(model_path)
+        logger.info(
+            "Resolved distributed model path to %s (%s)",
+            self.model_path,
+            _model_snapshot_summary(self.model_path),
+        )
         config_json = json.loads((self.model_path / "config.json").read_text())
         if "vision_config" in config_json:
             raise ValueError(
                 "DistributedModelKit supports text-only models; vision models are not supported"
             )
         self.model_type = config_json.get("model_type", None)
+        logger.info(
+            "Loaded distributed model config model_type=%s max_kv_size=%s prefill_step_size=%s",
+            self.model_type,
+            self.max_kv_size,
+            self.prefill_step_size,
+        )
 
         self.group = distributed_group
         if self.group is None:
+            logger.info("Initializing MLX distributed group inside DistributedModelKit")
             self.group = mx.distributed.init()
         if self.group.size() <= 1:
             raise ValueError("DistributedModelKit requires more than one MLX rank")
@@ -64,11 +97,19 @@ class DistributedModelKit:
             self.group.rank(),
             self.group.size(),
         )
+        sharded_load_started_at = time.monotonic()
         self.model, self.tokenizer = sharded_load(
             self.model_path,
             tensor_group=self.group,
             pipeline_group=None,
         )
+        logger.info(
+            "sharded_load returned on rank %s/%s after %.1fs",
+            self.group.rank(),
+            self.group.size(),
+            time.monotonic() - sharded_load_started_at,
+        )
+        logger.info("Applying tokenizer fixes on rank %s", self.group.rank())
         fix_mistral_pre_tokenizer(
             tokenizer=self.tokenizer,
             model_path=self.model_path,
@@ -95,7 +136,13 @@ class DistributedModelKit:
             ) from caught_error
 
     def start(self):
+        logger.info(
+            "Synchronizing distributed model start on rank %s/%s",
+            self.group.rank(),
+            self.group.size(),
+        )
         mx.synchronize()
+        logger.info("Distributed model start synchronized on rank %s", self.group.rank())
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
