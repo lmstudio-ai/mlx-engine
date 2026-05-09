@@ -70,14 +70,28 @@ def init_distributed_with_retry(timeout_seconds: float):
 def run_collective_smoke(rank: int, size: int) -> None:
     import mlx.core as mx
 
-    logger.info("Running worker collective smoke rank %s/%s", rank, size)
-    result = mx.distributed.all_sum(mx.array(1.0), stream=mx.cpu)
-    mx.eval(result)
+    logger.info("Running worker CPU collective smoke rank %s/%s", rank, size)
+    cpu_result = mx.distributed.all_sum(mx.array(1.0), stream=mx.cpu)
+    mx.eval(cpu_result)
     logger.info(
-        "Worker collective smoke completed rank %s/%s result=%s",
+        "Worker CPU collective smoke completed rank %s/%s result=%s",
         rank,
         size,
-        result.item(),
+        cpu_result.item(),
+    )
+
+    logger.info(
+        "Running worker default-stream collective smoke rank %s/%s",
+        rank,
+        size,
+    )
+    default_result = mx.distributed.all_sum(mx.array(1.0))
+    mx.eval(default_result)
+    logger.info(
+        "Worker default-stream collective smoke completed rank %s/%s result=%s",
+        rank,
+        size,
+        default_result.item(),
     )
 
 
