@@ -7,6 +7,7 @@ from typing import Any, List, Optional, Tuple
 
 import mlx.core as mx
 from mlx_lm.utils import _download, load_model, load_tokenizer
+from mlx.utils import tree_flatten
 
 from mlx_engine.utils.disable_hf_download import _original_snapshot_download
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
@@ -125,7 +126,7 @@ def _instrumented_tensor_sharded_load(
     )
 
     logger.info("[sharded_load] rank %s/%s evaluating model parameters", rank, size)
-    mx.eval(model.parameters())
+    _evaluate_model_parameters_with_trace(model, rank, size, started_at)
     logger.info(
         "[sharded_load] rank %s/%s model parameters evaluated after %.1fs",
         rank,
@@ -143,6 +144,44 @@ def _instrumented_tensor_sharded_load(
     )
 
     return model, tokenizer
+
+
+def _evaluate_model_parameters_with_trace(
+    model: Any,
+    rank: int,
+    size: int,
+    started_at: float,
+) -> None:
+    parameters = tree_flatten(model.parameters())
+    logger.info(
+        "[sharded_load] rank %s/%s evaluating %s model parameters one-by-one",
+        rank,
+        size,
+        len(parameters),
+    )
+    for parameter_index, (parameter_name, parameter) in enumerate(parameters):
+        parameter_started_at = time.monotonic()
+        logger.info(
+            "[sharded_load] rank %s/%s evaluating parameter %s/%s %s shape=%s dtype=%s",
+            rank,
+            size,
+            parameter_index + 1,
+            len(parameters),
+            parameter_name,
+            getattr(parameter, "shape", "<unknown>"),
+            getattr(parameter, "dtype", "<unknown>"),
+        )
+        mx.eval(parameter)
+        logger.info(
+            "[sharded_load] rank %s/%s evaluated parameter %s/%s %s after %.1fs total=%.1fs",
+            rank,
+            size,
+            parameter_index + 1,
+            len(parameters),
+            parameter_name,
+            time.monotonic() - parameter_started_at,
+            time.monotonic() - started_at,
+        )
 
 
 class DistributedModelKit:
