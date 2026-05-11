@@ -68,6 +68,10 @@ def _assert_mentions_franklin(text: str) -> None:
     assert "franklin" in text.lower()
 
 
+def _assert_ready_only(text: str) -> None:
+    assert " ".join(text.strip().lower().split()) == "ready"
+
+
 class TestVisionModels:
     @classmethod
     def setup_class(cls):
@@ -634,7 +638,7 @@ Reply with exactly READY and nothing else.<end_of_turn>
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert "ready" in generated_text.lower()
+        _assert_ready_only(generated_text)
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text
@@ -1047,7 +1051,7 @@ Reply with exactly READY and nothing else.<end_of_turn>
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert "ready" in generated_text.lower()
+        _assert_ready_only(generated_text)
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
         cached_prompt = prompt + generated_text

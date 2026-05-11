@@ -214,8 +214,8 @@ def test_build_prompt_kwargs_drops_gemma3_attention_mask_4d():
     assert "attention_mask_4d" not in prompt_kwargs
 
 
-def test_build_prompt_kwargs_preserves_non_gemma3_attention_mask_4d():
-    """attention_mask_4d is generic mlx-vlm state, not a Gemma3-only field."""
+def test_build_prompt_kwargs_routes_non_gemma3_attention_mask_4d_to_mask():
+    """Non-Gemma3 4D masks are language-model masks in the batched path."""
     attention_mask_4d = mx.ones((1, 1, 2, 2), dtype=mx.int32)
     model = _FakeModel(
         inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
@@ -234,7 +234,8 @@ def test_build_prompt_kwargs_preserves_non_gemma3_attention_mask_4d():
 
     prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
 
-    assert prompt_kwargs["attention_mask_4d"] is attention_mask_4d
+    assert "attention_mask_4d" not in prompt_kwargs
+    assert prompt_kwargs["mask"] is attention_mask_4d
 
 
 def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeypatch):

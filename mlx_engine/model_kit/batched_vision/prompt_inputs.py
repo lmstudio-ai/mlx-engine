@@ -112,7 +112,7 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
             if value is not None
         },
     }
-    _drop_gemma3_padding_mask(model, prompt_kwargs)
+    _route_attention_mask_4d(model, prompt_kwargs)
     _add_language_model_rope_state(model, prompt_kwargs)
     return prompt_kwargs
 
@@ -201,11 +201,17 @@ def drop_prompt_kwargs_prefix(prompt_kwargs: dict, length: int) -> dict:
     return slice_prompt_kwargs(prompt_kwargs, length, total_len)
 
 
-def _drop_gemma3_padding_mask(model, prompt_kwargs: dict) -> None:
-    # mlx-vlm generate_step calls the language model directly and does not use
-    # Gemma3's dense padding mask as the causal attention mask.
+def _route_attention_mask_4d(model, prompt_kwargs: dict) -> None:
+    # Batched prefill calls the language model directly, so generic 4D masks
+    # must be passed as `mask` where the language model will consume them.
     if getattr(model, "model_type", None) == "gemma3":
+        # Gemma3's dense padding mask is not the causal attention mask.
         prompt_kwargs.pop("attention_mask_4d", None)
+        return
+
+    attention_mask_4d = prompt_kwargs.pop("attention_mask_4d", None)
+    if attention_mask_4d is not None:
+        prompt_kwargs["mask"] = attention_mask_4d
 
 
 def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
