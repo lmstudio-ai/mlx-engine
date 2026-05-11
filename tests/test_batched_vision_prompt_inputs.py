@@ -58,9 +58,16 @@ class _FakeConfig:
 
 
 class _FakeModel:
-    def __init__(self, *, inputs_embeds=None, embedding_kwargs=None):
+    def __init__(
+        self,
+        *,
+        inputs_embeds=None,
+        embedding_kwargs=None,
+        model_type="fake",
+    ):
         self.calls = []
         self.config = _FakeConfig()
+        self.model_type = model_type
         self.language_model = _FakeLanguageModel()
         self.embedding_kwargs = embedding_kwargs or {}
         self.inputs_embeds = (
@@ -189,6 +196,7 @@ def test_build_prompt_kwargs_drops_gemma3_attention_mask_4d():
     model = _FakeModel(
         inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
         embedding_kwargs={"attention_mask_4d": attention_mask_4d},
+        model_type="gemma3",
     )
     prepared_prompt = PreparedPrompt(
         prompt_input_ids=[1, 2],
@@ -204,6 +212,29 @@ def test_build_prompt_kwargs_drops_gemma3_attention_mask_4d():
 
     assert "mask" not in prompt_kwargs
     assert "attention_mask_4d" not in prompt_kwargs
+
+
+def test_build_prompt_kwargs_preserves_non_gemma3_attention_mask_4d():
+    """attention_mask_4d is generic mlx-vlm state, not a Gemma3-only field."""
+    attention_mask_4d = mx.ones((1, 1, 2, 2), dtype=mx.int32)
+    model = _FakeModel(
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        embedding_kwargs={"attention_mask_4d": attention_mask_4d},
+        model_type="moondream3",
+    )
+    prepared_prompt = PreparedPrompt(
+        prompt_input_ids=[1, 2],
+        raw_inputs={
+            "input_ids": mx.array([[1, 2]], dtype=mx.int32),
+            "pixel_values": mx.array([1], dtype=mx.float32),
+            "attention_mask": mx.array([[1, 1]], dtype=mx.int32),
+        },
+        image_spans=[],
+    )
+
+    prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+
+    assert prompt_kwargs["attention_mask_4d"] is attention_mask_4d
 
 
 def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeypatch):
