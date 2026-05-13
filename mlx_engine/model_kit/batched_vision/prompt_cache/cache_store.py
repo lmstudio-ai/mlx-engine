@@ -2,6 +2,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import mlx.core as mx
@@ -45,6 +46,8 @@ from mlx.utils import tree_flatten
 logger = logging.getLogger(__name__)
 
 
+_MIB_BYTES = 1024 * 1024
+_CACHE_USAGE_LOG_COOLDOWN_SECONDS = 60.0
 _RECORD_RETENTION_PRIORITY: tuple[RecordKind, ...] = (
     RECORD_KIND_STATE_CHECKPOINT,
     RECORD_KIND_KV_DELTA,
@@ -93,6 +96,11 @@ class VlmPromptCacheStore:
         self._restore_hit_tokens = 0
         self._restore_miss_tokens = 0
         self._cache_evictions = 0
+        self._last_cache_usage_log_time = 0.0
+        logger.info(
+            "VLM prompt cache disk store: lifetime=model_load storage=temporary "
+            "cleanup=model_unload_or_process_exit"
+        )
 
     def plan_longest_prefix_restore(
         self,
@@ -310,7 +318,8 @@ class VlmPromptCacheStore:
 
         finally:
             self._touch_longest_budget_fit_restore_chain(pending_save.prefix_chunks)
-            self._evict_if_needed()
+            evicted_bytes = self._evict_if_needed()
+            self._maybe_log_cache_usage(evicted_bytes)
 
     def snapshot_stats(self) -> PromptCacheStoreStats:
         """Return best-effort diagnostics for smokes/debug output."""
@@ -457,13 +466,34 @@ class VlmPromptCacheStore:
                     self._touch_cache_entry(record_key)
                 return
 
-    def _evict_if_needed(self) -> None:
+    def _evict_if_needed(self) -> int:
+        evicted_bytes = 0
         while self._total_bytes > self._max_cache_store_bytes:
             key_to_evict = next(iter(self._lru_keys), None)
             if key_to_evict is None:
                 break
 
-            self._evict_key(key_to_evict)
+            evicted_bytes += self._evict_key(key_to_evict)
+        return evicted_bytes
+
+    def _maybe_log_cache_usage(self, evicted_bytes: int) -> None:
+        now = monotonic()
+        if (
+            self._last_cache_usage_log_time
+            and now - self._last_cache_usage_log_time
+            < _CACHE_USAGE_LOG_COOLDOWN_SECONDS
+        ):
+            return
+
+        self._last_cache_usage_log_time = now
+        logger.info(
+            "VLM prompt cache disk usage: used_mib=%.1f cap_mib=%.1f "
+            "evicted_mib=%.1f records=%s lifetime=model_load",
+            self._total_bytes / _MIB_BYTES,
+            self._max_cache_store_bytes / _MIB_BYTES,
+            evicted_bytes / _MIB_BYTES,
+            len(self._record_metadata_by_key),
+        )
 
     def _cache_restore_planner(self) -> PromptCacheRestorePlanner:
         """Return a short-lived read-only view over committed indexes."""
@@ -478,10 +508,12 @@ class VlmPromptCacheStore:
             raise RuntimeError("prompt cache layout is not initialized")
         return self._layout
 
-    def _evict_key(self, key: str) -> None:
-        self._total_bytes -= self._key_sizes.pop(key, 0)
+    def _evict_key(self, key: str) -> int:
+        evicted_bytes = self._key_sizes.pop(key, 0)
+        self._total_bytes -= evicted_bytes
         self._lru_keys.pop(key, None)
         self._record_metadata_by_key.pop(key, None)
         self._cache_evictions += 1
 
         self._blob_store.delete(key)
+        return evicted_bytes

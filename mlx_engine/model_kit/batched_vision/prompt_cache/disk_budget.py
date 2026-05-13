@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
+    DEFAULT_PREFIX_CHUNK_SIZE,
     RECORD_KIND_KV_DELTA,
     RECORD_KIND_ROTATING_DELTA,
 )
@@ -50,10 +51,11 @@ def final_cache_store_budget_bytes(
 ) -> int | None:
     """Return the final empirical budget from a completed real prompt cache.
 
-    Full KV layers scale to max_kv_size. Rotating/SWA layers scale only to
-    their window. Opaque state caches use observed bytes only. The provisional
-    30 GiB ceiling is removed after observation; the final budget is still
-    limited to one quarter of currently free disk.
+    KV and Rotating/SWA records scale to max_kv_size so single-sequence branch
+    restores can keep old sliding-window records on disk. Opaque state caches
+    scale by cache chunk count because they are exact-boundary checkpoints. The
+    provisional 30 GiB ceiling is removed after observation; the final budget is
+    still limited to one quarter of currently free disk.
     """
     if max_kv_size is None:
         return None
@@ -104,11 +106,13 @@ def _estimate_layer_cache_bytes(cache: Any, max_kv_size: int) -> int:
     if record_kind == RECORD_KIND_KV_DELTA:
         return _scaled_kv_bytes(cache, max_kv_size)
     if record_kind == RECORD_KIND_ROTATING_DELTA:
-        window_size = int(cache.max_size)
-        return _scaled_kv_bytes(cache, min(max_kv_size, window_size))
+        return _scaled_kv_bytes(cache, max_kv_size)
 
     # Opaque caches are persisted as exact-boundary state checkpoints.
-    return sum(_array_nbytes(array) for _, array in tree_flatten(cache.state))
+    checkpoint_count = max(1, max_kv_size // DEFAULT_PREFIX_CHUNK_SIZE)
+    return checkpoint_count * sum(
+        _array_nbytes(array) for _, array in tree_flatten(cache.state)
+    )
 
 
 def _scaled_kv_bytes(cache: Any, target_token_count: int) -> int:
