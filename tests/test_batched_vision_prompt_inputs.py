@@ -7,6 +7,7 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     build_cached_prompt_kwargs,
     build_prompt_kwargs,
     prepare_prompt_inputs,
+    slice_prompt_kwargs,
 )
 
 
@@ -273,3 +274,51 @@ def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeyp
     assert prompt_kwargs["position_ids"].tolist() == position_ids[:, :, 4:].tolist()
     assert prompt_kwargs["mask"].tolist() == mask[:, :, 4:, :].tolist()
     assert prompt_kwargs["rope_deltas"].tolist() == [5]
+
+
+def test_slice_prompt_kwargs_slices_full_sequence_deepstack_embeds():
+    """Granite4 DeepStack embeds are feature-set x sequence x hidden."""
+    inputs_embeds = mx.zeros((1, 6, 2), dtype=mx.float32)
+    visual_pos_masks = mx.array([[False, True, True, False, True, False]])
+    deepstack_visual_embeds = mx.arange(36, dtype=mx.float32).reshape(3, 6, 2)
+
+    sliced = slice_prompt_kwargs(
+        {
+            "inputs_embeds": inputs_embeds,
+            "visual_pos_masks": visual_pos_masks,
+            "deepstack_visual_embeds": deepstack_visual_embeds,
+        },
+        2,
+        5,
+    )
+
+    assert sliced["inputs_embeds"].shape == (1, 3, 2)
+    assert sliced["visual_pos_masks"].tolist() == [[True, False, True]]
+    assert (
+        sliced["deepstack_visual_embeds"].tolist()
+        == deepstack_visual_embeds[:, 2:5].tolist()
+    )
+
+
+def test_slice_prompt_kwargs_slices_packed_deepstack_embeds_by_visual_token():
+    """Qwen-style DeepStack embeds stay packed by visual-token order."""
+    inputs_embeds = mx.zeros((1, 6, 2), dtype=mx.float32)
+    visual_pos_masks = mx.array([[False, True, True, False, True, False]])
+    packed_a = mx.arange(6, dtype=mx.float32).reshape(3, 2)
+    packed_b = packed_a + 10
+
+    sliced = slice_prompt_kwargs(
+        {
+            "inputs_embeds": inputs_embeds,
+            "visual_pos_masks": visual_pos_masks,
+            "deepstack_visual_embeds": [packed_a, packed_b],
+        },
+        2,
+        5,
+    )
+
+    assert sliced["visual_pos_masks"].tolist() == [[True, False, True]]
+    assert [embed.tolist() for embed in sliced["deepstack_visual_embeds"]] == [
+        packed_a[1:3].tolist(),
+        packed_b[1:3].tolist(),
+    ]

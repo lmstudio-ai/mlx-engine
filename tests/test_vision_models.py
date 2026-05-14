@@ -179,6 +179,23 @@ class TestVisionModels:
             add_generation_prompt=True,
         )
 
+    def build_granite4_prompt(self, model_path: Path, prompt: str) -> str:
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        return processor.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
     ### MODEL-SPECIFIC TESTS ###
     def test_pixtral_vision(self):
         """Test Pixtral 12B model"""
@@ -677,6 +694,17 @@ Reply with exactly READY and nothing else.<end_of_turn>
         model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
         model_path = model_getter(model_name)
         prompt = self.build_gemma4_prompt(model_path, self.description_prompt)
+        self.toucan_test_runner(
+            model_name,
+            prompt,
+            supplemental_accept_phrases=["bird"],
+        )
+
+    def test_granite4_vision(self):
+        """Test Granite 4 Vision model."""
+        model_name = "mlx-community/granite-4.0-3b-vision-4bit"
+        model_path = model_getter(model_name)
+        prompt = self.build_granite4_prompt(model_path, self.description_prompt)
         self.toucan_test_runner(
             model_name,
             prompt,

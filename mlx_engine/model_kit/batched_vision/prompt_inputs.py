@@ -263,6 +263,15 @@ def _slice_deepstack_visual_embeds(
     start: int,
     end: int,
 ):
+    # Some models, including Granite4, return DeepStack embeds aligned to the
+    # full prompt sequence instead of packed by visual-token order.
+    if (
+        isinstance(deepstack_visual_embeds, mx.array)
+        and deepstack_visual_embeds.ndim >= 3
+        and deepstack_visual_embeds.shape[1] == visual_pos_masks.shape[1]
+    ):
+        return deepstack_visual_embeds[:, start:end]
+
     # DeepStack embeds are packed by visual-token order, not sequence position.
     visual_start = int(mx.sum(visual_pos_masks[:, :start]).item())
     visual_count = int(mx.sum(visual_pos_masks[:, start:end]).item())
