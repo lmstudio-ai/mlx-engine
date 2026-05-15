@@ -1,13 +1,13 @@
 """
 Helper functions for text generation that are shared between sequential and batched generation.
 
-These functions handle common setup and processing tasks like sampler creation,
-logits processor configuration, and stop condition detection.
+These functions handle common setup and processing tasks like logits processor
+configuration and stop condition detection.
 """
 
 from typing import Optional, List, Tuple
+
 from mlx_lm.tokenizer_utils import TokenizerWrapper
-from mlx_lm.sample_utils import make_sampler
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )
@@ -46,28 +46,6 @@ def setup_repetition_logits_processors(
         )
 
     return logits_processors
-
-
-def create_sampler(
-    temp: Optional[float],
-    top_p: Optional[float],
-    min_p: Optional[float],
-    min_tokens_to_keep: Optional[int],
-    top_k: Optional[int],
-):
-    return make_sampler(
-        **{
-            k: v
-            for k, v in {
-                "temp": temp,
-                "top_p": top_p,
-                "min_p": min_p,
-                "min_tokens_to_keep": min_tokens_to_keep,
-                "top_k": top_k,
-            }.items()
-            if v is not None
-        }
-    )
 
 
 def validate_top_logprobs(top_logprobs: Optional[int]) -> int:

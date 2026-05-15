@@ -25,6 +25,7 @@ from mlx_engine.model_kit.batched_model_kit_types import (
     GenerationRequest,
     CancelGenerationRequest,
 )
+from mlx_engine.utils.set_seed import set_seed
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class BatchedModelKit:
         prefill_step_size: int,
         max_kv_size: int | None = None,
         max_seq_nums: int | None = None,
+        seed: int | None = None,
     ):
         self._requests = Queue()
         self._prompt_cache = LRUPromptCache()
@@ -116,6 +118,7 @@ class BatchedModelKit:
         self._detokenizer = self.tokenizer.detokenizer
         self._max_kv_size = max_kv_size
         self._prefill_step_size = prefill_step_size
+        self._seed = seed
         logger.info("BatchedModelKit loaded successfully")
 
     def start(self):
@@ -287,6 +290,8 @@ class BatchedModelKit:
         The loop runs until shutdown is requested, at which point all active
         requests receive a RequestCancelled exception.
         """
+
+        set_seed(self._seed)
 
         if self.model is None:
             self.model, _ = mlx_lm.utils.load(self._model_path, lazy=False)

@@ -54,12 +54,12 @@ from mlx_engine.utils.prompt_progress_reporter import (
 )
 from mlx_engine.utils.generation_helpers import (
     setup_repetition_logits_processors,
-    create_sampler,
     validate_top_logprobs,
     create_stop_string_processor,
     process_stop_string_check,
     should_yield_token,
 )
+from mlx_engine.utils.sampling import create_sampler
 
 
 logger = logging.getLogger(__name__)
@@ -204,6 +204,7 @@ def load_model(
             max_kv_size=max_kv_size,
             max_seq_nums=batched_vision_max_seq_nums,
             trust_remote_code=trust_remote_code,
+            seed=seed,
         )
     else:
         # For non-vision models or ModelKit-supported vision models, choose between
@@ -250,6 +251,7 @@ def load_model(
                 max_kv_size=max_kv_size,
                 max_seq_nums=batched_max_seq_nums,
                 prefill_step_size=prefill_step_size,
+                seed=seed,
             )
         else:
             model_kit = ModelKit(

@@ -45,6 +45,7 @@ from mlx_engine.model_kit.batched_vision.request_lifecycle import (
     GenerationRequest,
     PreparedInsert,
 )
+from mlx_engine.utils.set_seed import set_seed
 from mlx_engine.utils.token import Token
 from mlx_engine.vision_model_kit._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
@@ -75,6 +76,7 @@ class BatchedVisionModelKit:
         max_kv_size: int | None = None,
         max_seq_nums: int = 4,
         trust_remote_code: bool = False,
+        seed: int | None = None,
     ):
         # External requests and internal generation events share one queue so
         # restore completions wake the generation thread without polling.
@@ -88,6 +90,7 @@ class BatchedVisionModelKit:
         self._model_path = model_path
         self._max_seq_nums = max_seq_nums
         self._trust_remote_code = trust_remote_code
+        self._seed = seed
 
         fix_qwen2_5_vl_image_processor(model_path)
         fix_qwen2_vl_preprocessor(model_path)
@@ -472,6 +475,8 @@ class BatchedVisionModelKit:
             request.rqueue.put(error)
 
     def _generate(self):
+        set_seed(self._seed)
+
         if self.model is None:
             self._load_model()
         self._startup_complete.set()
