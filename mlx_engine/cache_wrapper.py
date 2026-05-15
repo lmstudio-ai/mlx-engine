@@ -67,7 +67,9 @@ class CacheWrapper:
 
         self._history = self._make_history()
         self._history_key = "session"
-        self._live_tokens: Optional[mx.array] = None
+        # Keep token history host-side. Sequential requests can resume on a
+        # different native thread, and lazy MLX arrays carry stream ownership.
+        self._live_tokens: Optional[List[int]] = None
         self._live_cache: List[Any] = self._make_cache()
 
     @property
@@ -94,16 +96,16 @@ class CacheWrapper:
 
     def _store_snapshot(
         self,
-        tokens: mx.array,
+        tokens: List[int],
         cache: List[Any],
         *,
         cache_type: Literal["user", "assistant"],
     ) -> None:
-        if tokens.size == 0:
+        if len(tokens) == 0:
             return
         self._history.insert_cache(
             self._history_key,
-            tokens.tolist(),
+            list(tokens),
             copy.deepcopy(cache),
             cache_type=cache_type,
         )
@@ -139,13 +141,14 @@ class CacheWrapper:
     def _restore_cache(
         self,
         prompt_tokens: mx.array,
+        prompt_token_list: List[int],
     ) -> tuple[Optional[List[Any]], mx.array]:
         if len(prompt_tokens) == 0:
             return None, prompt_tokens
 
         cache, rest = self._history.fetch_nearest_cache(
             self._history_key,
-            prompt_tokens.tolist(),
+            prompt_token_list,
         )
         if cache is not None:
             if len(rest) > 0:
@@ -160,10 +163,10 @@ class CacheWrapper:
         # Exact hits need one token outside the cache to seed decode. If the
         # exact-hit cache cannot be trimmed, retry with one less prompt token
         # so a stored checkpoint can win.
-        truncated_prompt = prompt_tokens[:-1]
+        truncated_prompt = prompt_token_list[:-1]
         cache, rest = self._history.fetch_nearest_cache(
             self._history_key,
-            truncated_prompt.tolist(),
+            truncated_prompt,
         )
         if cache is None:
             return None, prompt_tokens
@@ -235,14 +238,17 @@ class CacheWrapper:
         reporter: PromptProgressReporter,
     ) -> mx.array:
         total_prompt_tokens = len(prompt_tokens)
+        prompt_token_list = prompt_tokens.tolist()
 
         self._flush_live_cache()
 
-        restored_cache, uncached_tokens = self._restore_cache(prompt_tokens)
+        restored_cache, uncached_tokens = self._restore_cache(
+            prompt_tokens, prompt_token_list
+        )
         self._live_cache = (
             restored_cache if restored_cache is not None else self._make_cache()
         )
-        self._live_tokens = prompt_tokens
+        self._live_tokens = prompt_token_list
 
         cached_tokens = total_prompt_tokens - len(uncached_tokens)
         logger.info(
@@ -299,9 +305,9 @@ class CacheWrapper:
 
     def record_generated_token(self, token: int) -> None:
         if self._live_tokens is None:
-            self._live_tokens = mx.array([token])
+            self._live_tokens = [token]
             return
-        self._live_tokens = mx.concat([self._live_tokens, mx.array([token])])
+        self._live_tokens.append(token)
 
     def set_draft_model(self, draft_model: nn.Module) -> None:
         if self.model is None:
