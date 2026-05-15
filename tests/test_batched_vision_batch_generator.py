@@ -48,7 +48,7 @@ class _LastTokenProcessor:
         self.calls = []
 
     def process_last_token(self, last_token, logits):
-        self.calls.append(last_token)
+        self.calls.append(last_token.tolist())
         return _bump(logits, self.token)
 
 
@@ -142,7 +142,7 @@ def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
     assert [response.token for response in second] == [3, 4]
     assert [response.top_logprobs[0][0] for response in second] == [3, 4]
     assert history_processor.calls[0] == [100, 1]
-    assert last_token_processor.calls[0] == 2
+    assert last_token_processor.calls[0] == [2]
 
 
 def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():

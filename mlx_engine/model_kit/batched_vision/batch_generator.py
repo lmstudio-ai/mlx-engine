@@ -192,17 +192,21 @@ def _apply_logits_processors(
     logits: mx.array,
     tokens: list[list[int]],
     logits_processors: list[list[LogitsProcessor]],
-    last_tokens: list[int] | None = None,
+    last_tokens: mx.array | None = None,
 ) -> mx.array:
     processed_logits = []
     for i in range(logits.shape[0]):
         sample_logits = logits[i : i + 1]
+        appended_last_token = False
         for processor in logits_processors[i]:
             if last_tokens is not None and hasattr(processor, "process_last_token"):
                 sample_logits = processor.process_last_token(
-                    last_tokens[i], sample_logits
+                    last_tokens[i : i + 1], sample_logits
                 )
             else:
+                if last_tokens is not None and not appended_last_token:
+                    tokens[i].append(last_tokens[i : i + 1].tolist()[0])
+                    appended_last_token = True
                 sample_logits = processor(mx.array(tokens[i]), sample_logits)
         processed_logits.append(sample_logits)
     return mx.concatenate(processed_logits, axis=0)
@@ -401,19 +405,15 @@ class GenerationBatch:
         logits = logits[:, -1, :]
 
         row_tokens = [row.tokens for row in self._rows]
+        row_token_lens = [len(tokens) for tokens in row_tokens]
         row_logits_processors = [row.logits_processors for row in self._rows]
         if any(row_logits_processors):
-            last_tokens = inputs.tolist()
-            for seq_tokens, token in zip(row_tokens, last_tokens):
-                seq_tokens.append(token)
             logits = _apply_logits_processors(
                 logits,
                 row_tokens,
                 row_logits_processors,
-                last_tokens=last_tokens,
+                last_tokens=inputs,
             )
-        else:
-            last_tokens = None
 
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         sampled, sampled_logprobs, top_idx, top_logprobs = _sample_next_token(
@@ -441,8 +441,8 @@ class GenerationBatch:
             )
         )
 
-        if last_tokens is None:
-            for seq_tokens, token in zip(row_tokens, tokens):
+        for seq_tokens, token, old_len in zip(row_tokens, tokens, row_token_lens):
+            if len(seq_tokens) == old_len:
                 seq_tokens.append(token)
         return tokens, token_logprob_list, top_idx_list, top_logprob_list
 

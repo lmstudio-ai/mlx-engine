@@ -1,4 +1,5 @@
 import mlx.core as mx
+from mlx_lm.models.cache import TokenBuffer
 from mlx_lm.sample_utils import make_repetition_penalty
 
 """
@@ -22,6 +23,7 @@ class RepetitionPenaltyProcessor:
         self.repetition_penalty_function = make_repetition_penalty(
             repetition_penalty, repetition_context_size
         )
+        self._token_buffer: TokenBuffer | None = None
 
     def __call__(self, tokens: mx.array, logits: mx.array) -> mx.array:
         """
@@ -46,5 +48,15 @@ class RepetitionPenaltyProcessor:
             dtype=mx.int64,
         )
         all_tokens_to_consider = mx.concat([historical_tokens_mx, tokens])
+        self._token_buffer = TokenBuffer(all_tokens_to_consider.astype(mx.int32))
         result = self.repetition_penalty_function(all_tokens_to_consider, logits)
         return result
+
+    def process_last_token(self, last_token: mx.array, logits: mx.array) -> mx.array:
+        """Fast path for decode after `__call__` seeds the full row context."""
+        if self._token_buffer is None:
+            self._token_buffer = TokenBuffer(self.token_history)
+
+        token = last_token.reshape(-1).astype(mx.int32)
+        tokens = self._token_buffer.update_and_fetch(token)
+        return self.repetition_penalty_function(tokens, logits)
