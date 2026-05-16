@@ -205,6 +205,19 @@ def test_generation_batch_extends_mixed_rope_rows_without_broadcasting():
     assert model.calls[-1]["rope_deltas"] == [[9], [0]]
 
 
+def test_capture_rope_deltas_keeps_qwen3_5_text_only_none():
+    """Qwen3.5 text-only decode stays on the fast text RoPE path."""
+    qwen3_5_model = SimpleNamespace(
+        language_model=SimpleNamespace(model_type="qwen3_5_vl", _rope_deltas=None)
+    )
+    qwen_model = SimpleNamespace(
+        language_model=SimpleNamespace(model_type="qwen2_vl", _rope_deltas=None)
+    )
+
+    assert batcher._capture_rope_deltas(qwen3_5_model, rows=2) is None
+    assert batcher._capture_rope_deltas(qwen_model, rows=2).tolist() == [[0], [0]]
+
+
 def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     monkeypatch,
 ):

@@ -191,6 +191,57 @@ def test_build_prompt_kwargs_image_adds_qwen_position_state():
     assert prompt_kwargs["rope_deltas"].item() == 0
 
 
+def test_build_prompt_kwargs_text_clears_qwen3_5_rope_state():
+    """Text-only Qwen3.5 prefill must not inherit stale vision MRoPE state."""
+    model = _FakeModel(
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+    )
+    model.language_model.model_type = "qwen3_5_vl"
+    model.language_model._position_ids = mx.ones((3, 1, 4), dtype=mx.int32)
+    model.language_model._rope_deltas = mx.ones((1, 1), dtype=mx.int32)
+    prepared_prompt = PreparedPrompt(
+        prompt_input_ids=[1, 2],
+        raw_inputs=None,
+        image_spans=[],
+    )
+
+    prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+
+    assert model.calls[0][0][0].tolist() == [[1, 2]]
+    assert "position_ids" not in prompt_kwargs
+    assert "rope_deltas" not in prompt_kwargs
+    assert model.language_model._position_ids is None
+    assert model.language_model._rope_deltas is None
+
+
+def test_build_cached_prompt_kwargs_text_clears_qwen3_5_rope_state():
+    """Text-only Qwen3.5 restores keep the fast text RoPE path."""
+    model = _FakeModel(
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+    )
+    model.language_model.model_type = "qwen3_5_vl"
+    model.language_model._position_ids = mx.ones((3, 1, 4), dtype=mx.int32)
+    model.language_model._rope_deltas = mx.ones((1, 1), dtype=mx.int32)
+    prepared_prompt = PreparedPrompt(
+        prompt_input_ids=[1, 2, 3, 4],
+        raw_inputs=None,
+        image_spans=[],
+    )
+
+    prompt_kwargs = build_cached_prompt_kwargs(
+        model,
+        prepared_prompt,
+        cached_prefix_len=2,
+        rope_deltas=mx.zeros((1, 1), dtype=mx.int32),
+    )
+
+    assert model.calls[0][0][0].tolist() == [[3, 4]]
+    assert "position_ids" not in prompt_kwargs
+    assert "rope_deltas" not in prompt_kwargs
+    assert model.language_model._position_ids is None
+    assert model.language_model._rope_deltas is None
+
+
 def test_build_prompt_kwargs_drops_gemma3_attention_mask_4d():
     """Gemma3's dense padding mask must not replace the causal attention mask."""
     attention_mask_4d = mx.ones((1, 1, 2, 2), dtype=mx.int32)

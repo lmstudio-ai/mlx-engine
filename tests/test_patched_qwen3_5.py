@@ -7,11 +7,17 @@ from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
 import mlx_lm.models.qwen3_5 as qwen3_5_module
+from transformers import AutoTokenizer
 
 from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
+from mlx_engine.model_kit.batched_vision.prompt_inputs import (
+    PreparedPrompt,
+    build_cached_prompt_kwargs,
+)
 from mlx_engine.model_kit.patches.qwen3_5 import (
     OriginalDecoderLayer,
     OriginalQwen3_5TextModel,
+    OriginalVlmQwen3_5LanguageModelCall,
 )
 
 from tests.patched_model_test_utils import (
@@ -115,6 +121,16 @@ def load_unpatched_qwen_mlx_lm(model_path):
             "Qwen3_5TextModel": OriginalQwen3_5TextModel,
         },
     )
+
+
+def qwen3_5_chat_prompt_tokens(model_path) -> mx.array:
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "tell me a short story"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    return mx.array(tokenizer.encode(prompt, add_special_tokens=False))[None, :]
 
 
 def _first_generate_step_logprobs(
@@ -360,5 +376,267 @@ def test_qwen3_5_image_prompt_patched_matches_vlm(model_name):
     diff = max_abs_diff(patched_logits, vlm_logits)
     assert diff == 0.0, (
         f"{model_name}: image prompt logits mismatch against mlx-vlm "
+        f"(max diff {diff:.6f})."
+    )
+
+
+def test_vlm_qwen3_5_text_prefill_fast_path_matches_original_vlm():
+    """The VLM Qwen3.5 text fast path must match original mlx-vlm logits."""
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    vlm_model = load_vlm(model_path)
+    language_model = vlm_model.language_model
+    tokens = qwen3_5_chat_prompt_tokens(model_path)
+
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    fast_cache = make_prompt_cache(language_model)
+    fast_logits = language_model(tokens, cache=fast_cache).logits
+    mx.eval(fast_logits)
+    fast_logits = mx.array(fast_logits)
+
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    original_cache = make_prompt_cache(language_model)
+    original_logits = OriginalVlmQwen3_5LanguageModelCall(
+        language_model, tokens, cache=original_cache
+    ).logits
+    mx.eval(original_logits)
+    original_logits = mx.array(original_logits)
+
+    diff = max_abs_diff(fast_logits, original_logits)
+    assert diff == 0.0, (
+        f"VLM Qwen3.5 text prefill fast path changed logits (max diff {diff:.6f})."
+    )
+
+
+def test_vlm_qwen3_5_text_mask_uses_original_vlm():
+    """Masked VLM Qwen3.5 text must keep original mlx-vlm RoPE behavior."""
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    vlm_model = load_vlm(model_path)
+    language_model = vlm_model.language_model
+    tokens = qwen3_5_chat_prompt_tokens(model_path)
+    mask = mx.concatenate(
+        [
+            mx.zeros((1, 4), dtype=tokens.dtype),
+            mx.ones((1, tokens.shape[1] - 4), dtype=tokens.dtype),
+        ],
+        axis=1,
+    )
+
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    patched_cache = make_prompt_cache(language_model)
+    patched_logits = language_model(tokens, mask=mask, cache=patched_cache).logits
+    mx.eval(patched_logits)
+    patched_logits = mx.array(patched_logits)
+
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    original_cache = make_prompt_cache(language_model)
+    original_logits = OriginalVlmQwen3_5LanguageModelCall(
+        language_model,
+        tokens,
+        mask=mask,
+        cache=original_cache,
+    ).logits
+    mx.eval(original_logits)
+    original_logits = mx.array(original_logits)
+
+    diff = max_abs_diff(patched_logits, original_logits)
+    assert diff == 0.0, (
+        f"VLM Qwen3.5 masked text changed original VLM logits (max diff {diff:.6f})."
+    )
+
+
+def test_vlm_qwen3_5_mrope_path_matches_original_vlm():
+    """Explicit Qwen3.5 MRoPE state must still use the original VLM behavior."""
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    vlm_model = load_vlm(model_path)
+    language_model = vlm_model.language_model
+    config = vlm_model.config
+    image_grid_thw = mx.array([[1, 4, 4]])
+    tokens = mx.array(
+        [
+            [
+                0,
+                1,
+                config.vision_start_token_id,
+                config.image_token_id,
+                config.image_token_id,
+                config.image_token_id,
+                config.image_token_id,
+                2,
+                3,
+            ]
+        ]
+    )
+    position_ids, rope_deltas = language_model.get_rope_index(
+        tokens, image_grid_thw=image_grid_thw
+    )
+    mx.eval(position_ids, rope_deltas)
+
+    language_model._position_ids = position_ids
+    language_model._rope_deltas = rope_deltas
+    patched_cache = make_prompt_cache(language_model)
+    patched_logits = language_model(
+        tokens,
+        cache=patched_cache,
+        position_ids=position_ids,
+    ).logits
+    mx.eval(patched_logits)
+    patched_logits = mx.array(patched_logits)
+
+    language_model._position_ids = position_ids
+    language_model._rope_deltas = rope_deltas
+    original_cache = make_prompt_cache(language_model)
+    original_logits = OriginalVlmQwen3_5LanguageModelCall(
+        language_model,
+        tokens,
+        cache=original_cache,
+        position_ids=position_ids,
+    ).logits
+    mx.eval(original_logits)
+    original_logits = mx.array(original_logits)
+
+    diff = max_abs_diff(patched_logits, original_logits)
+    assert diff == 0.0, f"VLM Qwen3.5 MRoPE path changed logits (max diff {diff:.6f})."
+
+
+def test_vlm_qwen3_5_decode_rope_deltas_kw_syncs_state():
+    """Qwen3.5 VLM decode must honor rope_deltas passed after state is cleared."""
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    vlm_model = load_vlm(model_path)
+    language_model = vlm_model.language_model
+    config = vlm_model.config
+    image_grid_thw = mx.array([[1, 4, 4]])
+    tokens = mx.array(
+        [
+            [
+                0,
+                1,
+                config.vision_start_token_id,
+                config.image_token_id,
+                config.image_token_id,
+                config.image_token_id,
+                config.image_token_id,
+                2,
+                3,
+            ]
+        ]
+    )
+    decode_token = mx.array([[4]])
+    position_ids, rope_deltas = language_model.get_rope_index(
+        tokens, image_grid_thw=image_grid_thw
+    )
+    mx.eval(position_ids, rope_deltas)
+
+    def prefill_cache():
+        language_model._position_ids = position_ids
+        language_model._rope_deltas = rope_deltas
+        cache = make_prompt_cache(language_model)
+        logits = language_model(
+            tokens,
+            cache=cache,
+            position_ids=position_ids,
+        ).logits
+        mx.eval(logits, [cache.state for cache in cache])
+        return cache
+
+    reference_cache = prefill_cache()
+    language_model._position_ids = None
+    language_model._rope_deltas = rope_deltas
+    reference_logits = OriginalVlmQwen3_5LanguageModelCall(
+        language_model,
+        decode_token,
+        cache=reference_cache,
+        rope_deltas=rope_deltas,
+    ).logits
+    mx.eval(reference_logits)
+    reference_logits = mx.array(reference_logits)
+
+    patched_cache = prefill_cache()
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    patched_logits = language_model(
+        decode_token,
+        cache=patched_cache,
+        rope_deltas=rope_deltas,
+    ).logits
+    mx.eval(patched_logits)
+    patched_logits = mx.array(patched_logits)
+
+    diff = max_abs_diff(patched_logits, reference_logits)
+    assert diff == 0.0, (
+        "VLM Qwen3.5 decode ignored kwarg rope_deltas after state was cleared "
+        f"(max diff {diff:.6f})."
+    )
+
+
+def test_vlm_qwen3_5_text_prompt_cache_restore_matches_original_vlm():
+    """Restored text-only Qwen3.5 prompts must match original VLM logits."""
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    vlm_model = load_vlm(model_path)
+    language_model = vlm_model.language_model
+    tokens = qwen3_5_chat_prompt_tokens(model_path)
+    prefix_len = 6
+    prepared_prompt = PreparedPrompt(
+        prompt_input_ids=tokens.squeeze(0).tolist(),
+        raw_inputs=None,
+        image_spans=[],
+    )
+
+    restored_cache = make_prompt_cache(language_model)
+    prefix_tokens = tokens[:, :prefix_len]
+    prefix_inputs_embeds = language_model.model.embed_tokens(prefix_tokens)
+    language_model(
+        prefix_tokens,
+        cache=restored_cache,
+        inputs_embeds=prefix_inputs_embeds,
+    )
+    mx.eval([cache.state for cache in restored_cache])
+
+    stale_rope_deltas = mx.zeros((1, 1), dtype=tokens.dtype)
+    cached_kwargs = build_cached_prompt_kwargs(
+        vlm_model,
+        prepared_prompt,
+        prefix_len,
+        stale_rope_deltas,
+    )
+    assert "position_ids" not in cached_kwargs
+    assert "rope_deltas" not in cached_kwargs
+    assert language_model._position_ids is None
+    assert language_model._rope_deltas is None
+
+    suffix_inputs_embeds = cached_kwargs.pop("inputs_embeds")
+    suffix_tokens = tokens[:, prefix_len:]
+    fast_logits = language_model(
+        suffix_tokens,
+        cache=restored_cache,
+        inputs_embeds=suffix_inputs_embeds,
+        **cached_kwargs,
+    ).logits
+    mx.eval(fast_logits)
+    fast_last_logits = mx.array(fast_logits[:, -1, :])
+
+    original_cache = make_prompt_cache(language_model)
+    OriginalVlmQwen3_5LanguageModelCall(
+        language_model,
+        prefix_tokens,
+        cache=original_cache,
+        inputs_embeds=prefix_inputs_embeds,
+    )
+    mx.eval([cache.state for cache in original_cache])
+    original_logits = OriginalVlmQwen3_5LanguageModelCall(
+        language_model,
+        suffix_tokens,
+        cache=original_cache,
+        inputs_embeds=suffix_inputs_embeds,
+    ).logits
+    mx.eval(original_logits)
+    original_last_logits = mx.array(original_logits[:, -1, :])
+
+    diff = max_abs_diff(fast_last_logits, original_last_logits)
+    assert diff == 0.0, (
+        "VLM Qwen3.5 text prompt-cache restore fast path changed logits "
         f"(max diff {diff:.6f})."
     )

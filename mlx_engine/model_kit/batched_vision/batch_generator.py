@@ -166,6 +166,8 @@ def _capture_rope_deltas(model, rows: int) -> Any | None:
 
     rope_deltas = getattr(language_model, "_rope_deltas", None)
     if rope_deltas is None:
+        if str(getattr(language_model, "model_type", "")).startswith("qwen3_5"):
+            return None
         return mx.zeros((rows, 1), dtype=mx.int32)
 
     rope_deltas = _normalize_rope_deltas(rope_deltas)
@@ -896,8 +898,7 @@ class _PromptPrefill:
         # primes language_model._rope_deltas via get_rope_index; see
         # external/src/mlx-vlm/mlx_vlm/models/qwen3_5/qwen3_5.py.
         rope_deltas = _capture_rope_deltas(self.model, len(gen_batch.uids))
-        if rope_deltas is not None:
-            gen_batch._rope_deltas = rope_deltas
+        gen_batch._rope_deltas = rope_deltas
 
         self.prompt_cache = []
         return gen_batch, prompt_responses

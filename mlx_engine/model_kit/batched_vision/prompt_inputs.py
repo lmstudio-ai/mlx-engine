@@ -77,7 +77,9 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
     """Build model kwargs for a full prompt prefill."""
     if prepared_prompt.raw_inputs is None:
         input_ids = mx.array(prepared_prompt.prompt_input_ids, dtype=mx.int32)[None, :]
+        _clear_qwen3_5_text_rope_state(model)
         embedding_output = model.get_input_embeddings(input_ids)
+        _clear_qwen3_5_text_rope_state(model)
         return {
             key: value
             for key, value in embedding_output.to_dict().items()
@@ -134,7 +136,9 @@ def build_cached_prompt_kwargs(
         )
 
     input_ids = mx.array(prompt_input_ids, dtype=mx.int32)[None, :]
+    _clear_qwen3_5_text_rope_state(model)
     embedding_output = model.get_input_embeddings(input_ids)
+    _clear_qwen3_5_text_rope_state(model)
     prompt_kwargs = {
         key: value
         for key, value in embedding_output.to_dict().items()
@@ -228,6 +232,17 @@ def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
         prompt_kwargs["rope_deltas"] = rope_deltas
 
 
+def _clear_qwen3_5_text_rope_state(model) -> bool:
+    language_model = getattr(model, "language_model", None)
+    model_type = str(getattr(language_model, "model_type", ""))
+    if language_model is None or not model_type.startswith("qwen3_5"):
+        return False
+
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    return True
+
+
 def _add_qwen_text_restore_rope_state(
     model,
     prompt_kwargs: dict,
@@ -240,6 +255,9 @@ def _add_qwen_text_restore_rope_state(
     model_type = str(getattr(language_model, "model_type", ""))
     if language_model is None or not model_type.startswith("qwen"):
         return False
+
+    if _clear_qwen3_5_text_rope_state(model):
+        return True
 
     # Text restores start from a nonzero KV offset, so pass explicit text MRoPE
     # positions. Reset model-side deltas so later decode capture is not stale.
