@@ -238,6 +238,17 @@ def shutdown_workers(rank: int) -> None:
         logger.exception("Failed to broadcast worker shutdown")
 
 
+def uses_distributed_batching(model_kit) -> bool:
+    uses_batching = getattr(model_kit, "uses_distributed_batching", None)
+    if uses_batching is None:
+        return False
+    return bool(uses_batching())
+
+
+def should_broadcast_generation_request(model_kit) -> bool:
+    return not uses_distributed_batching(model_kit)
+
+
 def run_generation_request(model_kit, request: dict[str, Any]) -> None:
     sampling = request["sampling"]
     generator = create_generator(
@@ -260,6 +271,11 @@ def run_generation_request(model_kit, request: dict[str, Any]) -> None:
 
 def run_worker_loop(rank: int, model_kit) -> None:
     assert_not_source_checkout_runtime()
+    if uses_distributed_batching(model_kit):
+        logger.info("Native distributed rank %s entering batched worker loop", rank)
+        model_kit.run_worker_loop()
+        return
+
     logger.info("Native distributed rank %s waiting for rank 0 requests", rank)
     while True:
         try:

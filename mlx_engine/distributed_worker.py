@@ -105,6 +105,7 @@ def main() -> None:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--distributed-init-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--init-smoke-only", action="store_true")
+    parser.add_argument("--max-seq-nums", type=int, default=1)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -140,7 +141,7 @@ def main() -> None:
     model_kit = load_model(
         args.model,
         max_kv_size=args.max_kv_size,
-        max_seq_nums=1,
+        max_seq_nums=args.max_seq_nums,
         trust_remote_code=args.trust_remote_code,
         prefill_step_size=args.prefill_step_size,
         distributed=True,

@@ -3,11 +3,13 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from typing import Any, Optional
 
 
 logger = logging.getLogger(__name__)
+protocol_write_lock = threading.Lock()
 
 distributed_init_started_at_env = "MLX_ENGINE_DISTRIBUTED_COORDINATOR_INIT_STARTED_AT"
 source_checkout_runtime_path_segments = (
@@ -99,8 +101,9 @@ def run_collective_smoke(rank: int, size: int) -> None:
 
 
 def write_protocol_message(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    with protocol_write_lock:
+        sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
 
 
 def require_object(value: Any, label: str) -> dict[str, Any]:
@@ -127,6 +130,13 @@ def optional_number(value: Any, label: str) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{label} must be a number or null")
     return float(value)
+
+
+def optional_positive_number(value: Any, label: str) -> Optional[float]:
+    number = optional_number(value, label)
+    if number is not None and number <= 0:
+        raise ValueError(f"{label} must be positive or null")
+    return number
 
 
 def optional_int(value: Any, label: str) -> Optional[int]:
@@ -164,12 +174,8 @@ def validate_sampling(value: Any) -> dict[str, Any]:
     }
 
 
-def validate_predict_command(value: Any) -> dict[str, Any]:
-    command = require_object(value, "coordinator command")
-    command_type = require_string(command.get("type"), "coordinator command type")
-    if command_type != "predict":
-        raise ValueError(f"Unsupported coordinator command type {command_type}")
-
+def validate_predict_request(value: Any, label: str) -> dict[str, Any]:
+    command = require_object(value, label)
     return {
         "type": "predict",
         "requestId": require_string(command.get("requestId"), "requestId"),
@@ -180,12 +186,45 @@ def validate_predict_command(value: Any) -> dict[str, Any]:
     }
 
 
+def validate_predict_command(value: Any) -> dict[str, Any]:
+    command = require_object(value, "coordinator command")
+    command_type = require_string(command.get("type"), "coordinator command type")
+    if command_type != "predict":
+        raise ValueError(f"Unsupported coordinator command type {command_type}")
+    return validate_predict_request(command, "coordinator command")
+
+
+def validate_predict_concurrent_command(value: Any) -> dict[str, Any]:
+    command = require_object(value, "coordinator command")
+    command_type = require_string(command.get("type"), "coordinator command type")
+    if command_type != "predict-concurrent":
+        raise ValueError(f"Unsupported coordinator command type {command_type}")
+
+    raw_requests = command.get("requests")
+    if not isinstance(raw_requests, list) or len(raw_requests) < 2:
+        raise ValueError("predict-concurrent requests must contain at least two requests")
+
+    return {
+        "type": "predict-concurrent",
+        "requests": [
+            validate_predict_request(raw_request, f"requests[{request_index}]")
+            for request_index, raw_request in enumerate(raw_requests)
+        ],
+        "timeoutSeconds": optional_positive_number(
+            command.get("timeoutSeconds", 120.0),
+            "timeoutSeconds",
+        ),
+    }
+
+
 def parse_command(line: str) -> dict[str, Any]:
     value = json.loads(line)
     command = require_object(value, "coordinator command")
     command_type = require_string(command.get("type"), "coordinator command type")
     if command_type == "shutdown":
         return {"type": "shutdown"}
+    if command_type == "predict-concurrent":
+        return validate_predict_concurrent_command(command)
     return validate_predict_command(command)
 
 
@@ -233,17 +272,29 @@ def run_generation_request(model_kit, request: dict[str, Any]) -> tuple[str, str
 
 
 def handle_predict_command(rank: int, model_kit, command: dict[str, Any]) -> None:
-    from mlx_engine.distributed_rank import broadcast_generation_request
+    from mlx_engine.distributed_rank import (
+        broadcast_generation_request,
+        should_broadcast_generation_request,
+    )
 
     prompt_tokens = model_kit.tokenize(command["prompt"])
-    request = broadcast_generation_request(
-        rank=rank,
-        request_id=command["requestId"],
-        prompt_tokens=prompt_tokens,
-        max_tokens=command["maxTokens"],
-        stop=command["stop"],
-        sampling=command["sampling"],
-    )
+    if should_broadcast_generation_request(model_kit):
+        request = broadcast_generation_request(
+            rank=rank,
+            request_id=command["requestId"],
+            prompt_tokens=prompt_tokens,
+            max_tokens=command["maxTokens"],
+            stop=command["stop"],
+            sampling=command["sampling"],
+        )
+    else:
+        request = {
+            "requestId": command["requestId"],
+            "promptTokens": prompt_tokens,
+            "maxTokens": command["maxTokens"],
+            "stop": command["stop"],
+            "sampling": command["sampling"],
+        }
     text, finish_reason = run_generation_request(model_kit, request)
     write_protocol_message(
         {
@@ -251,6 +302,73 @@ def handle_predict_command(rank: int, model_kit, command: dict[str, Any]) -> Non
             "requestId": request["requestId"],
             "text": text,
             "finishReason": finish_reason,
+        }
+    )
+
+
+def handle_predict_concurrent_command(rank: int, model_kit, command: dict[str, Any]) -> None:
+    requests = command["requests"]
+    timeout_seconds = command["timeoutSeconds"]
+    errors: list[Exception] = []
+    errors_lock = threading.Lock()
+
+    write_protocol_message(
+        {
+            "type": "prediction-batch-started",
+            "requestIds": [request["requestId"] for request in requests],
+        }
+    )
+
+    def run_request(request: dict[str, Any]) -> None:
+        try:
+            handle_predict_command(rank, model_kit, request)
+        except Exception as caught_error:
+            with errors_lock:
+                errors.append(caught_error)
+            write_protocol_message(
+                {
+                    "type": "prediction-error",
+                    "requestId": request["requestId"],
+                    "message": str(caught_error),
+                }
+            )
+
+    threads = [
+        threading.Thread(
+            target=run_request,
+            args=(request,),
+            name=f"mlx-distributed-predict-{request['requestId']}",
+        )
+        for request in requests
+    ]
+
+    for thread in threads:
+        thread.start()
+    deadline = (
+        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    )
+    for thread in threads:
+        if deadline is None:
+            thread.join()
+            continue
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds > 0:
+            thread.join(timeout=remaining_seconds)
+
+    alive_threads = [thread.name for thread in threads if thread.is_alive()]
+    if len(alive_threads) > 0:
+        raise TimeoutError(
+            "Timed out waiting for concurrent prediction request(s): "
+            + ", ".join(alive_threads)
+        )
+
+    if len(errors) > 0:
+        raise RuntimeError(f"{len(errors)} concurrent prediction request(s) failed")
+
+    write_protocol_message(
+        {
+            "type": "prediction-batch-complete",
+            "requestIds": [request["requestId"] for request in requests],
         }
     )
 
@@ -265,8 +383,14 @@ def run_command_loop(rank: int, model_kit) -> None:
             if command["type"] == "shutdown":
                 from mlx_engine.distributed_rank import shutdown_workers
 
-                shutdown_workers(rank)
+                if getattr(model_kit, "uses_distributed_batching", lambda: False)():
+                    model_kit.shutdown()
+                else:
+                    shutdown_workers(rank)
                 return
+            if command["type"] == "predict-concurrent":
+                handle_predict_concurrent_command(rank, model_kit, command)
+                continue
             handle_predict_command(rank, model_kit, command)
         except Exception as error:
             logger.exception("Distributed coordinator command failed")
@@ -285,6 +409,7 @@ def main() -> None:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--distributed-init-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--init-smoke-only", action="store_true")
+    parser.add_argument("--max-seq-nums", type=int, default=1)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -319,7 +444,7 @@ def main() -> None:
     model_kit = load_model(
         args.model,
         max_kv_size=args.max_kv_size,
-        max_seq_nums=1,
+        max_seq_nums=args.max_seq_nums,
         trust_remote_code=args.trust_remote_code,
         prefill_step_size=args.prefill_step_size,
         distributed=True,

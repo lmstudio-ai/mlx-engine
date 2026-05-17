@@ -179,15 +179,11 @@ def load_model(
             raise ValueError(
                 "Distributed loading does not currently support KV cache quantization"
             )
-        if parallel_requested:
-            raise ValueError(
-                "Distributed loading does not support concurrent predictions; "
-                "set max_concurrent_predictions to 1"
-            )
         logger.info(
-            "Creating DistributedModelKit model_path=%s max_kv_size=%s prefill_step_size=%s distributed_group_provided=%s",
+            "Creating DistributedModelKit model_path=%s max_kv_size=%s max_seq_nums=%s prefill_step_size=%s distributed_group_provided=%s",
             model_path,
             max_kv_size,
+            max_seq_nums,
             prefill_step_size,
             distributed_group is not None,
         )
@@ -195,6 +191,7 @@ def load_model(
             model_path,
             prefill_step_size=prefill_step_size,
             max_kv_size=max_kv_size,
+            max_seq_nums=max_seq_nums,
             trust_remote_code=trust_remote_code,
             distributed_group=distributed_group,
         )
@@ -389,7 +386,10 @@ def create_generator(
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
-    if isinstance(model_kit, BatchedModelKit):
+    if isinstance(model_kit, BatchedModelKit) or (
+        isinstance(model_kit, DistributedModelKit)
+        and model_kit.uses_distributed_batching()
+    ):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
@@ -661,7 +661,7 @@ def _sequential_generation(
 
 
 def _batched_generation(
-    model_kit: BatchedModelKit,
+    model_kit: BatchedModelKit | DistributedModelKit,
     prompt_tokens: List[int],
     *,
     prompt_progress_reporter: Optional[PromptProgressReporter] = None,
@@ -683,12 +683,29 @@ def _batched_generation(
     num_draft_tokens: Optional[int] = None,
     request_id: str | None = None,
 ) -> Iterator[GenerationResult]:
+    is_distributed_batched = isinstance(model_kit, DistributedModelKit)
+    if is_distributed_batched:
+        if images_b64 is not None and len(images_b64) > 0:
+            raise ValueError("Distributed batched generation does not support images yet")
+        if speculative_decoding_toggle is True or num_draft_tokens is not None:
+            raise ValueError(
+                "Distributed batched generation does not support speculative decoding yet"
+            )
+        if json_schema is not None:
+            raise ValueError(
+                "Distributed batched generation does not support structured JSON output yet"
+            )
+        if seed is not None:
+            raise ValueError(
+                "Distributed batched generation does not support request-level seeds yet"
+            )
+
     # We need a request_id so that we can communicate with the batched backend
     if request_id is None or request_id == "":
         logger.warning(
             "Received a generation request without a request_id! Please send a request_id"
         )
-        request_id = uuid.uuid4()
+        request_id = str(uuid.uuid4())
 
     input_tokens = prompt_tokens
     if prompt_progress_reporter is None:
@@ -738,15 +755,32 @@ def _batched_generation(
         prompt_progress_reporter, emit_begin=True
     )
 
-    stream = model_kit.generate(
-        prompt_tokens=input_tokens,
-        request_id=request_id,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=logits_processors,
-        prompt_progress_callback=mlx_lm_callback,
-        top_logprobs=top_logprobs,
-    )
+    generate_kwargs = {
+        "prompt_tokens": input_tokens,
+        "request_id": request_id,
+        "max_tokens": max_tokens,
+        "sampler": sampler,
+        "logits_processors": logits_processors,
+        "prompt_progress_callback": mlx_lm_callback,
+        "top_logprobs": top_logprobs,
+    }
+    if is_distributed_batched:
+        generate_kwargs.update(
+            {
+                "sampling": {
+                    "temperature": temp,
+                    "topP": top_p,
+                    "topK": top_k,
+                    "minP": min_p,
+                    "seed": seed,
+                },
+                "repetition_penalty": repetition_penalty,
+                "repetition_context_size": repetition_context_size,
+                "min_tokens_to_keep": min_tokens_to_keep,
+            }
+        )
+
+    stream = model_kit.generate(**generate_kwargs)
 
     while True:
         try:
@@ -837,7 +871,10 @@ def stop_generation(
         logger.error("request_id cannot be empty in stop request")
         return
 
-    if isinstance(model_kit, BatchedModelKit):
+    if isinstance(model_kit, BatchedModelKit) or (
+        isinstance(model_kit, DistributedModelKit)
+        and model_kit.uses_distributed_batching()
+    ):
         model_kit.remove(request_id)
         return
 
