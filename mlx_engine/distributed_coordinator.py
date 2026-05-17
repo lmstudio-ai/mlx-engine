@@ -407,7 +407,7 @@ def main() -> None:
     parser.add_argument("--max-kv-size", type=int, default=4096)
     parser.add_argument("--prefill-step-size", type=int, default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--distributed-init-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--distributed-init-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--init-smoke-only", action="store_true")
     parser.add_argument("--max-seq-nums", type=int, default=1)
     args = parser.parse_args()
