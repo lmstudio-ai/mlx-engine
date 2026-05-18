@@ -42,13 +42,20 @@ class _HistoryProcessor:
         return _bump(logits, self.token)
 
 
-class _LastTokenProcessor:
+class _IntLastTokenProcessor:
     def __init__(self, token: int):
         self.token = token
         self.calls = []
+        self.last_token_calls = []
 
     def process_last_token(self, last_token, logits):
-        self.calls.append(last_token.tolist())
+        if not isinstance(last_token, int):
+            raise TypeError("last_token must be an int")
+        self.last_token_calls.append(last_token)
+        return _bump(logits, self.token)
+
+    def __call__(self, tokens, logits):
+        self.calls.append(tokens.tolist())
         return _bump(logits, self.token)
 
 
@@ -120,7 +127,7 @@ def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
     """Processors are per-row, and sampled token metadata follows decode-ahead."""
     model = _FakeModel()
     history_processor = _HistoryProcessor(token=3)
-    last_token_processor = _LastTokenProcessor(token=4)
+    second_history_processor = _HistoryProcessor(token=4)
     batch = GenerationBatch(
         model=model,
         uids=[10, 11],
@@ -131,7 +138,7 @@ def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
         max_tokens=[3, 3],
         top_logprobs_k=2,
         all_tokens=[[100], [200]],
-        logits_processors=[[history_processor], [last_token_processor]],
+        logits_processors=[[history_processor], [second_history_processor]],
         prefix_cache_save_states=_prefix_cache_save_states(2),
     )
 
@@ -142,7 +149,23 @@ def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
     assert [response.token for response in second] == [3, 4]
     assert [response.top_logprobs[0][0] for response in second] == [3, 4]
     assert history_processor.calls[0] == [100, 1]
-    assert last_token_processor.calls[0] == [2]
+    assert second_history_processor.calls[0] == [200, 2]
+
+
+def test_int_last_token_processor_uses_full_context_call():
+    """Structured processors do not receive MLX arrays via process_last_token."""
+    processor = _IntLastTokenProcessor(token=5)
+
+    logits = batcher._apply_logits_processors(
+        mx.zeros((1, 8), dtype=mx.float32),
+        [[100]],
+        [[processor]],
+        last_tokens=mx.array([2], dtype=mx.int32),
+    )
+
+    assert processor.calls == [[100, 2]]
+    assert processor.last_token_calls == []
+    assert mx.argmax(logits, axis=-1).tolist() == [5]
 
 
 def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():

@@ -31,6 +31,9 @@ from mlx_vlm.generate import (
     wired_limit,
 )
 from mlx_lm.models.cache import make_prompt_cache
+from mlx_engine.processors.repetition_penalty_processor import (
+    RepetitionPenaltyProcessor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +204,9 @@ def _apply_logits_processors(
         sample_logits = logits[i : i + 1]
         appended_last_token = False
         for processor in logits_processors[i]:
-            if last_tokens is not None and hasattr(processor, "process_last_token"):
+            if last_tokens is not None and isinstance(
+                processor, RepetitionPenaltyProcessor
+            ):
                 sample_logits = processor.process_last_token(
                     last_tokens[i : i + 1], sample_logits
                 )
