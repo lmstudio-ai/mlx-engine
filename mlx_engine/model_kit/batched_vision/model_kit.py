@@ -1,3 +1,4 @@
+import copy
 import gc
 import logging
 import sys
@@ -140,6 +141,15 @@ class BatchedVisionModelKit:
             self._model_path, eos_token_ids=self._get_eos_token_ids()
         )
         self.detokenizer = self.tokenizer.detokenizer
+
+    def _new_detokenizer(self):
+        """Reuse the expensive token map when the MLX detokenizer supports copying."""
+        try:
+            detokenizer = copy.copy(self.detokenizer)
+        except Exception:
+            detokenizer = self.tokenizer.detokenizer
+        detokenizer.reset()
+        return detokenizer
 
     def _ensure_channel_first_if_fast_processor(self) -> None:
         if self.model_type != "lfm2-vl":
@@ -370,8 +380,7 @@ class BatchedVisionModelKit:
             if self._prompt_cache_store.can_store_records()
             else None
         )
-        detokenizer = self.tokenizer.detokenizer
-        detokenizer.reset()
+        detokenizer = self._new_detokenizer()
 
         request.rqueue.put((prompt_progress, prompt_token_count))
         uid = batch_generator.insert(
