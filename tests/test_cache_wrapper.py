@@ -223,6 +223,26 @@ class TestCacheWrapper(unittest.TestCase):
         self.assertEqual(model.calls, expected_calls)
         self.assertEqual(result_tokens.tolist(), prompt[-1:].tolist())
 
+    def test_live_tokens_are_stored_as_plain_python_tokens(self):
+        session, _ = self._make_session(
+            cache_trimmable=False,
+            checkpoint_tail_tokens=100,
+        )
+        prompt = mx.array([1, 2, 3], dtype=mx.int32)
+
+        self._run_update_cache(session, prompt)
+        session.record_generated_token(4)
+        session.cache[0].advance(1)
+
+        result_tokens, reporter = self._run_update_cache(
+            session,
+            mx.array([1, 2, 3, 4, 5], dtype=mx.int32),
+        )
+
+        self.assertEqual(session._live_tokens, [1, 2, 3, 4, 5])
+        self.assertEqual(reporter.events[0]["cached_tokens"], 4)
+        self.assertEqual(result_tokens.tolist(), [5])
+
     def test_user_checkpoint_survives_assistant_snapshot_eviction_pressure(self):
         session, _ = self._make_session(
             cache_trimmable=False,
