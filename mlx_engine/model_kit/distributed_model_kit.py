@@ -269,8 +269,8 @@ class DistributedModelKit:
         )
         config_json = json.loads((self.model_path / "config.json").read_text())
         if "vision_config" in config_json:
-            raise ValueError(
-                "DistributedModelKit supports text-only models; vision models are not supported"
+            logger.info(
+                "DistributedModelKit detected vision_config; loading through the distributed text-only MLX-LM path"
             )
         self.model_type = config_json.get("model_type", None)
         logger.info(
