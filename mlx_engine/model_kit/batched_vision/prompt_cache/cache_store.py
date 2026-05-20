@@ -96,6 +96,7 @@ class VlmPromptCacheStore:
         self._restore_hit_tokens = 0
         self._restore_miss_tokens = 0
         self._cache_evictions = 0
+        self._cache_evicted_bytes = 0
         self._last_cache_usage_log_time = 0.0
         logger.info(
             "VLM prompt cache disk store: lifetime=model_load storage=temporary "
@@ -318,8 +319,8 @@ class VlmPromptCacheStore:
 
         finally:
             self._touch_longest_budget_fit_restore_chain(pending_save.prefix_chunks)
-            evicted_bytes = self._evict_if_needed()
-            self._maybe_log_cache_usage(evicted_bytes)
+            self._evict_if_needed()
+            self._maybe_log_cache_usage()
 
     def snapshot_stats(self) -> PromptCacheStoreStats:
         """Return best-effort diagnostics for smokes/debug output."""
@@ -466,17 +467,15 @@ class VlmPromptCacheStore:
                     self._touch_cache_entry(record_key)
                 return
 
-    def _evict_if_needed(self) -> int:
-        evicted_bytes = 0
+    def _evict_if_needed(self) -> None:
         while self._total_bytes > self._max_cache_store_bytes:
             key_to_evict = next(iter(self._lru_keys), None)
             if key_to_evict is None:
                 break
 
-            evicted_bytes += self._evict_key(key_to_evict)
-        return evicted_bytes
+            self._evict_key(key_to_evict)
 
-    def _maybe_log_cache_usage(self, evicted_bytes: int) -> None:
+    def _maybe_log_cache_usage(self) -> None:
         now = monotonic()
         if (
             self._last_cache_usage_log_time
@@ -488,10 +487,10 @@ class VlmPromptCacheStore:
         self._last_cache_usage_log_time = now
         logger.info(
             "VLM prompt cache disk usage: used_mib=%.1f cap_mib=%.1f "
-            "evicted_mib=%.1f records=%s lifetime=model_load",
+            "lifetime_evicted_mib=%.1f records=%s lifetime=model_load",
             self._total_bytes / _MIB_BYTES,
             self._max_cache_store_bytes / _MIB_BYTES,
-            evicted_bytes / _MIB_BYTES,
+            self._cache_evicted_bytes / _MIB_BYTES,
             len(self._record_metadata_by_key),
         )
 
@@ -508,12 +507,12 @@ class VlmPromptCacheStore:
             raise RuntimeError("prompt cache layout is not initialized")
         return self._layout
 
-    def _evict_key(self, key: str) -> int:
+    def _evict_key(self, key: str) -> None:
         evicted_bytes = self._key_sizes.pop(key, 0)
         self._total_bytes -= evicted_bytes
         self._lru_keys.pop(key, None)
         self._record_metadata_by_key.pop(key, None)
         self._cache_evictions += 1
+        self._cache_evicted_bytes += evicted_bytes
 
         self._blob_store.delete(key)
-        return evicted_bytes
