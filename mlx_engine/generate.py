@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from queue import Queue
 import uuid
 from mlx_engine.model_kit.batched_model_kit import (
     BatchedGenerationResponse,
@@ -67,6 +68,67 @@ logger = logging.getLogger(__name__)
 SequentialGenerationKit: TypeAlias = ModelKit | VisionModelKit
 BatchedGenerationKit: TypeAlias = BatchedModelKit | BatchedVisionModelKit
 LoadedModelKit: TypeAlias = SequentialGenerationKit | BatchedGenerationKit
+
+
+class _SequentialModelKitGenerator(Iterator[GenerationResult]):
+    def __init__(self, model_kit: ModelKit, prompt_tokens: List[int], kwargs: dict):
+        self._model_kit = model_kit
+        self._prompt_tokens = prompt_tokens
+        self._kwargs = kwargs
+        self._request_id = kwargs.get("request_id")
+        self._results: Queue[tuple[str, object]] = Queue()
+        self._closed = threading.Event()
+        self._started = False
+        self._exhausted = False
+        if self._request_id is not None and self._request_id != "":
+            self._model_kit.pending_requests[self._request_id] = threading.Event()
+
+    def __iter__(self) -> "_SequentialModelKitGenerator":
+        return self
+
+    def __next__(self) -> GenerationResult:
+        if self._closed.is_set() or self._exhausted:
+            raise StopIteration
+        if not self._started:
+            self._started = True
+            self._model_kit._executor.submit(self._generate)
+
+        kind, value = self._results.get()
+        if kind == "item":
+            return value  # type: ignore[return-value]
+        if kind == "error":
+            self._exhausted = True
+            raise value  # type: ignore[misc]
+        self._exhausted = True
+        raise StopIteration
+
+    def close(self) -> None:
+        self._closed.set()
+        if self._request_id is not None and self._request_id != "":
+            self._model_kit.cancel_request(self._request_id)
+            if not self._started:
+                self._model_kit.pending_requests.pop(self._request_id, None)
+
+    def _generate(self) -> None:
+        stream = None
+        try:
+            stream = _sequential_generation(
+                self._model_kit,
+                self._prompt_tokens,
+                **self._kwargs,
+            )
+            for item in stream:
+                if self._closed.is_set():
+                    break
+                self._results.put(("item", item))
+                if self._closed.is_set():
+                    break
+        except BaseException as exc:
+            self._results.put(("error", exc))
+        finally:
+            if stream is not None:
+                stream.close()
+            self._results.put(("done", None))
 
 
 def _handle_stop_string_detected(
@@ -191,6 +253,7 @@ def load_model(
             model_path,
             prefill_step_size=prefill_step_size,
             vocab_only=True,
+            seed=seed,
         )
     elif "vision_config" in config_json:
         if any([kv_bits, kv_group_size, quantized_kv_start]):
@@ -238,11 +301,10 @@ def load_model(
                 return False
             return True
 
-        batchable = is_batchable()
         # If max_seq_nums is set to 1, use ModelKit instead of BatchedModelKit. This gives users an escape hatch,
         # which they could use to enable spec decoding. We can remove this additional restriction once we add
         # spec decoding support to the batched backend
-        use_batched_kit = batchable and max_seq_nums != 1
+        use_batched_kit = max_seq_nums != 1 and is_batchable()
 
         if use_batched_kit:
             batched_max_seq_nums = 4 if max_seq_nums is None else max_seq_nums
@@ -262,8 +324,10 @@ def load_model(
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
+                seed=seed,
             )
-    sanitize_eos_tokens(model_kit)
+    if type(model_kit) is not ModelKit:
+        sanitize_eos_tokens(model_kit)
     model_kit.start()
     return model_kit
 
@@ -353,6 +417,8 @@ def create_generator(
     """
     if isinstance(model_kit, (BatchedModelKit, BatchedVisionModelKit)):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
+    if type(model_kit) is ModelKit:
+        return _SequentialModelKitGenerator(model_kit, prompt_tokens, kwargs)
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
 
@@ -367,15 +433,17 @@ def _sequential_gen_abort_handler(
     or during generation.
     """
 
-    cancel_event = threading.Event()
     should_track_request = True
     if request_id is None or request_id == "":
+        cancel_event = threading.Event()
         logger.warning(
             "request_id missing for sequential generation; cancellation by id is disabled"
         )
         should_track_request = False
     else:
-        model_kit.pending_requests[request_id] = cancel_event
+        cancel_event = model_kit.pending_requests.setdefault(
+            request_id, threading.Event()
+        )
 
     try:
         # Try to acquire lock, checking for cancellation while waiting

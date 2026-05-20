@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
@@ -19,6 +20,8 @@ from mlx_engine.model_kit.vision_add_ons.qwen3_5_moe import Qwen3_5MoEVisionAddO
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
+from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
+from mlx_engine.utils.set_seed import set_seed
 import threading
 
 logger = logging.getLogger(__name__)
@@ -129,28 +132,46 @@ class ModelKit:
         kv_bits: Optional[int] = None,
         kv_group_size: Optional[int] = None,
         quantized_kv_start: Optional[int] = None,
+        seed: Optional[int] = None,
     ):
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
         self._shutdown = threading.Event()
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="mlx-engine-sequential-generation",
+        )
         # Public because the generation loop in generate.py reads this from the model_kit instance
         self.prefill_step_size = prefill_step_size
-        if vocab_only:
-            self._vocab_only_init(model_path)
-        else:
-            self._full_model_init(
-                model_path,
-                prefill_step_size,
-                max_kv_size=max_kv_size,
-                kv_bits=kv_bits,
-                kv_group_size=kv_group_size,
-                quantized_kv_start=quantized_kv_start,
-            )
+
+        def initialize() -> None:
+            set_seed(seed)
+            if vocab_only:
+                self._vocab_only_init(model_path)
+            else:
+                self._full_model_init(
+                    model_path,
+                    prefill_step_size,
+                    max_kv_size=max_kv_size,
+                    kv_bits=kv_bits,
+                    kv_group_size=kv_group_size,
+                    quantized_kv_start=quantized_kv_start,
+                )
+            sanitize_eos_tokens(self)
+
+        try:
+            self._executor.submit(initialize).result()
+        except BaseException:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            raise
 
     def start(self):
-        mx.synchronize()
+        self._executor.submit(mx.synchronize).result()
 
     def tokenize(self, prompt: str) -> List[int]:
+        return self._executor.submit(self._tokenize, prompt).result()
+
+    def _tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
         if isinstance(ids, int):
             return [ids]
@@ -176,7 +197,7 @@ class ModelKit:
                     "Received empty prompt. Generation quality will likely be poor"
                 )
                 # Models expect some sort of input, so add whitespace
-                prompt_tokens = self.tokenize(" ")
+                prompt_tokens = self._tokenize(" ")
             return process_prompt_text_only(
                 mx.array(prompt_tokens),
                 self.cache_wrapper,
@@ -220,6 +241,9 @@ class ModelKit:
         return model_arch in ModelKit.VISION_ADD_ON_MAP
 
     def is_draft_model_compatible(self, path: str | Path) -> bool:
+        return self._executor.submit(self._is_draft_model_compatible, path).result()
+
+    def _is_draft_model_compatible(self, path: str | Path) -> bool:
         path = Path(path)
         if self.tokenizer is None:
             logger.warning(
@@ -235,17 +259,23 @@ class ModelKit:
         return True
 
     def load_draft_model(self, path: str | Path) -> None:
+        self._executor.submit(self._load_draft_model, path).result()
+
+    def _load_draft_model(self, path: str | Path) -> None:
         logger.info(f"Loading draft model from {path}...")
         path = Path(path)
         if self.model is None:
             raise ValueError("Main model must be loaded before loading a draft model")
-        if not self.is_draft_model_compatible(path):
+        if not self._is_draft_model_compatible(path):
             raise ValueError("Draft model is not compatible with main model")
         self.draft_model, _ = mlx_lm.utils.load(path)
         self.cache_wrapper.set_draft_model(self.draft_model)
         logger.info("Draft model loaded")
 
     def unload_draft_model(self) -> None:
+        self._executor.submit(self._unload_draft_model).result()
+
+    def _unload_draft_model(self) -> None:
         if self.draft_model is None:
             logger.info("No loaded draft model to unload")
         else:
@@ -262,7 +292,10 @@ class ModelKit:
         return False
 
     def shutdown(self) -> None:
+        if self._shutdown.is_set():
+            return
         self._shutdown.set()
+        self._executor.shutdown(wait=True)
 
-    def is_shutdown(self) -> None:
+    def is_shutdown(self) -> bool:
         return self._shutdown.is_set()
