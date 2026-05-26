@@ -37,6 +37,8 @@ def _assert_batched_vlm_reporter_events(reporter: RecordingReporter) -> None:
     finish_event = reporter.events[-1]
     assert begin_event["type"] == "begin"
     assert finish_event["type"] == "finish"
+    assert begin_event["prefill_tokens_processed"] == 0
+    assert 0 <= begin_event["cached_tokens"] <= begin_event["total_prompt_tokens"]
 
     progress_values = [
         begin_event["prefill_tokens_processed"],
@@ -48,7 +50,7 @@ def _assert_batched_vlm_reporter_events(reporter: RecordingReporter) -> None:
         finish_event["prefill_tokens_processed"],
     ]
     assert progress_values == sorted(progress_values)
-    assert finish_event["prefill_tokens_processed"] >= begin_event["cached_tokens"]
+    assert finish_event["prefill_tokens_processed"] >= 0
 
 
 def _expected_cached_text_prompt_tokens(model_kit, prompt: str) -> set[int]:
@@ -62,6 +64,17 @@ def _assert_cached_text_prompt_reused(
 ) -> None:
     assert begin_event["cached_tokens"] >= CACHING_TEST_PREFILL_STEP_SIZE
     assert begin_event["cached_tokens"] <= max(expected_cached_tokens)
+
+
+def _assert_cached_follow_up_prefill_is_small(
+    begin_event: dict,
+    finish_event: dict,
+) -> None:
+    assert finish_event["type"] == "finish"
+    assert finish_event["prefill_tokens_processed"] == (
+        begin_event["total_prompt_tokens"] - begin_event["cached_tokens"]
+    )
+    assert finish_event["prefill_tokens_processed"] <= CACHING_TEST_PREFILL_STEP_SIZE
 
 
 def _assert_mentions_franklin(text: str) -> None:
@@ -725,7 +738,7 @@ Reply with exactly READY and nothing else.<end_of_turn>
 
     @pytest.mark.heavy
     def test_gemma4_text_only_generation_caching(self):
-        """Ensure unified-arch Gemma 4 reuses cross-prompt cache for text-only turns."""
+        """Gemma 4 VLM progress reports cached and uncached prompt tokens."""
         model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
         model_path = model_getter(model_name)
         processor = AutoProcessor.from_pretrained(model_path)
@@ -779,10 +792,7 @@ Reply with exactly READY and nothing else.<end_of_turn>
 
         prompt = render_prompt(first_conversation)
         generated_text, reporter = generate_text(prompt)
-        first_update_events = [
-            event for event in reporter.events if event["type"] == "update"
-        ]
-        assert len(first_update_events) > 0
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
@@ -813,14 +823,12 @@ Reply with exactly READY and nothing else.<end_of_turn>
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
 
         follow_up_text, reporter = generate_text(prompt)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
         finish_event = reporter.events[-1]
-        assert (
-            finish_event["prefill_tokens_processed"] - begin_event["cached_tokens"]
-            <= CACHING_TEST_PREFILL_STEP_SIZE
-        )
+        _assert_cached_follow_up_prefill_is_small(begin_event, finish_event)
         assert "silas" in follow_up_text.lower()
 
     @pytest.mark.heavy
@@ -960,6 +968,8 @@ Reply with exactly READY and nothing else.<end_of_turn>
         assert begin_event["cached_tokens"] >= CACHING_TEST_PREFILL_STEP_SIZE
         assert begin_event["cached_tokens"] <= first_total_prompt_tokens
         assert begin_event["cached_tokens"] < begin_event["total_prompt_tokens"]
+        finish_event = reporter.events[-1]
+        _assert_cached_follow_up_prefill_is_small(begin_event, finish_event)
         assert control_word.lower() in follow_up_text.lower()
 
     # TODO(will): Parameterize and de-dup
@@ -1099,10 +1109,7 @@ Reply with exactly READY and nothing else.<end_of_turn>
         assert begin_event["type"] == "begin"
         _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
         finish_event = reporter.events[-1]
-        assert (
-            finish_event["prefill_tokens_processed"] - begin_event["cached_tokens"]
-            <= CACHING_TEST_PREFILL_STEP_SIZE
-        )
+        _assert_cached_follow_up_prefill_is_small(begin_event, finish_event)
         _assert_mentions_franklin(generated_text)
 
     def test_gemma3n_vision_long_prompt_progress_reported(self):

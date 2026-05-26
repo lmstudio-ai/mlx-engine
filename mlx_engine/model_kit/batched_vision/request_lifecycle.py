@@ -17,6 +17,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
 from mlx_engine.model_kit.batched_vision.prompt_inputs import PreparedPrompt
+from mlx_engine.utils.prompt_progress_events import PromptProgressEvent
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ class ActiveRequest:
     top_logprobs: int
     request_id: str
     image_spans: list[PromptImageSpan]
+    cached_tokens: int
+    prompt_progress_finished: bool = False
 
 
 @dataclass
@@ -208,10 +211,21 @@ class GenerationThreadController:
         prompt_responses, generation_responses = state.batch_generator.next()
         for response in prompt_responses:
             result = state.active.get(response.uid)
-            if result is None:
+            if result is None or result.prompt_progress_finished:
                 continue
             processed, total = response.progress
-            result.rqueue.put((min(processed, total), total))
+            total_prompt_tokens = max(0, total - 1)
+            processed = min(processed, total_prompt_tokens)
+            prefill_tokens_processed = max(0, processed - result.cached_tokens)
+            is_final = processed >= total_prompt_tokens
+            if is_final:
+                result.prompt_progress_finished = True
+            result.rqueue.put(
+                PromptProgressEvent(
+                    prefill_tokens_processed=prefill_tokens_processed,
+                    is_final=is_final,
+                )
+            )
 
         for response in generation_responses:
             result = state.active.get(response.uid)

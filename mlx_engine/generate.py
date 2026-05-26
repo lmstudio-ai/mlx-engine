@@ -718,10 +718,6 @@ def _batched_generation(
     stop_string_processor = create_stop_string_processor(stop_strings, tokenizer)
     text = ""
 
-    mlx_lm_callback = BatchedMlxLmReporterAdapter(
-        prompt_progress_reporter, emit_begin=True
-    )
-
     logits_processors = setup_repetition_logits_processors(
         repetition_penalty,
         repetition_context_size,
@@ -745,12 +741,15 @@ def _batched_generation(
             request_id=request_id,
             images_b64=images_b64,
             max_tokens=max_tokens,
-            prompt_progress_callback=mlx_lm_callback,
+            prompt_progress_reporter=prompt_progress_reporter,
             top_logprobs=top_logprobs,
             sampler=sampler,
             logits_processors=logits_processors,
         )
     else:
+        prompt_progress_callback = BatchedMlxLmReporterAdapter(
+            prompt_progress_reporter, emit_begin=True
+        )
         # Add outlines logits processor if json_schema is provided
         if json_schema is not None:
             logits_processors.append(
@@ -767,7 +766,7 @@ def _batched_generation(
             max_tokens=max_tokens,
             sampler=sampler,
             logits_processors=logits_processors,
-            prompt_progress_callback=mlx_lm_callback,
+            prompt_progress_callback=prompt_progress_callback,
             top_logprobs=top_logprobs,
         )
 

@@ -12,6 +12,7 @@ from mlx_engine.model_kit.batched_vision.request_lifecycle import (
     GenerationThreadState,
     PreparedInsert,
 )
+from mlx_engine.utils.prompt_progress_events import PromptProgressEvent
 
 
 def _sampler(logprobs):
@@ -56,13 +57,16 @@ class _FakeBatchGenerator:
         self.closed = True
 
 
-def _active_request(request_id: str = "request") -> ActiveRequest:
+def _active_request(
+    request_id: str = "request", cached_tokens: int = 0
+) -> ActiveRequest:
     return ActiveRequest(
         rqueue=Queue(),
         detokenizer=object(),
         top_logprobs=0,
         request_id=request_id,
         image_spans=[],
+        cached_tokens=cached_tokens,
     )
 
 
@@ -196,7 +200,10 @@ def test_request_lifecycle_steps_generation_and_stores_finished_hot_cache():
 
     controller.step_generation()
 
-    assert request_state.rqueue.get_nowait() == (5, 5)
+    progress_event = request_state.rqueue.get_nowait()
+    assert isinstance(progress_event, PromptProgressEvent)
+    assert progress_event.prefill_tokens_processed == 4
+    assert progress_event.is_final is True
     assert request_state.rqueue.get_nowait() == "token:42"
     assert request_state.rqueue.get_nowait() is None
     assert finished == [(request_state, generation_response)]

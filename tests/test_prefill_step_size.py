@@ -59,9 +59,9 @@ def _expected_batched_prefill_updates(
 def _expected_batched_vision_prefill_updates(
     num_prompt_tokens: int, prefill_step_size: int
 ) -> int:
-    """Compute the expected number of update events from BatchedVisionModelKit."""
+    """Compute expected VLM updates; begin and final progress are separate events."""
     prefillable_tokens = num_prompt_tokens - 1
-    return math.ceil(prefillable_tokens / prefill_step_size)
+    return math.ceil(prefillable_tokens / prefill_step_size) - 1
 
 
 def _expected_sequential_prefill_updates(

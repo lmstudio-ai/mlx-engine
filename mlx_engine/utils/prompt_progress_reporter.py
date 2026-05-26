@@ -254,7 +254,7 @@ class BatchedMlxLmReporterAdapter:
             if self._emit_begin:
                 should_continue = self._reporter.begin(
                     is_draft=False,
-                    cached_tokens=processed_tokens,
+                    cached_tokens=0,
                     total_prompt_tokens=total_tokens,
                     prefill_tokens_processed=processed_tokens,
                 )

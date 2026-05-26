@@ -48,6 +48,11 @@ from mlx_engine.model_kit.batched_vision.request_lifecycle import (
 )
 from mlx_engine.utils.set_seed import set_seed
 from mlx_engine.utils.token import Token
+from mlx_engine.utils.prompt_progress_events import (
+    PromptProgressBeginEvent,
+    PromptProgressEvent,
+)
+from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.vision_model_kit._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
@@ -191,7 +196,7 @@ class BatchedVisionModelKit:
         prompt_tokens: list[int],
         request_id: str,
         images_b64: list[str] | None,
-        prompt_progress_callback,
+        prompt_progress_reporter: PromptProgressReporter | None,
         top_logprobs: int,
         max_tokens: int,
         sampler: Callable[[mx.array], mx.array],
@@ -216,6 +221,26 @@ class BatchedVisionModelKit:
             )
         )
 
+        def report_prompt_progress(response) -> bool:
+            if prompt_progress_reporter is None:
+                return True
+            if isinstance(response, PromptProgressBeginEvent):
+                return prompt_progress_reporter.begin(
+                    is_draft=False,
+                    cached_tokens=response.cached_tokens,
+                    total_prompt_tokens=response.total_prompt_tokens,
+                    prefill_tokens_processed=response.prefill_tokens_processed,
+                )
+            if response.is_final:
+                return prompt_progress_reporter.finish(
+                    is_draft=False,
+                    prefill_tokens_processed=response.prefill_tokens_processed,
+                )
+            return prompt_progress_reporter.update(
+                is_draft=False,
+                prefill_tokens_processed=response.prefill_tokens_processed,
+            )
+
         def _inner() -> Iterable[BatchedGenerationResponse]:
             while True:
                 response = response_queue.get()
@@ -223,16 +248,17 @@ class BatchedVisionModelKit:
                     break
                 if isinstance(response, Exception):
                     raise response
-                if isinstance(response, tuple):
-                    if prompt_progress_callback is not None:
-                        try:
-                            should_continue = prompt_progress_callback(*response)
-                        except Exception:
-                            self.remove(request_id)
-                            raise
-                        if should_continue is False:
-                            self.remove(request_id)
-                            raise RequestCancelled()
+                if isinstance(
+                    response, (PromptProgressBeginEvent, PromptProgressEvent)
+                ):
+                    try:
+                        should_continue = report_prompt_progress(response)
+                    except Exception:
+                        self.remove(request_id)
+                        raise
+                    if should_continue is False:
+                        self.remove(request_id)
+                        raise RequestCancelled()
                     continue
                 yield response
 
@@ -344,7 +370,7 @@ class BatchedVisionModelKit:
         cache = None
         all_tokens = []
         rope_deltas = None
-        prompt_progress = 0
+        cached_prefix_len = 0
         if restored is not None:
             prompt_input_ids = full_prompt_input_ids[restored.cached_prefix_len :]
             prompt_kwargs = build_cached_prompt_kwargs(
@@ -354,7 +380,7 @@ class BatchedVisionModelKit:
                 restored.rope_deltas,
             )
             inputs_embeds = prompt_kwargs.pop("inputs_embeds")
-            prompt_progress = restored.cached_prefix_len
+            cached_prefix_len = restored.cached_prefix_len
             cache = restored.prompt_cache
             all_tokens = full_prompt_input_ids[: restored.cached_prefix_len]
             rope_deltas = restored.rope_deltas
@@ -366,7 +392,7 @@ class BatchedVisionModelKit:
             # One-shot prefill skips exact intermediate prompt boundaries.
             prompt_progress_for_cache_chunks = prompt_token_count
         else:
-            prompt_progress_for_cache_chunks = prompt_progress
+            prompt_progress_for_cache_chunks = cached_prefix_len
         prefix_cache_chunks = build_prefix_cache_chunks(
             full_prompt_input_ids,
             prepared_prompt.image_spans,
@@ -382,7 +408,15 @@ class BatchedVisionModelKit:
         )
         detokenizer = self._new_detokenizer()
 
-        request.rqueue.put((prompt_progress, prompt_token_count))
+        total_prompt_tokens = max(0, prompt_token_count - 1)
+        cached_tokens = min(cached_prefix_len, total_prompt_tokens)
+        request.rqueue.put(
+            PromptProgressBeginEvent(
+                cached_tokens=cached_tokens,
+                total_prompt_tokens=total_prompt_tokens,
+                prefill_tokens_processed=0,
+            )
+        )
         uid = batch_generator.insert(
             prompt_input_ids,
             inputs_embeds=inputs_embeds,
@@ -406,6 +440,7 @@ class BatchedVisionModelKit:
             top_logprobs=request.top_logprobs,
             request_id=request.request_id,
             image_spans=prepared_prompt.image_spans,
+            cached_tokens=cached_tokens,
         )
 
     def _emit_response(
