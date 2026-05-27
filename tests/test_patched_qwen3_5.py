@@ -2,6 +2,7 @@
 
 import gc
 from pathlib import Path
+import threading
 import time
 
 import pytest
@@ -817,6 +818,126 @@ def test_vlm_qwen3_5_generation_trace_matches_mlx_vlm_same_inputs():
                 f"{name} generation step {step} changed mlx-vlm logits "
                 f"(max diff {diff:.6f})."
             )
+
+
+def test_vlm_qwen3_5_continuous_batching_matches_independent_requests():
+    """Mixed text/image batching must not change request-local token traces.
+
+    The trace is the emitted token IDs plus each selected token's normalized
+    logprob. We intentionally do not compare full logits here: co-resident
+    text/image rows can use a different batched numerical path. Non-selected
+    vocab logits may drift, while the emitted tokens and their normalized
+    logprobs are the stable behavioral trace this test protects.
+    """
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    image_b64 = read_image_b64(Path(__file__).parent.parent / "demo-data/toucan.jpeg")
+    max_tokens = 4
+    cases = [
+        (
+            "text",
+            "<|im_start|>user\n"
+            "Tell me one short sentence.<|im_end|>\n"
+            "<|im_start|>assistant\n",
+            None,
+        ),
+        (
+            "image",
+            "<|im_start|>user\n"
+            "<|vision_start|><|image_pad|><|vision_end|>"
+            "What is in the image?<|im_end|>\n"
+            "<|im_start|>assistant\n",
+            image_b64,
+        ),
+    ]
+
+    def trace_responses(responses):
+        return [(response.token, response.token_logprob) for response in responses]
+
+    def run_request(model_kit, name: str, prompt: str, image: str | None):
+        processor = _CaptureLogitsProcessor()
+        responses = list(
+            model_kit.generate(
+                prompt_tokens=tokenize(model_kit, prompt),
+                request_id=name,
+                images_b64=None if image is None else [image],
+                prompt_progress_reporter=None,
+                top_logprobs=0,
+                max_tokens=max_tokens,
+                sampler=_greedy,
+                logits_processors=[processor],
+            )
+        )
+        assert len(processor.logits) == max_tokens + 1
+        return trace_responses(responses)
+
+    independent_traces = {}
+    for name, prompt, image in cases:
+        model_kit = load_model(
+            model_path=model_path,
+            max_kv_size=4096,
+            max_seq_nums=1,
+            trust_remote_code=True,
+        )
+        assert isinstance(model_kit, BatchedVisionModelKit)
+        try:
+            independent_traces[name] = run_request(model_kit, name, prompt, image)
+        finally:
+            unload(model_kit)
+
+    model_kit = load_model(
+        model_path=model_path,
+        max_kv_size=4096,
+        max_seq_nums=2,
+        trust_remote_code=True,
+    )
+    assert isinstance(model_kit, BatchedVisionModelKit)
+    try:
+        streams = []
+        processors = {}
+        for name, prompt, image in cases:
+            processor = _CaptureLogitsProcessor()
+            processors[name] = processor
+            streams.append(
+                (
+                    name,
+                    model_kit.generate(
+                        prompt_tokens=tokenize(model_kit, prompt),
+                        request_id=name,
+                        images_b64=None if image is None else [image],
+                        prompt_progress_reporter=None,
+                        top_logprobs=0,
+                        max_tokens=max_tokens,
+                        sampler=_greedy,
+                        logits_processors=[processor],
+                    ),
+                )
+            )
+
+        concurrent_traces = {}
+        errors = []
+
+        def consume(name: str, stream) -> None:
+            try:
+                concurrent_traces[name] = trace_responses(list(stream))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=consume, args=(name, stream))
+            for name, stream in streams
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if errors:
+            raise errors[0]
+    finally:
+        unload(model_kit)
+
+    for name, _, _ in cases:
+        assert concurrent_traces[name] == independent_traces[name]
+        assert len(processors[name].logits) == max_tokens + 1
 
 
 def test_vlm_qwen3_5_text_prompt_cache_restore_matches_original_vlm():
