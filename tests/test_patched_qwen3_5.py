@@ -1,8 +1,12 @@
 """Tests for the Qwen3.5 monkey patches."""
 
+from pathlib import Path
+import time
+
 import pytest
 
 import mlx.core as mx
+from mlx_engine.generate import load_model, tokenize, unload
 from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
@@ -10,6 +14,7 @@ import mlx_lm.models.qwen3_5 as qwen3_5_module
 from transformers import AutoTokenizer
 
 from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
+from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     PreparedPrompt,
     build_cached_prompt_kwargs,
@@ -27,6 +32,7 @@ from tests.patched_model_test_utils import (
     load_vlm,
     max_abs_diff,
 )
+from tests.shared import RecordingReporter, read_image_b64
 
 REAL_MODEL_CASES = [
     pytest.param("lmstudio-community/Qwen3.5-2B-MLX-4bit", id="dense"),
@@ -570,6 +576,98 @@ def test_vlm_qwen3_5_decode_rope_deltas_kw_syncs_state():
         "VLM Qwen3.5 decode ignored kwarg rope_deltas after state was cleared "
         f"(max diff {diff:.6f})."
     )
+
+
+def test_vlm_qwen3_5_image_prompt_restore_matches_same_schedule():
+    """High-level image restores must match a fresh cache with the same schedule."""
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    model_kit = load_model(
+        model_path=model_path,
+        max_kv_size=4096,
+        trust_remote_code=True,
+    )
+    assert isinstance(model_kit, BatchedVisionModelKit)
+
+    class CaptureLogitsProcessor:
+        def __init__(self):
+            self.logits = []
+
+        def __call__(self, _tokens, logits):
+            captured = mx.array(logits)
+            mx.eval(captured)
+            self.logits.append(captured)
+            return logits
+
+    def greedy(logprobs):
+        return mx.argmax(logprobs, axis=-1).astype(mx.int32)
+
+    def run_request(request_id: str):
+        processor = CaptureLogitsProcessor()
+        reporter = RecordingReporter()
+        stream = model_kit.generate(
+            prompt_tokens=prompt_tokens,
+            request_id=request_id,
+            images_b64=[image_b64],
+            prompt_progress_reporter=reporter,
+            top_logprobs=0,
+            max_tokens=1,
+            sampler=greedy,
+            logits_processors=[processor],
+        )
+        responses = list(stream)
+        assert len(responses) == 1
+        # Prompt-final logits plus the first decode-ahead logits.
+        assert len(processor.logits) == 2
+        return processor.logits, reporter, responses[0]
+
+    def wait_for_disk_cache_records():
+        for _ in range(100):
+            stats = model_kit._prompt_cache_store.snapshot_stats()
+            if stats.entry_count > 0 and any(
+                stats.chunk_records_available_by_key.values()
+            ):
+                return
+            time.sleep(0.05)
+        raise AssertionError("Timed out waiting for VLM prompt cache records.")
+
+    try:
+        image_b64 = read_image_b64(
+            Path(__file__).parent.parent / "demo-data" / "toucan.jpeg"
+        )
+        prompt = (
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n"
+            "<|vision_start|><|image_pad|><|vision_end|>"
+            + ("Remember the word meridian. " * 330)
+            + "What is in the image?<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        prompt_tokens = tokenize(model_kit, prompt)
+
+        # The prompt is intentionally longer than the default VLM prefill step
+        # size. The first request computes and saves the 2048-token prefix, then
+        # computes the suffix. The second request restores that same prefix from
+        # disk, then computes the same suffix. Comparing those two paths avoids
+        # false failures from comparing one-shot prefill against restored-prefix
+        # prefill, which is a different numerical schedule for Qwen3.5.
+        first_logits, first_reporter, first_response = run_request("fresh")
+        assert first_reporter.events[0]["cached_tokens"] == 0
+        wait_for_disk_cache_records()
+
+        restored_logits, restored_reporter, restored_response = run_request("restored")
+        assert restored_reporter.events[0]["cached_tokens"] == 2048
+        assert restored_response.token == first_response.token
+        assert restored_response.token_logprob == first_response.token_logprob
+
+        for actual, expected in zip(restored_logits, first_logits, strict=True):
+            diff = max_abs_diff(actual, expected)
+            assert diff == 0.0, (
+                "VLM Qwen3.5 image prompt restore changed same-schedule logits "
+                f"(max diff {diff:.6f})."
+            )
+    finally:
+        unload(model_kit)
 
 
 def test_vlm_qwen3_5_text_prompt_cache_restore_matches_original_vlm():
