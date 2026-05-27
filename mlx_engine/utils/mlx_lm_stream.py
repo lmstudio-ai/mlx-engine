@@ -1,9 +1,12 @@
+import importlib
 import logging
 import threading
 from typing import Any
 
 import mlx.core as mx
-import mlx_lm.generate as mlx_lm_generate
+
+
+mlx_lm_generate = importlib.import_module("mlx_lm.generate")
 
 
 logger = logging.getLogger(__name__)
