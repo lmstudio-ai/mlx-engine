@@ -24,7 +24,10 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 )
 from mlx_engine.utils.disable_hf_download import _original_snapshot_download
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
-from mlx_engine.utils.mlx_lm_stream import prepare_mlx_lm_generation_stream
+from mlx_engine.utils.mlx_lm_stream import (
+    log_mlx_stream_state,
+    prepare_mlx_lm_generation_stream,
+)
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.utils.token import Token
 
@@ -84,6 +87,11 @@ def _instrumented_tensor_sharded_load(
     rank = tensor_group.rank()
     size = tensor_group.size()
     started_at = time.monotonic()
+    log_mlx_stream_state(
+        reason="sharded-load-start",
+        distributed_group=tensor_group,
+        details=f"repo={repo}",
+    )
 
     logger.info("[sharded_load] rank %s/%s resolving metadata files", rank, size)
     model_path = _download(
@@ -166,6 +174,10 @@ def _instrumented_tensor_sharded_load(
         time.monotonic() - started_at,
     )
 
+    log_mlx_stream_state(
+        reason="sharded-load-before-parameter-eval",
+        distributed_group=tensor_group,
+    )
     logger.info("[sharded_load] rank %s/%s evaluating model parameters", rank, size)
     _evaluate_model_parameters_with_trace(model, rank, size, started_at)
     logger.info(
@@ -174,14 +186,26 @@ def _instrumented_tensor_sharded_load(
         size,
         time.monotonic() - started_at,
     )
+    log_mlx_stream_state(
+        reason="sharded-load-after-parameter-eval",
+        distributed_group=tensor_group,
+    )
 
     logger.info("[sharded_load] rank %s/%s synchronizing all_sum", rank, size)
+    log_mlx_stream_state(
+        reason="sharded-load-before-all-sum",
+        distributed_group=tensor_group,
+    )
     mx.eval(mx.distributed.all_sum(mx.array(1.0), stream=mx.cpu))
     logger.info(
         "[sharded_load] rank %s/%s all_sum synchronized after %.1fs",
         rank,
         size,
         time.monotonic() - started_at,
+    )
+    log_mlx_stream_state(
+        reason="sharded-load-after-all-sum",
+        distributed_group=tensor_group,
     )
 
     return model, tokenizer
@@ -295,10 +319,26 @@ class DistributedModelKit:
             self.group.rank(),
             self.group.size(),
         )
+        sharded_load_stream = prepare_mlx_lm_generation_stream(
+            reason="distributed-sharded-load",
+            distributed_group=self.group,
+            use_default_stream=True,
+        )
+        log_mlx_stream_state(
+            reason="distributed-model-load-start",
+            distributed_group=self.group,
+            details=f"model_path={self.model_path}",
+        )
         sharded_load_started_at = time.monotonic()
-        self.model, self.tokenizer = _instrumented_tensor_sharded_load(
-            self.model_path,
-            tensor_group=self.group,
+        with mx.stream(sharded_load_stream):
+            self.model, self.tokenizer = _instrumented_tensor_sharded_load(
+                self.model_path,
+                tensor_group=self.group,
+            )
+        log_mlx_stream_state(
+            reason="distributed-model-load-finished",
+            distributed_group=self.group,
+            details=f"model_path={self.model_path}",
         )
         logger.info(
             "sharded_load returned on rank %s/%s after %.1fs",
@@ -333,12 +373,20 @@ class DistributedModelKit:
             ) from caught_error
 
     def start(self):
+        log_mlx_stream_state(
+            reason="distributed-model-start-before-synchronize",
+            distributed_group=self.group,
+        )
         logger.info(
             "Synchronizing distributed model start on rank %s/%s",
             self.group.rank(),
             self.group.size(),
         )
         mx.synchronize()
+        log_mlx_stream_state(
+            reason="distributed-model-start-after-synchronize",
+            distributed_group=self.group,
+        )
         if self.uses_distributed_batching():
             seed = mx.distributed.all_sum(mx.random.state[0]).view(mx.uint64).item()
             mx.random.seed(seed)

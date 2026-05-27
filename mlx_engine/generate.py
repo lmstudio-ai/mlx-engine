@@ -60,6 +60,7 @@ from mlx_engine.utils.generation_helpers import (
 )
 from mlx_engine.utils.mlx_lm_stream import (
     log_mlx_generation_exception,
+    log_mlx_stream_state,
     prepare_mlx_lm_generation_stream,
 )
 
@@ -577,11 +578,24 @@ def _sequential_generation(
 
         is_distributed_model = isinstance(model_kit, DistributedModelKit)
         distributed_group = model_kit.group if is_distributed_model else None
+        generation_details = (
+            f"mode=sequential distributed={is_distributed_model} "
+            f"prompt_tokens={len(prompt_tokens)} input_tokens={len(input_tokens)} "
+            f"max_tokens={max_tokens} prefill_step_size={model_kit.prefill_step_size} "
+            f"max_kv_size={getattr(model_kit, 'max_kv_size', None)} "
+            f"cross_prompt_cache={model_kit.is_cross_prompt_cache_active()}"
+        )
         prepare_mlx_lm_generation_stream(
             reason="sequential-generation",
             request_id=request_id,
             distributed_group=distributed_group,
             use_default_stream=is_distributed_model,
+        )
+        log_mlx_stream_state(
+            reason="before-stream-generate",
+            request_id=request_id,
+            distributed_group=distributed_group,
+            details=generation_details,
         )
 
         stream = stream_generate(
@@ -595,10 +609,35 @@ def _sequential_generation(
             prefill_step_size=model_kit.prefill_step_size,
             **generate_args,
         )
+        log_mlx_stream_state(
+            reason="after-stream-generate-created",
+            request_id=request_id,
+            distributed_group=distributed_group,
+            details=generation_details,
+        )
 
+        received_first_generation_result = False
         while not model_kit.is_shutdown() and not cancel_event.is_set():
             try:
+                if not received_first_generation_result:
+                    log_mlx_stream_state(
+                        reason="before-first-generation-next",
+                        request_id=request_id,
+                        distributed_group=distributed_group,
+                        details=generation_details,
+                    )
                 generation_result = next(stream)
+                if not received_first_generation_result:
+                    received_first_generation_result = True
+                    log_mlx_stream_state(
+                        reason="after-first-generation-next",
+                        request_id=request_id,
+                        distributed_group=distributed_group,
+                        details=(
+                            f"{generation_details} token={generation_result.token} "
+                            f"text_len={len(generation_result.text)}"
+                        ),
+                    )
             except StopIteration:
                 break
             except StopPromptProcessing:

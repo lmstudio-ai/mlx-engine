@@ -58,6 +58,30 @@ def prepare_mlx_lm_generation_stream(
     return generation_stream
 
 
+def log_mlx_stream_state(
+    *,
+    reason: str,
+    request_id: str | None = None,
+    distributed_group: Any | None = None,
+    details: str | None = None,
+) -> None:
+    current_thread = threading.current_thread()
+    default_device = mx.default_device()
+    logger.info(
+        "MLX stream state reason=%s request_id=%s rank=%s thread=%s "
+        "thread_ident=%s device=%s default_stream=%r generation_stream=%r details=%s",
+        reason,
+        request_id,
+        _format_distributed_group(distributed_group),
+        current_thread.name,
+        current_thread.ident,
+        default_device,
+        mx.default_stream(default_device),
+        getattr(mlx_lm_generate, "generation_stream", None),
+        details,
+    )
+
+
 def log_mlx_generation_exception(
     *,
     reason: str,
