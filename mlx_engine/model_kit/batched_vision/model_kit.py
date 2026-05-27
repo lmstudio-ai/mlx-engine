@@ -53,6 +53,7 @@ from mlx_engine.utils.prompt_progress_events import (
     PromptProgressEvent,
 )
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
+from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_engine.vision_model_kit._transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
@@ -94,6 +95,9 @@ class BatchedVisionModelKit:
         self._startup_complete = Event()
         self.prefill_step_size = prefill_step_size
         self._model_path = model_path
+        if max_seq_nums < 1:
+            max_seq_nums = 1
+            logger.info(f"Setting concurrent request limit to {max_seq_nums}")
         self._max_seq_nums = max_seq_nums
         self._trust_remote_code = trust_remote_code
         self._seed = seed
@@ -144,6 +148,11 @@ class BatchedVisionModelKit:
     def _init_tokenizer_only(self) -> None:
         self.tokenizer = mlx_lm.tokenizer_utils.load(
             self._model_path, eos_token_ids=self._get_eos_token_ids()
+        )
+        fix_mistral_pre_tokenizer(
+            tokenizer=self.tokenizer,
+            model_path=self._model_path,
+            model_type=self.model_type,
         )
         self.detokenizer = self.tokenizer.detokenizer
 
