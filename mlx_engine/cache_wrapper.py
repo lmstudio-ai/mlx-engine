@@ -4,7 +4,7 @@ from typing import Any, List, Literal, Optional, Sequence
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
+from mlx_lm.generate import maybe_quantize_kv_cache
 from mlx_lm.models.cache import (
     LRUPromptCache,
     can_trim_prompt_cache,
@@ -12,6 +12,7 @@ from mlx_lm.models.cache import (
     trim_prompt_cache,
 )
 
+from mlx_engine.utils.mlx_lm_stream import prepare_mlx_lm_generation_stream
 from mlx_engine.utils.prompt_progress_reporter import (
     PromptProgressReporter,
     StopPromptProcessing,
@@ -274,6 +275,9 @@ class CacheWrapper:
             if checkpoint_prefix_len is not None and checkpoint_prefix_len <= 0:
                 checkpoint_prefix_len = None
 
+        generation_stream = prepare_mlx_lm_generation_stream(
+            reason="cache-prefill"
+        )
         with mx.stream(generation_stream):
             if self._draft_model is not None:
                 draft_cache = self._live_cache[len(self.model.layers) :]

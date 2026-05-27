@@ -24,6 +24,7 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 )
 from mlx_engine.utils.disable_hf_download import _original_snapshot_download
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
+from mlx_engine.utils.mlx_lm_stream import prepare_mlx_lm_generation_stream
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.utils.token import Token
 
@@ -719,6 +720,10 @@ class DistributedModelKit:
             self.group.rank(),
             self.group.size(),
         )
+        generation_stream = prepare_mlx_lm_generation_stream(
+            reason="distributed-batched-scheduler",
+            distributed_group=self.group,
+        )
         batch_generator = BatchGenerator(
             self.model,
             max_tokens=10000000,
@@ -729,6 +734,7 @@ class DistributedModelKit:
             sampler=None,
             logits_processors=None,
             max_kv_size=self.max_kv_size,
+            stream=generation_stream,
         )
         current_model_key = "lmstudio"
 

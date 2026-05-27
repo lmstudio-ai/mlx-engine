@@ -58,6 +58,10 @@ from mlx_engine.utils.generation_helpers import (
     process_stop_string_check,
     should_yield_token,
 )
+from mlx_engine.utils.mlx_lm_stream import (
+    log_mlx_generation_exception,
+    prepare_mlx_lm_generation_stream,
+)
 
 MAX_TOP_LOGPROBS = 10
 
@@ -571,6 +575,15 @@ def _sequential_generation(
         else:
             mlx_lm_callback = None
 
+        distributed_group = (
+            model_kit.group if isinstance(model_kit, DistributedModelKit) else None
+        )
+        prepare_mlx_lm_generation_stream(
+            reason="sequential-generation",
+            request_id=request_id,
+            distributed_group=distributed_group,
+        )
+
         stream = stream_generate(
             model=model_kit.model,
             tokenizer=tokenizer,
@@ -591,6 +604,13 @@ def _sequential_generation(
             except StopPromptProcessing:
                 yield construct_user_cancelled_result()
                 return
+            except Exception:
+                log_mlx_generation_exception(
+                    reason="sequential-generation",
+                    request_id=request_id,
+                    distributed_group=distributed_group,
+                )
+                raise
 
             # Token processor
             token = generation_result.token
@@ -790,6 +810,16 @@ def _batched_generation(
         except RequestCancelled:
             yield construct_user_cancelled_result()
             return
+        except Exception:
+            distributed_group = (
+                model_kit.group if isinstance(model_kit, DistributedModelKit) else None
+            )
+            log_mlx_generation_exception(
+                reason="batched-generation",
+                request_id=request_id,
+                distributed_group=distributed_group,
+            )
+            raise
         # TODO: implement this - MLX doesn't yet support cancelling during prompt processing
         # for batched generation
         # except StopPromptProcessing:
