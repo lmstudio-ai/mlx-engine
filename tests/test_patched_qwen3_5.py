@@ -1,16 +1,19 @@
 """Tests for the Qwen3.5 monkey patches."""
 
+import gc
 from pathlib import Path
 import time
 
 import pytest
 
 import mlx.core as mx
+import mlx_vlm
 from mlx_engine.generate import load_model, tokenize, unload
 from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
 import mlx_lm.models.qwen3_5 as qwen3_5_module
+from mlx_vlm.generate import generate_step as vlm_generate_step
 from transformers import AutoTokenizer
 
 from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
@@ -18,12 +21,14 @@ from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     PreparedPrompt,
     build_cached_prompt_kwargs,
+    get_image_token_index,
 )
 from mlx_engine.model_kit.patches.qwen3_5 import (
     OriginalDecoderLayer,
     OriginalQwen3_5TextModel,
     OriginalVlmQwen3_5LanguageModelCall,
 )
+from mlx_engine.utils.image_utils import convert_to_pil
 
 from tests.patched_model_test_utils import (
     get_real_model_path,
@@ -42,6 +47,22 @@ REAL_MODEL_CASES = [
         id="moe",
     ),
 ]
+
+
+class _CaptureLogitsProcessor:
+    def __init__(self):
+        self.logits = []
+
+    def __call__(self, _tokens, logits):
+        captured = mx.array(logits)
+        mx.eval(captured)
+        self.logits.append(captured)
+        return logits
+
+
+def _greedy(logprobs):
+    return mx.argmax(logprobs, axis=-1).astype(mx.int32)
+
 
 QWEN3_5_TEXT_CONFIG = {
     "model_type": "qwen3_5",
@@ -588,21 +609,8 @@ def test_vlm_qwen3_5_image_prompt_restore_matches_same_schedule():
     )
     assert isinstance(model_kit, BatchedVisionModelKit)
 
-    class CaptureLogitsProcessor:
-        def __init__(self):
-            self.logits = []
-
-        def __call__(self, _tokens, logits):
-            captured = mx.array(logits)
-            mx.eval(captured)
-            self.logits.append(captured)
-            return logits
-
-    def greedy(logprobs):
-        return mx.argmax(logprobs, axis=-1).astype(mx.int32)
-
     def run_request(request_id: str):
-        processor = CaptureLogitsProcessor()
+        processor = _CaptureLogitsProcessor()
         reporter = RecordingReporter()
         stream = model_kit.generate(
             prompt_tokens=prompt_tokens,
@@ -611,7 +619,7 @@ def test_vlm_qwen3_5_image_prompt_restore_matches_same_schedule():
             prompt_progress_reporter=reporter,
             top_logprobs=0,
             max_tokens=1,
-            sampler=greedy,
+            sampler=_greedy,
             logits_processors=[processor],
         )
         responses = list(stream)
@@ -668,6 +676,147 @@ def test_vlm_qwen3_5_image_prompt_restore_matches_same_schedule():
             )
     finally:
         unload(model_kit)
+
+
+def test_vlm_qwen3_5_generation_trace_matches_mlx_vlm_same_inputs():
+    """Batched engine generation must match mlx-vlm's token/logit trace."""
+    model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
+    image_b64 = read_image_b64(Path(__file__).parent.parent / "demo-data/toucan.jpeg")
+    max_tokens = 2
+    cases = [
+        (
+            "text",
+            "<|im_start|>user\n"
+            "Tell me one short sentence.<|im_end|>\n"
+            "<|im_start|>assistant\n",
+            None,
+        ),
+        (
+            "image",
+            "<|im_start|>user\n"
+            "<|vision_start|><|image_pad|><|vision_end|>"
+            "What is in the image?<|im_end|>\n"
+            "<|im_start|>assistant\n",
+            image_b64,
+        ),
+    ]
+
+    def run_upstream(model, processor, config, prompt: str, image: str | None):
+        processor_capture = _CaptureLogitsProcessor()
+        # Use the same prompt IDs / processor tensors that the batched path
+        # should derive, so this catches orchestration drift instead of template
+        # or image-loading differences.
+        if image is None:
+            input_ids = mx.array(
+                processor.tokenizer.encode(prompt, add_special_tokens=False),
+                dtype=mx.int32,
+            )[None, :]
+            pixel_values = None
+            mask = None
+            prompt_kwargs = {}
+        else:
+            raw_inputs = mlx_vlm.prepare_inputs(
+                processor=processor,
+                images=convert_to_pil([image]),
+                prompts=prompt,
+                image_token_index=get_image_token_index(config),
+                resize_shape=None,
+            )
+            input_ids = raw_inputs["input_ids"]
+            pixel_values = raw_inputs.get("pixel_values")
+            mask = raw_inputs.get("attention_mask")
+            prompt_kwargs = {
+                key: value
+                for key, value in raw_inputs.items()
+                if key not in {"input_ids", "pixel_values", "attention_mask"}
+            }
+
+        tokens = []
+        token_logprobs = []
+        for token, logprobs in vlm_generate_step(
+            input_ids,
+            model,
+            pixel_values,
+            mask,
+            max_tokens=max_tokens,
+            sampler=_greedy,
+            logits_processors=[processor_capture],
+            **prompt_kwargs,
+        ):
+            mx.eval(logprobs)
+            tokens.append(token)
+            token_logprobs.append(float(logprobs[token].item()))
+        return processor_capture.logits, tokens, token_logprobs
+
+    def run_engine(model_kit, name: str, prompt: str, image: str | None):
+        processor_capture = _CaptureLogitsProcessor()
+        responses = list(
+            model_kit.generate(
+                prompt_tokens=tokenize(model_kit, prompt),
+                request_id=name,
+                images_b64=None if image is None else [image],
+                prompt_progress_reporter=None,
+                top_logprobs=0,
+                max_tokens=max_tokens,
+                sampler=_greedy,
+                logits_processors=[processor_capture],
+            )
+        )
+        return (
+            processor_capture.logits,
+            [response.token for response in responses],
+            [response.token_logprob for response in responses],
+        )
+
+    loaded = mlx_vlm.utils.load(model_path, trust_remote_code=True)
+    if len(loaded) == 3:
+        upstream_model, upstream_processor, config = loaded
+    else:
+        upstream_model, upstream_processor = loaded
+        config = mlx_vlm.utils.load_config(model_path, trust_remote_code=True)
+    try:
+        upstream_traces = {
+            name: run_upstream(
+                upstream_model, upstream_processor, config, prompt, image
+            )
+            for name, prompt, image in cases
+        }
+    finally:
+        del upstream_model
+        del upstream_processor
+        gc.collect()
+        mx.clear_cache()
+
+    model_kit = load_model(
+        model_path=model_path,
+        max_kv_size=4096,
+        trust_remote_code=True,
+    )
+    assert isinstance(model_kit, BatchedVisionModelKit)
+    try:
+        engine_traces = {
+            name: run_engine(model_kit, name, prompt, image)
+            for name, prompt, image in cases
+        }
+    finally:
+        unload(model_kit)
+
+    for name, _, _ in cases:
+        upstream_logits, upstream_tokens, upstream_logprobs = upstream_traces[name]
+        engine_logits, engine_tokens, engine_logprobs = engine_traces[name]
+
+        assert engine_tokens == upstream_tokens
+        assert engine_logprobs == upstream_logprobs
+        assert len(engine_logits) == max_tokens + 1
+        assert len(upstream_logits) == max_tokens + 1
+        for step, (engine_step_logits, upstream_step_logits) in enumerate(
+            zip(engine_logits, upstream_logits, strict=True)
+        ):
+            diff = max_abs_diff(engine_step_logits, upstream_step_logits)
+            assert diff == 0.0, (
+                f"{name} generation step {step} changed mlx-vlm logits "
+                f"(max diff {diff:.6f})."
+            )
 
 
 def test_vlm_qwen3_5_text_prompt_cache_restore_matches_original_vlm():
