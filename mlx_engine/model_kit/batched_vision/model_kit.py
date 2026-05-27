@@ -60,6 +60,7 @@ from mlx_engine.vision_model_kit._transformers_compatibility import (
 )
 
 logger = logging.getLogger(__name__)
+DEFAULT_MAX_SEQ_NUMS = 4
 
 
 class BatchedVisionModelKit:
@@ -81,7 +82,7 @@ class BatchedVisionModelKit:
         model_path: Path,
         prefill_step_size: int,
         max_kv_size: int | None = None,
-        max_seq_nums: int = 4,
+        max_seq_nums: int | None = DEFAULT_MAX_SEQ_NUMS,
         trust_remote_code: bool = False,
         seed: int | None = None,
     ):
@@ -95,7 +96,9 @@ class BatchedVisionModelKit:
         self._startup_complete = Event()
         self.prefill_step_size = prefill_step_size
         self._model_path = model_path
-        if max_seq_nums < 1:
+        if max_seq_nums is None:
+            max_seq_nums = DEFAULT_MAX_SEQ_NUMS
+        elif max_seq_nums < 1:
             max_seq_nums = 1
             logger.info(f"Setting concurrent request limit to {max_seq_nums}")
         self._max_seq_nums = max_seq_nums
@@ -335,6 +338,8 @@ class BatchedVisionModelKit:
             getattr(self.model, "language_model", self.model),
             vlm_tokenizer.stopping_criteria,
             max_tokens=10000000,
+            # LM Studio owns the concurrency limit; do not use mlx-vlm's
+            # internal batcher default here.
             completion_batch_size=self._max_seq_nums,
             prefill_step_size=(
                 None

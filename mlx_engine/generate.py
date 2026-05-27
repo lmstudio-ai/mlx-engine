@@ -260,12 +260,11 @@ def load_model(
             raise ValueError(
                 "The mlx-vlm batched vision path does not support KV cache quantization yet"
             )
-        batched_vision_max_seq_nums = 4 if max_seq_nums is None else max_seq_nums
         model_kit = BatchedVisionModelKit(
             model_path,
             prefill_step_size=prefill_step_size,
             max_kv_size=max_kv_size,
-            max_seq_nums=batched_vision_max_seq_nums,
+            max_seq_nums=max_seq_nums,
             trust_remote_code=trust_remote_code,
             seed=seed,
         )
