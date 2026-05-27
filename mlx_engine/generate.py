@@ -575,13 +575,13 @@ def _sequential_generation(
         else:
             mlx_lm_callback = None
 
-        distributed_group = (
-            model_kit.group if isinstance(model_kit, DistributedModelKit) else None
-        )
+        is_distributed_model = isinstance(model_kit, DistributedModelKit)
+        distributed_group = model_kit.group if is_distributed_model else None
         prepare_mlx_lm_generation_stream(
             reason="sequential-generation",
             request_id=request_id,
             distributed_group=distributed_group,
+            use_default_stream=is_distributed_model,
         )
 
         stream = stream_generate(

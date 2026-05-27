@@ -723,6 +723,7 @@ class DistributedModelKit:
         generation_stream = prepare_mlx_lm_generation_stream(
             reason="distributed-batched-scheduler",
             distributed_group=self.group,
+            use_default_stream=True,
         )
         batch_generator = BatchGenerator(
             self.model,

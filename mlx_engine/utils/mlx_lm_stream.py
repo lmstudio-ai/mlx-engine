@@ -26,22 +26,32 @@ def prepare_mlx_lm_generation_stream(
     reason: str,
     request_id: str | None = None,
     distributed_group: Any | None = None,
+    use_default_stream: bool = False,
 ):
     current_thread = threading.current_thread()
     thread_ident = current_thread.ident
     default_device = mx.default_device()
+    default_stream = mx.default_stream(default_device)
     previous_stream = getattr(mlx_lm_generate, "generation_stream", None)
-    generation_stream = mx.new_thread_local_stream(default_device)
+    if use_default_stream:
+        generation_stream = default_stream
+        stream_source = "default"
+    else:
+        generation_stream = mx.new_thread_local_stream(default_device)
+        stream_source = "thread-local"
     mlx_lm_generate.generation_stream = generation_stream
     logger.info(
         "Prepared MLX-LM generation stream reason=%s request_id=%s rank=%s "
-        "thread=%s thread_ident=%s device=%s previous_stream=%r stream=%r",
+        "thread=%s thread_ident=%s device=%s stream_source=%s default_stream=%r "
+        "previous_stream=%r stream=%r",
         reason,
         request_id,
         _format_distributed_group(distributed_group),
         current_thread.name,
         thread_ident,
         default_device,
+        stream_source,
+        default_stream,
         previous_stream,
         generation_stream,
     )
@@ -55,13 +65,16 @@ def log_mlx_generation_exception(
     distributed_group: Any | None = None,
 ) -> None:
     current_thread = threading.current_thread()
+    default_device = mx.default_device()
     logger.exception(
         "MLX generation failed after stream preparation reason=%s request_id=%s "
-        "rank=%s thread=%s thread_ident=%s stream=%r",
+        "rank=%s thread=%s thread_ident=%s device=%s default_stream=%r stream=%r",
         reason,
         request_id,
         _format_distributed_group(distributed_group),
         current_thread.name,
         current_thread.ident,
+        default_device,
+        mx.default_stream(default_device),
         getattr(mlx_lm_generate, "generation_stream", None),
     )
