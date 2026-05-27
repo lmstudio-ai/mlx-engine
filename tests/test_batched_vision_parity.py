@@ -161,6 +161,14 @@ def _trace_responses(responses):
     return [(response.token, response.token_logprob) for response in responses]
 
 
+def _assert_token_trace_matches(actual, expected, *, logprob_abs_tol: float) -> None:
+    assert [token for token, _ in actual] == [token for token, _ in expected]
+    assert [logprob for _, logprob in actual] == pytest.approx(
+        [logprob for _, logprob in expected],
+        abs=logprob_abs_tol,
+    )
+
+
 @pytest.mark.parametrize("case", VLM_PARITY_CASES)
 def test_vlm_image_prompt_restore_matches_same_schedule(case: VlmParityCase):
     """High-level image restores must match a fresh cache with the same schedule."""
@@ -356,9 +364,9 @@ def test_vlm_continuous_batching_matches_independent_requests(case: VlmParityCas
 
     The trace is the emitted token IDs plus each selected token's normalized
     logprob. We intentionally do not compare full logits here: co-resident
-    text/image rows can use a different batched numerical path. Non-selected
-    vocab logits may drift, while the emitted tokens and their normalized
-    logprobs are the stable behavioral trace this test protects.
+    text/image rows can use a different batched numerical path. Tokens must
+    match exactly; selected logprobs get BF16 headroom for shape-dependent MLX
+    SDPA drift.
     """
     model_path = get_real_model_path(case.model_name)
     image_b64 = _toucan_b64()
@@ -451,5 +459,9 @@ def test_vlm_continuous_batching_matches_independent_requests(case: VlmParityCas
         unload(model_kit)
 
     for name, _, _ in prompt_cases:
-        assert concurrent_traces[name] == independent_traces[name]
+        _assert_token_trace_matches(
+            concurrent_traces[name],
+            independent_traces[name],
+            logprob_abs_tol=0.125,
+        )
         assert len(processors[name].logits) == max_tokens + 1
