@@ -363,8 +363,11 @@ class BatchedModelKit:
                     )
 
                 # Track this request
+                # Use separate tracking for cross-prompt cache key (original prompt only)
+                # and live cache key (updated during generation for intra-request caching)
                 self._batch_results[uid] = {
-                    "cache_key": request.prompt_tokens[:],
+                    "cross_prompt_cache_key": request.prompt_tokens[:],
+                    "live_cache_key": request.prompt_tokens[:],
                     "rqueue": request.rqueue,
                     "detokenizer": self.tokenizer.detokenizer,
                     "top_logprobs": request.top_logprobs,
@@ -398,7 +401,7 @@ class BatchedModelKit:
                     # Create response object
                     result = self._batch_results[r.uid]
                     detokenizer = result["detokenizer"]
-                    result["cache_key"].append(r.token)
+                    result["live_cache_key"].append(r.token)
                     if r.finish_reason != "stop":
                         detokenizer.add_token(r.token)
                     if r.finish_reason is not None:
@@ -440,8 +443,13 @@ class BatchedModelKit:
                     # Clean up if necessary
                     if r.finish_reason is not None:
                         result["rqueue"].put(None)
+                        # Use cross_prompt_cache_key for cross-prompt caching
+                        # This ensures the cache is keyed by the original prompt,
+                        # not by the prompt + generated tokens
                         self._prompt_cache.insert_cache(
-                            current_model_key, result["cache_key"], r.prompt_cache
+                            current_model_key,
+                            result["cross_prompt_cache_key"],
+                            r.prompt_cache,
                         )
                         del self._batch_results[r.uid]
 
