@@ -160,6 +160,8 @@ def maybe_apply_quantization(
             quantize_kwargs["bits"] = quantization["bits"]
         if "group_size" in quantization:
             quantize_kwargs["group_size"] = quantization["group_size"]
+        if "mode" in quantization:
+            quantize_kwargs["mode"] = quantization["mode"]
         nn.quantize(
             components,
             class_predicate=get_class_predicate,
