@@ -3,6 +3,7 @@ import logging
 import os
 from pathlib import Path
 from queue import Empty as QueueEmpty
+from queue import Full as QueueFull
 from queue import Queue
 import threading
 import time
@@ -455,10 +456,23 @@ class DistributedModelKit:
                         f"caller_wait={caller_wait_seconds:.3f}s"
                     ),
                 )
-                result = request.callback()
                 if request.stream_results:
                     item_count = 0
                     stream_completed = False
+                    if (
+                        request.caller_stopped is not None
+                        and request.caller_stopped.is_set()
+                    ):
+                        logger.info(
+                            "Distributed model thread skipping stream for %s on rank %s/%s "
+                            "because caller stopped before callback elapsed=%.3fs",
+                            request.description,
+                            self.group.rank(),
+                            self.group.size(),
+                            time.monotonic() - request_started_at,
+                        )
+                        continue
+                    result = request.callback()
                     try:
                         for item in result:
                             if (
@@ -486,7 +500,13 @@ class DistributedModelKit:
                                     type(item).__name__,
                                 )
                             item_count += 1
-                            request.response_queue.put(item)
+                            if not self._put_model_thread_stream_response(
+                                request=request,
+                                item=item,
+                                item_count=item_count,
+                                request_started_at=request_started_at,
+                            ):
+                                break
                             if (
                                 request.caller_stopped is not None
                                 and request.caller_stopped.is_set()
@@ -517,8 +537,14 @@ class DistributedModelKit:
                             item_count,
                             time.monotonic() - request_started_at,
                         )
-                        request.response_queue.put(None)
+                        self._put_model_thread_stream_response(
+                            request=request,
+                            item=None,
+                            item_count=item_count,
+                            request_started_at=request_started_at,
+                        )
                 else:
+                    result = request.callback()
                     logger.info(
                         "Distributed model thread completed sync request %s on rank %s/%s "
                         "elapsed=%.3fs result_type=%s",
@@ -540,10 +566,53 @@ class DistributedModelKit:
                     request.stream_results,
                 )
                 if request.stream_results:
-                    request.response_queue.put(caught_error)
-                    request.response_queue.put(None)
+                    self._put_model_thread_stream_response(
+                        request=request,
+                        item=caught_error,
+                        item_count=0,
+                        request_started_at=request_started_at,
+                    )
                 else:
                     request.response_queue.put((False, caught_error))
+
+    def _put_model_thread_stream_response(
+        self,
+        *,
+        request: DistributedModelThreadRequest,
+        item: Any,
+        item_count: int,
+        request_started_at: float,
+    ) -> bool:
+        while True:
+            if request.caller_stopped is not None and request.caller_stopped.is_set():
+                logger.info(
+                    "Distributed model thread stopping stream for %s on rank %s/%s "
+                    "while waiting for caller items=%s elapsed=%.3fs pending_response=%s",
+                    request.description,
+                    self.group.rank(),
+                    self.group.size(),
+                    item_count,
+                    time.monotonic() - request_started_at,
+                    type(item).__name__,
+                )
+                return False
+            if self._shutdown.is_set():
+                logger.info(
+                    "Distributed model thread stopping stream for %s on rank %s/%s "
+                    "because shutdown is set items=%s elapsed=%.3fs pending_response=%s",
+                    request.description,
+                    self.group.rank(),
+                    self.group.size(),
+                    item_count,
+                    time.monotonic() - request_started_at,
+                    type(item).__name__,
+                )
+                return False
+            try:
+                request.response_queue.put(item, timeout=0.1)
+                return True
+            except QueueFull:
+                continue
 
     def _run_on_model_thread_sync(self, description: str, callback: Any) -> Any:
         if self._model_thread_requests is None:
@@ -664,7 +733,7 @@ class DistributedModelKit:
                 f"model_thread_ident={self._model_thread_ident}"
             ),
         )
-        response_queue: Queue = Queue()
+        response_queue: Queue = Queue(maxsize=1)
         caller_stopped = threading.Event()
         self._model_thread_requests.put(
             DistributedModelThreadRequest(
@@ -684,7 +753,22 @@ class DistributedModelKit:
         stream_failed = False
         try:
             while True:
-                item = response_queue.get()
+                try:
+                    item = response_queue.get(timeout=0.1)
+                except QueueEmpty:
+                    if self._shutdown.is_set():
+                        stream_finished = True
+                        logger.info(
+                            "Distributed model streaming request stopped by shutdown %s on rank %s/%s "
+                            "items=%s elapsed=%.3fs",
+                            description,
+                            self.group.rank(),
+                            self.group.size(),
+                            item_count,
+                            time.monotonic() - created_at,
+                        )
+                        return
+                    continue
                 if item is None:
                     stream_finished = True
                     logger.info(
