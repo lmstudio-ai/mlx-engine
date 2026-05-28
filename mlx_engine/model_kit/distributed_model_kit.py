@@ -61,6 +61,14 @@ class DistributedSchedulerShutdownRequest:
     pass
 
 
+@dataclass
+class DistributedModelThreadRequest:
+    description: str
+    callback: Any
+    response_queue: Queue
+    stream_results: bool
+
+
 def _format_size_bytes(size_bytes: int) -> str:
     gibibytes = size_bytes / (1024 * 1024 * 1024)
     return f"{gibibytes:.2f} GiB"
@@ -275,6 +283,9 @@ class DistributedModelKit:
         self._batch_results: dict[int, dict[str, Any]] = {}
         self._backend_exception: Exception | None = None
         self._generation_thread: threading.Thread | None = None
+        self._model_thread: threading.Thread | None = None
+        self._model_thread_ident: int | None = None
+        self._model_thread_requests: Queue | None = None
         self._shutdown = threading.Event()
         self.prefill_step_size = prefill_step_size
         self.max_kv_size = max_kv_size
@@ -313,6 +324,16 @@ class DistributedModelKit:
         if self.group.size() <= 1:
             raise ValueError("DistributedModelKit requires more than one MLX rank")
 
+        if self.uses_distributed_batching():
+            self._load_model_shard()
+        else:
+            self._start_model_thread()
+            self._run_on_model_thread_sync(
+                "distributed-model-load",
+                self._load_model_shard,
+            )
+
+    def _load_model_shard(self) -> None:
         logger.info(
             "Loading distributed model shard from %s on rank %s/%s...",
             self.model_path,
@@ -355,6 +376,110 @@ class DistributedModelKit:
         self.detokenizer = self.tokenizer.detokenizer
         logger.info("Distributed model shard loaded on rank %s", self.group.rank())
 
+    def _start_model_thread(self) -> None:
+        if self._model_thread is not None:
+            return
+
+        self._model_thread_requests = Queue()
+        self._model_thread = threading.Thread(
+            target=self._model_thread_loop,
+            daemon=True,
+            name="mlx-distributed-model-thread",
+        )
+        self._model_thread.start()
+
+    def _model_thread_loop(self) -> None:
+        self._model_thread_ident = threading.get_ident()
+        log_mlx_stream_state(
+            reason="distributed-model-thread-started",
+            distributed_group=self.group,
+        )
+        assert self._model_thread_requests is not None
+
+        while True:
+            request = self._model_thread_requests.get()
+            if request is None:
+                log_mlx_stream_state(
+                    reason="distributed-model-thread-stopping",
+                    distributed_group=self.group,
+                )
+                return
+            try:
+                logger.info(
+                    "Distributed model thread running %s on rank %s/%s",
+                    request.description,
+                    self.group.rank(),
+                    self.group.size(),
+                )
+                result = request.callback()
+                if request.stream_results:
+                    for item in result:
+                        request.response_queue.put(item)
+                    request.response_queue.put(None)
+                else:
+                    request.response_queue.put((True, result))
+            except Exception as caught_error:
+                logger.exception(
+                    "Distributed model thread failed during %s",
+                    request.description,
+                )
+                if request.stream_results:
+                    request.response_queue.put(caught_error)
+                    request.response_queue.put(None)
+                else:
+                    request.response_queue.put((False, caught_error))
+
+    def _run_on_model_thread_sync(self, description: str, callback: Any) -> Any:
+        if self._model_thread_requests is None:
+            return callback()
+        if threading.get_ident() == self._model_thread_ident:
+            return callback()
+
+        response_queue: Queue = Queue()
+        self._model_thread_requests.put(
+            DistributedModelThreadRequest(
+                description=description,
+                callback=callback,
+                response_queue=response_queue,
+                stream_results=False,
+            )
+        )
+        success, value = response_queue.get()
+        if success:
+            return value
+        raise value
+
+    def run_generator_on_model_thread(
+        self,
+        *,
+        description: str,
+        callback: Any,
+    ) -> Iterable[Any]:
+        if self._model_thread_requests is None:
+            yield from callback()
+            return
+        if threading.get_ident() == self._model_thread_ident:
+            yield from callback()
+            return
+
+        response_queue: Queue = Queue()
+        self._model_thread_requests.put(
+            DistributedModelThreadRequest(
+                description=description,
+                callback=callback,
+                response_queue=response_queue,
+                stream_results=True,
+            )
+        )
+
+        while True:
+            item = response_queue.get()
+            if item is None:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
     def _resolve_model_path(self, model_path: str | Path) -> Path:
         candidate_path = Path(model_path).expanduser()
         if candidate_path.exists():
@@ -373,6 +498,15 @@ class DistributedModelKit:
             ) from caught_error
 
     def start(self):
+        if not self.uses_distributed_batching():
+            self._run_on_model_thread_sync(
+                "distributed-model-start",
+                self._start_on_current_thread,
+            )
+            return
+        self._start_on_current_thread()
+
+    def _start_on_current_thread(self) -> None:
         log_mlx_stream_state(
             reason="distributed-model-start-before-synchronize",
             distributed_group=self.group,
@@ -538,6 +672,13 @@ class DistributedModelKit:
             self._shutdown.set()
             return
         self._shutdown.set()
+        if self._model_thread_requests is not None:
+            self._model_thread_requests.put(None)
+        if (
+            self._model_thread is not None
+            and threading.get_ident() != self._model_thread_ident
+        ):
+            self._model_thread.join(timeout=5)
 
     def is_shutdown(self) -> bool:
         return self._shutdown.is_set()

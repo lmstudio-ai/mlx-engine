@@ -396,6 +396,16 @@ def create_generator(
         and model_kit.uses_distributed_batching()
     ):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
+    if isinstance(model_kit, DistributedModelKit):
+        request_id = kwargs.get("request_id")
+        return model_kit.run_generator_on_model_thread(
+            description=f"sequential-generation request_id={request_id}",
+            callback=lambda: _sequential_generation(
+                model_kit,
+                prompt_tokens,
+                **kwargs,
+            ),
+        )
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
 
