@@ -70,6 +70,7 @@ class DistributedModelThreadRequest:
     created_at: float
     caller_thread_name: str
     caller_thread_ident: int | None
+    caller_stopped: threading.Event | None
 
 
 def _format_size_bytes(size_bytes: int) -> str:
@@ -457,29 +458,66 @@ class DistributedModelKit:
                 result = request.callback()
                 if request.stream_results:
                     item_count = 0
-                    for item in result:
-                        if item_count == 0:
-                            logger.info(
-                                "Distributed model thread received first stream item for %s "
-                                "on rank %s/%s after %.3fs item_type=%s",
-                                request.description,
-                                self.group.rank(),
-                                self.group.size(),
-                                time.monotonic() - request_started_at,
-                                type(item).__name__,
-                            )
-                        item_count += 1
-                        request.response_queue.put(item)
-                    logger.info(
-                        "Distributed model thread completed stream for %s on rank %s/%s "
-                        "items=%s elapsed=%.3fs",
-                        request.description,
-                        self.group.rank(),
-                        self.group.size(),
-                        item_count,
-                        time.monotonic() - request_started_at,
-                    )
-                    request.response_queue.put(None)
+                    stream_completed = False
+                    try:
+                        for item in result:
+                            if (
+                                request.caller_stopped is not None
+                                and request.caller_stopped.is_set()
+                            ):
+                                logger.info(
+                                    "Distributed model thread stopping stream for %s on rank %s/%s "
+                                    "before delivering item after caller stopped items=%s elapsed=%.3fs",
+                                    request.description,
+                                    self.group.rank(),
+                                    self.group.size(),
+                                    item_count,
+                                    time.monotonic() - request_started_at,
+                                )
+                                break
+                            if item_count == 0:
+                                logger.info(
+                                    "Distributed model thread received first stream item for %s "
+                                    "on rank %s/%s after %.3fs item_type=%s",
+                                    request.description,
+                                    self.group.rank(),
+                                    self.group.size(),
+                                    time.monotonic() - request_started_at,
+                                    type(item).__name__,
+                                )
+                            item_count += 1
+                            request.response_queue.put(item)
+                            if (
+                                request.caller_stopped is not None
+                                and request.caller_stopped.is_set()
+                            ):
+                                logger.info(
+                                    "Distributed model thread stopping stream for %s on rank %s/%s "
+                                    "after caller stopped items=%s elapsed=%.3fs",
+                                    request.description,
+                                    self.group.rank(),
+                                    self.group.size(),
+                                    item_count,
+                                    time.monotonic() - request_started_at,
+                                )
+                                break
+                        else:
+                            stream_completed = True
+                    finally:
+                        close_result = getattr(result, "close", None)
+                        if callable(close_result):
+                            close_result()
+                    if stream_completed:
+                        logger.info(
+                            "Distributed model thread completed stream for %s on rank %s/%s "
+                            "items=%s elapsed=%.3fs",
+                            request.description,
+                            self.group.rank(),
+                            self.group.size(),
+                            item_count,
+                            time.monotonic() - request_started_at,
+                        )
+                        request.response_queue.put(None)
                 else:
                     logger.info(
                         "Distributed model thread completed sync request %s on rank %s/%s "
@@ -559,6 +597,7 @@ class DistributedModelKit:
                 created_at=created_at,
                 caller_thread_name=current_thread.name,
                 caller_thread_ident=current_thread.ident,
+                caller_stopped=None,
             )
         )
         success, value = response_queue.get()
@@ -626,6 +665,7 @@ class DistributedModelKit:
             ),
         )
         response_queue: Queue = Queue()
+        caller_stopped = threading.Event()
         self._model_thread_requests.put(
             DistributedModelThreadRequest(
                 description=description,
@@ -635,15 +675,59 @@ class DistributedModelKit:
                 created_at=created_at,
                 caller_thread_name=current_thread.name,
                 caller_thread_ident=current_thread.ident,
+                caller_stopped=caller_stopped,
             )
         )
 
         item_count = 0
-        while True:
-            item = response_queue.get()
-            if item is None:
+        stream_finished = False
+        stream_failed = False
+        try:
+            while True:
+                item = response_queue.get()
+                if item is None:
+                    stream_finished = True
+                    logger.info(
+                        "Distributed model streaming request completed %s on rank %s/%s "
+                        "items=%s elapsed=%.3fs",
+                        description,
+                        self.group.rank(),
+                        self.group.size(),
+                        item_count,
+                        time.monotonic() - created_at,
+                    )
+                    return
+                if isinstance(item, Exception):
+                    stream_failed = True
+                    logger.error(
+                        "Distributed model streaming request failed %s on rank %s/%s "
+                        "items=%s elapsed=%.3fs error_type=%s error=%r",
+                        description,
+                        self.group.rank(),
+                        self.group.size(),
+                        item_count,
+                        time.monotonic() - created_at,
+                        type(item).__name__,
+                        item,
+                    )
+                    raise item
+                if item_count == 0:
+                    logger.info(
+                        "Distributed model streaming request yielded first item %s on rank %s/%s "
+                        "after %.3fs item_type=%s",
+                        description,
+                        self.group.rank(),
+                        self.group.size(),
+                        time.monotonic() - created_at,
+                        type(item).__name__,
+                    )
+                item_count += 1
+                yield item
+        finally:
+            if not stream_finished and not stream_failed:
+                caller_stopped.set()
                 logger.info(
-                    "Distributed model streaming request completed %s on rank %s/%s "
+                    "Distributed model streaming request caller stopped %s on rank %s/%s "
                     "items=%s elapsed=%.3fs",
                     description,
                     self.group.rank(),
@@ -651,32 +735,6 @@ class DistributedModelKit:
                     item_count,
                     time.monotonic() - created_at,
                 )
-                return
-            if isinstance(item, Exception):
-                logger.error(
-                    "Distributed model streaming request failed %s on rank %s/%s "
-                    "items=%s elapsed=%.3fs error_type=%s error=%r",
-                    description,
-                    self.group.rank(),
-                    self.group.size(),
-                    item_count,
-                    time.monotonic() - created_at,
-                    type(item).__name__,
-                    item,
-                )
-                raise item
-            if item_count == 0:
-                logger.info(
-                    "Distributed model streaming request yielded first item %s on rank %s/%s "
-                    "after %.3fs item_type=%s",
-                    description,
-                    self.group.rank(),
-                    self.group.size(),
-                    time.monotonic() - created_at,
-                    type(item).__name__,
-                )
-            item_count += 1
-            yield item
 
     def _resolve_model_path(self, model_path: str | Path) -> Path:
         candidate_path = Path(model_path).expanduser()
