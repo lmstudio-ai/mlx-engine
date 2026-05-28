@@ -398,6 +398,12 @@ def create_generator(
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
     if isinstance(model_kit, DistributedModelKit):
         request_id = kwargs.get("request_id")
+        logger.info(
+            "Routing sequential distributed generation request_id=%s prompt_tokens=%s "
+            "through distributed model thread",
+            request_id,
+            len(prompt_tokens),
+        )
         return model_kit.run_generator_on_model_thread(
             description=f"sequential-generation request_id={request_id}",
             callback=lambda: _sequential_generation(

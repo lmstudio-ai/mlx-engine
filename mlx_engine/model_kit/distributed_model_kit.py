@@ -67,11 +67,19 @@ class DistributedModelThreadRequest:
     callback: Any
     response_queue: Queue
     stream_results: bool
+    created_at: float
+    caller_thread_name: str
+    caller_thread_ident: int | None
 
 
 def _format_size_bytes(size_bytes: int) -> str:
     gibibytes = size_bytes / (1024 * 1024 * 1024)
     return f"{gibibytes:.2f} GiB"
+
+
+def _current_thread_summary() -> str:
+    current_thread = threading.current_thread()
+    return f"{current_thread.name}:{current_thread.ident}"
 
 
 def _model_snapshot_summary(model_path: Path) -> str:
@@ -380,6 +388,12 @@ class DistributedModelKit:
         if self._model_thread is not None:
             return
 
+        logger.info(
+            "Starting distributed model thread on rank %s/%s caller_thread=%s",
+            self.group.rank(),
+            self.group.size(),
+            _current_thread_summary(),
+        )
         self._model_thread_requests = Queue()
         self._model_thread = threading.Thread(
             target=self._model_thread_loop,
@@ -387,6 +401,12 @@ class DistributedModelKit:
             name="mlx-distributed-model-thread",
         )
         self._model_thread.start()
+        logger.info(
+            "Started distributed model thread on rank %s/%s thread_name=%s",
+            self.group.rank(),
+            self.group.size(),
+            self._model_thread.name,
+        )
 
     def _model_thread_loop(self) -> None:
         self._model_thread_ident = threading.get_ident()
@@ -403,25 +423,83 @@ class DistributedModelKit:
                     reason="distributed-model-thread-stopping",
                     distributed_group=self.group,
                 )
+                logger.info(
+                    "Distributed model thread stopping on rank %s/%s thread=%s",
+                    self.group.rank(),
+                    self.group.size(),
+                    _current_thread_summary(),
+                )
                 return
+            request_started_at = time.monotonic()
+            caller_wait_seconds = request_started_at - request.created_at
             try:
                 logger.info(
-                    "Distributed model thread running %s on rank %s/%s",
+                    "Distributed model thread dequeued %s on rank %s/%s "
+                    "thread=%s caller_thread=%s caller_ident=%s caller_wait=%.3fs pending=%s",
                     request.description,
                     self.group.rank(),
                     self.group.size(),
+                    _current_thread_summary(),
+                    request.caller_thread_name,
+                    request.caller_thread_ident,
+                    caller_wait_seconds,
+                    self._model_thread_requests.qsize(),
+                )
+                log_mlx_stream_state(
+                    reason="distributed-model-thread-before-callback",
+                    distributed_group=self.group,
+                    details=(
+                        f"description={request.description} "
+                        f"stream_results={request.stream_results} "
+                        f"caller_wait={caller_wait_seconds:.3f}s"
+                    ),
                 )
                 result = request.callback()
                 if request.stream_results:
+                    item_count = 0
                     for item in result:
+                        if item_count == 0:
+                            logger.info(
+                                "Distributed model thread received first stream item for %s "
+                                "on rank %s/%s after %.3fs item_type=%s",
+                                request.description,
+                                self.group.rank(),
+                                self.group.size(),
+                                time.monotonic() - request_started_at,
+                                type(item).__name__,
+                            )
+                        item_count += 1
                         request.response_queue.put(item)
+                    logger.info(
+                        "Distributed model thread completed stream for %s on rank %s/%s "
+                        "items=%s elapsed=%.3fs",
+                        request.description,
+                        self.group.rank(),
+                        self.group.size(),
+                        item_count,
+                        time.monotonic() - request_started_at,
+                    )
                     request.response_queue.put(None)
                 else:
+                    logger.info(
+                        "Distributed model thread completed sync request %s on rank %s/%s "
+                        "elapsed=%.3fs result_type=%s",
+                        request.description,
+                        self.group.rank(),
+                        self.group.size(),
+                        time.monotonic() - request_started_at,
+                        type(result).__name__,
+                    )
                     request.response_queue.put((True, result))
             except Exception as caught_error:
                 logger.exception(
-                    "Distributed model thread failed during %s",
+                    "Distributed model thread failed during %s on rank %s/%s "
+                    "elapsed=%.3fs stream_results=%s",
                     request.description,
+                    self.group.rank(),
+                    self.group.size(),
+                    time.monotonic() - request_started_at,
+                    request.stream_results,
                 )
                 if request.stream_results:
                     request.response_queue.put(caught_error)
@@ -431,10 +509,46 @@ class DistributedModelKit:
 
     def _run_on_model_thread_sync(self, description: str, callback: Any) -> Any:
         if self._model_thread_requests is None:
+            logger.info(
+                "Running distributed model request inline because model thread is disabled: "
+                "%s rank=%s/%s thread=%s",
+                description,
+                self.group.rank(),
+                self.group.size(),
+                _current_thread_summary(),
+            )
             return callback()
         if threading.get_ident() == self._model_thread_ident:
+            logger.info(
+                "Running distributed model request directly on model thread: "
+                "%s rank=%s/%s thread=%s",
+                description,
+                self.group.rank(),
+                self.group.size(),
+                _current_thread_summary(),
+            )
             return callback()
 
+        current_thread = threading.current_thread()
+        created_at = time.monotonic()
+        logger.info(
+            "Queueing distributed model sync request %s on rank %s/%s "
+            "caller_thread=%s caller_ident=%s model_thread_ident=%s",
+            description,
+            self.group.rank(),
+            self.group.size(),
+            current_thread.name,
+            current_thread.ident,
+            self._model_thread_ident,
+        )
+        log_mlx_stream_state(
+            reason="distributed-model-thread-sync-queued",
+            distributed_group=self.group,
+            details=(
+                f"description={description} "
+                f"model_thread_ident={self._model_thread_ident}"
+            ),
+        )
         response_queue: Queue = Queue()
         self._model_thread_requests.put(
             DistributedModelThreadRequest(
@@ -442,9 +556,22 @@ class DistributedModelKit:
                 callback=callback,
                 response_queue=response_queue,
                 stream_results=False,
+                created_at=created_at,
+                caller_thread_name=current_thread.name,
+                caller_thread_ident=current_thread.ident,
             )
         )
         success, value = response_queue.get()
+        logger.info(
+            "Distributed model sync request returned %s on rank %s/%s "
+            "success=%s elapsed=%.3fs value_type=%s",
+            description,
+            self.group.rank(),
+            self.group.size(),
+            success,
+            time.monotonic() - created_at,
+            type(value).__name__,
+        )
         if success:
             return value
         raise value
@@ -456,12 +583,48 @@ class DistributedModelKit:
         callback: Any,
     ) -> Iterable[Any]:
         if self._model_thread_requests is None:
+            logger.info(
+                "Running distributed generator inline because model thread is disabled: "
+                "%s rank=%s/%s thread=%s",
+                description,
+                self.group.rank(),
+                self.group.size(),
+                _current_thread_summary(),
+            )
             yield from callback()
             return
         if threading.get_ident() == self._model_thread_ident:
+            logger.info(
+                "Running distributed generator directly on model thread: "
+                "%s rank=%s/%s thread=%s",
+                description,
+                self.group.rank(),
+                self.group.size(),
+                _current_thread_summary(),
+            )
             yield from callback()
             return
 
+        current_thread = threading.current_thread()
+        created_at = time.monotonic()
+        logger.info(
+            "Queueing distributed model streaming request %s on rank %s/%s "
+            "caller_thread=%s caller_ident=%s model_thread_ident=%s",
+            description,
+            self.group.rank(),
+            self.group.size(),
+            current_thread.name,
+            current_thread.ident,
+            self._model_thread_ident,
+        )
+        log_mlx_stream_state(
+            reason="distributed-model-thread-stream-queued",
+            distributed_group=self.group,
+            details=(
+                f"description={description} "
+                f"model_thread_ident={self._model_thread_ident}"
+            ),
+        )
         response_queue: Queue = Queue()
         self._model_thread_requests.put(
             DistributedModelThreadRequest(
@@ -469,15 +632,50 @@ class DistributedModelKit:
                 callback=callback,
                 response_queue=response_queue,
                 stream_results=True,
+                created_at=created_at,
+                caller_thread_name=current_thread.name,
+                caller_thread_ident=current_thread.ident,
             )
         )
 
+        item_count = 0
         while True:
             item = response_queue.get()
             if item is None:
+                logger.info(
+                    "Distributed model streaming request completed %s on rank %s/%s "
+                    "items=%s elapsed=%.3fs",
+                    description,
+                    self.group.rank(),
+                    self.group.size(),
+                    item_count,
+                    time.monotonic() - created_at,
+                )
                 return
             if isinstance(item, Exception):
+                logger.error(
+                    "Distributed model streaming request failed %s on rank %s/%s "
+                    "items=%s elapsed=%.3fs error_type=%s error=%r",
+                    description,
+                    self.group.rank(),
+                    self.group.size(),
+                    item_count,
+                    time.monotonic() - created_at,
+                    type(item).__name__,
+                    item,
+                )
                 raise item
+            if item_count == 0:
+                logger.info(
+                    "Distributed model streaming request yielded first item %s on rank %s/%s "
+                    "after %.3fs item_type=%s",
+                    description,
+                    self.group.rank(),
+                    self.group.size(),
+                    time.monotonic() - created_at,
+                    type(item).__name__,
+                )
+            item_count += 1
             yield item
 
     def _resolve_model_path(self, model_path: str | Path) -> Path:
@@ -673,12 +871,27 @@ class DistributedModelKit:
             return
         self._shutdown.set()
         if self._model_thread_requests is not None:
+            logger.info(
+                "Requesting distributed model thread shutdown on rank %s/%s caller_thread=%s",
+                self.group.rank(),
+                self.group.size(),
+                _current_thread_summary(),
+            )
             self._model_thread_requests.put(None)
         if (
             self._model_thread is not None
             and threading.get_ident() != self._model_thread_ident
         ):
+            join_started_at = time.monotonic()
             self._model_thread.join(timeout=5)
+            logger.info(
+                "Distributed model thread join finished on rank %s/%s "
+                "elapsed=%.3fs alive=%s",
+                self.group.rank(),
+                self.group.size(),
+                time.monotonic() - join_started_at,
+                self._model_thread.is_alive(),
+            )
 
     def is_shutdown(self) -> bool:
         return self._shutdown.is_set()
