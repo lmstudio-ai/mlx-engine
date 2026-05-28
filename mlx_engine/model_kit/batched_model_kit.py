@@ -1,4 +1,5 @@
 from threading import Thread, Event
+import gc
 import json
 import sys
 import traceback
@@ -24,6 +25,7 @@ from mlx_engine.model_kit.batched_model_kit_types import (
     GenerationRequest,
     CancelGenerationRequest,
 )
+from mlx_engine.utils.set_seed import set_seed
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,7 @@ class BatchedModelKit:
             that can be processed simultaneously.
     """
 
-    model: nn.Module
+    model: nn.Module | None
     tokenizer: TokenizerWrapper
     model_type: str | None
 
@@ -89,6 +91,7 @@ class BatchedModelKit:
         prefill_step_size: int,
         max_kv_size: int | None = None,
         max_seq_nums: int | None = None,
+        seed: int | None = None,
     ):
         self._requests = Queue()
         self._prompt_cache = LRUPromptCache()
@@ -96,6 +99,7 @@ class BatchedModelKit:
         self._backend_exception = None
         self._generation_thread = None
         self._shutdown = Event()
+        self._startup_complete = Event()
         if max_seq_nums is None or max_seq_nums < 1:
             max_seq_nums = 1
             logger.info(f"Setting concurrent request limit to {max_seq_nums}")
@@ -106,13 +110,15 @@ class BatchedModelKit:
         config_json = json.loads((model_path / "config.json").read_text())
         self.model_type = config_json.get("model_type", None)
 
-        self.model, self.tokenizer = mlx_lm.utils.load(self._model_path, lazy=False)
+        self.model = None
+        self.tokenizer = mlx_lm.tokenizer_utils.load(self._model_path)
         fix_mistral_pre_tokenizer(
             tokenizer=self.tokenizer, model_path=model_path, model_type=self.model_type
         )
         self._detokenizer = self.tokenizer.detokenizer
         self._max_kv_size = max_kv_size
         self._prefill_step_size = prefill_step_size
+        self._seed = seed
         logger.info("BatchedModelKit loaded successfully")
 
     def start(self):
@@ -125,6 +131,9 @@ class BatchedModelKit:
             target=self._generate_with_exception_handling, daemon=True
         )
         self._generation_thread.start()
+        self._startup_complete.wait()
+        if isinstance(self._backend_exception, Exception):
+            raise self._backend_exception
 
     def tokenize(self, prompt: str) -> list[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
@@ -236,6 +245,10 @@ class BatchedModelKit:
             self._shutdown.set()
             if self._generation_thread:
                 self._generation_thread.join()
+            self.model = None
+            self._generation_thread = None
+            gc.collect()
+            mx.clear_cache()
 
     def _generate_with_exception_handling(self):
         """
@@ -254,6 +267,7 @@ class BatchedModelKit:
             self._backend_exception = Exception(err_string)
             for entry in self._batch_results.values():
                 entry["rqueue"].put(self._backend_exception)
+            self._startup_complete.set()
 
             # Sleep to allow error messages to be logged and propagated to clients
             time.sleep(3)
@@ -276,6 +290,14 @@ class BatchedModelKit:
         The loop runs until shutdown is requested, at which point all active
         requests receive a RequestCancelled exception.
         """
+
+        set_seed(self._seed)
+
+        if self.model is None:
+            self.model, _ = mlx_lm.utils.load(self._model_path, lazy=False)
+            mx.synchronize()
+            mx.clear_cache()
+        self._startup_complete.set()
 
         batch_generator = BatchGenerator(
             self.model,
@@ -325,19 +347,20 @@ class BatchedModelKit:
                         logger.warning(f"Could not cancel {request_id=} (id not found)")
                     continue
 
-                cache, cached_prefix, rest = _prepare_prompt_cache_for_generation(
-                    self._prompt_cache, current_model_key, request.prompt_tokens
-                )
+                with mx.stream(batch_generator.stream):
+                    cache, cached_prefix, rest = _prepare_prompt_cache_for_generation(
+                        self._prompt_cache, current_model_key, request.prompt_tokens
+                    )
 
-                # Add to batch
-                (uid,) = batch_generator.insert(
-                    [rest],
-                    [request.max_tokens],
-                    caches=[cache],
-                    all_tokens=[cached_prefix],
-                    samplers=[request.samplers],
-                    logits_processors=[request.logits_processors],
-                )
+                    # Keep cache allocation on the same MLX stream as generation.
+                    (uid,) = batch_generator.insert(
+                        [rest],
+                        [request.max_tokens],
+                        caches=[cache],
+                        all_tokens=[cached_prefix],
+                        samplers=[request.samplers],
+                        logits_processors=[request.logits_processors],
+                    )
 
                 # Track this request
                 self._batch_results[uid] = {

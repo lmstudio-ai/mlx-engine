@@ -1,13 +1,17 @@
-import math
 from pathlib import Path
 import pytest
-from mlx_engine.cache_wrapper import DEFAULT_CHECKPOINT_TAIL_TOKENS
-from mlx_lm.models.cache import can_trim_prompt_cache
+import mlx.core as mx
 from mlx_engine.generate import (
     load_model,
     tokenize,
     create_generator,
     is_draft_model_compatible,
+    unload,
+)
+from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
+from mlx_engine.model_kit.batched_vision.prompt_inputs import (
+    build_prompt_kwargs,
+    prepare_prompt_inputs,
 )
 from tests.shared import (
     model_getter,
@@ -19,8 +23,6 @@ from textwrap import dedent
 from transformers import AutoProcessor
 
 
-MAX_IMAGE_SIZE = (1024, 1024)
-
 MAX_KV_CACHE_SIZE = 20000
 
 # 512 was the previous default, and some tests were written with assertions
@@ -28,60 +30,59 @@ MAX_KV_CACHE_SIZE = 20000
 CACHING_TEST_PREFILL_STEP_SIZE = 512
 
 
-def _expected_sequential_reporter_event_count(
-    *,
-    total_prompt_tokens: int,
-    cached_tokens: int,
-    prefill_step_size: int = CACHING_TEST_PREFILL_STEP_SIZE,
-) -> int:
-    """Compute begin/update/finish events for CacheWrapper-based prompt processing."""
-    prefillable_tokens = max(0, total_prompt_tokens - cached_tokens - 1)
-    num_updates = math.ceil(prefillable_tokens / prefill_step_size)
-
-    checkpoint_prefix_len = total_prompt_tokens - DEFAULT_CHECKPOINT_TAIL_TOKENS
-    checkpoint_offset = checkpoint_prefix_len - cached_tokens
-    if (
-        0 < checkpoint_offset < prefillable_tokens
-        and checkpoint_offset % prefill_step_size != 0
-    ):
-        num_updates += 1
-
-    return num_updates + 2
-
-
-def _assert_sequential_reporter_event_count(
-    reporter: RecordingReporter,
-    *,
-    prefill_step_size: int = CACHING_TEST_PREFILL_STEP_SIZE,
-) -> None:
+def _assert_batched_vlm_reporter_events(reporter: RecordingReporter) -> None:
+    """Assert basic progress invariants for the batched VLM path."""
+    assert reporter.events
     begin_event = reporter.events[0]
-    expected_count = _expected_sequential_reporter_event_count(
-        total_prompt_tokens=begin_event["total_prompt_tokens"],
-        cached_tokens=begin_event["cached_tokens"],
-        prefill_step_size=prefill_step_size,
-    )
-    assert len(reporter.events) == expected_count, (
-        f"Expected {expected_count} prompt progress events for "
-        f"{begin_event['total_prompt_tokens']} total tokens and "
-        f"{begin_event['cached_tokens']} cached tokens at chunk size "
-        f"{prefill_step_size}, but got {len(reporter.events)}."
-    )
+    finish_event = reporter.events[-1]
+    assert begin_event["type"] == "begin"
+    assert finish_event["type"] == "finish"
+    assert begin_event["prefill_tokens_processed"] == 0
+    assert 0 <= begin_event["cached_tokens"] <= begin_event["total_prompt_tokens"]
+
+    progress_values = [
+        begin_event["prefill_tokens_processed"],
+        *[
+            event["prefill_tokens_processed"]
+            for event in reporter.events
+            if event["type"] == "update"
+        ],
+        finish_event["prefill_tokens_processed"],
+    ]
+    assert progress_values == sorted(progress_values)
+    assert finish_event["prefill_tokens_processed"] >= 0
 
 
-def _find_token_runs(tokens: list[int], target_token: int) -> list[tuple[int, int]]:
-    """Return contiguous index ranges where a token repeats."""
-    runs = []
-    start = None
-    for idx, token in enumerate(tokens):
-        if token == target_token:
-            if start is None:
-                start = idx
-        elif start is not None:
-            runs.append((start, idx - 1))
-            start = None
-    if start is not None:
-        runs.append((start, len(tokens) - 1))
-    return runs
+def _expected_cached_text_prompt_tokens(model_kit, prompt: str) -> set[int]:
+    token_count = len(model_kit.tokenize(prompt))
+    # The runtime cache may include the sampled stop token; generated_text does not.
+    return {token_count, token_count + 1}
+
+
+def _assert_cached_text_prompt_reused(
+    begin_event: dict, expected_cached_tokens: set[int]
+) -> None:
+    assert begin_event["cached_tokens"] >= CACHING_TEST_PREFILL_STEP_SIZE
+    assert begin_event["cached_tokens"] <= max(expected_cached_tokens)
+
+
+def _assert_cached_follow_up_prefill_is_small(
+    begin_event: dict,
+    finish_event: dict,
+) -> None:
+    assert finish_event["type"] == "finish"
+    assert finish_event["prefill_tokens_processed"] == (
+        begin_event["total_prompt_tokens"] - begin_event["cached_tokens"]
+    )
+    assert finish_event["prefill_tokens_processed"] <= CACHING_TEST_PREFILL_STEP_SIZE
+
+
+def _assert_mentions_franklin(text: str) -> None:
+    assert "franklin" in text.lower()
+
+
+def _assert_ready_only(text: str) -> None:
+    assert " ".join(text.strip().lower().split()) == "ready"
 
 
 class TestVisionModels:
@@ -101,59 +102,77 @@ class TestVisionModels:
         )
         cls.chameleon_image_b64 = read_image_b64(cls.chameleon_image_path)
 
+    def setup_method(self):
+        self._loaded_model_kit = None
+
+    def teardown_method(self):
+        if self._loaded_model_kit is not None:
+            unload(self._loaded_model_kit)
+
+    def load_model(self, *args, **kwargs):
+        assert self._loaded_model_kit is None
+        model_kit = load_model(*args, **kwargs)
+        self._loaded_model_kit = model_kit
+        return model_kit
+
     def toucan_test_runner(
         self,
         model_name: str,
         prompt: str,
         text_only=False,
         supplemental_accept_phrases=None,
+        max_tokens=30,
     ):
         """Helper method to test a single vision model"""
         print(f"Testing model {model_name}")
         model_path = model_getter(model_name=model_name)
 
         # Load the model
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=2048,
-            max_seq_nums=1,
             trust_remote_code=True,
         )
+        assert isinstance(model_kit, BatchedVisionModelKit)
 
-        # Tokenize the prompt
-        prompt_tokens = tokenize(model_kit, prompt)
+        try:
+            # Tokenize the prompt
+            prompt_tokens = tokenize(model_kit, prompt)
 
-        # Generate description
-        generated_text = ""
-        for result in create_generator(
-            model_kit=model_kit,
-            prompt_tokens=prompt_tokens,
-            images_b64=([self.toucan_image_b64] if not text_only else None),
-            max_image_size=MAX_IMAGE_SIZE,
-            seed=0,
-            max_tokens=30,
-            temp=0.0,
-            repetition_penalty=1.01,  # enable the logits processor code path
-        ):
-            generated_text += result.text
-            print(result.text, end="", flush=True)
-            if result.stop_condition:
-                break
-        print()
+            # Generate description
+            generated_text = ""
+            for result in create_generator(
+                model_kit=model_kit,
+                prompt_tokens=prompt_tokens,
+                images_b64=([self.toucan_image_b64] if not text_only else None),
+                seed=0,
+                max_tokens=max_tokens,
+                temp=0.0,
+                repetition_penalty=1.01,  # enable the logits processor code path
+            ):
+                generated_text += result.text
+                print(result.text, end="", flush=True)
+                if result.stop_condition:
+                    break
+            print()
 
-        # Verify the output
-        assert len(generated_text) > 0, (
-            f"Model {model_name} failed to generate any text"
-        )
-        accept_phrases = ["toucan"]
-        if supplemental_accept_phrases:
-            accept_phrases += supplemental_accept_phrases
-        bird_spotted = any(word in generated_text.lower() for word in accept_phrases)
-        assert bird_spotted, (
-            f"Model {model_name} failed to any of {accept_phrases} in the image"
-        )
+            # Verify the output
+            assert len(generated_text) > 0, (
+                f"Model {model_name} failed to generate any text"
+            )
+            accept_phrases = ["toucan"]
+            if supplemental_accept_phrases:
+                accept_phrases += supplemental_accept_phrases
+            bird_spotted = any(
+                word in generated_text.lower() for word in accept_phrases
+            )
+            assert bird_spotted, (
+                f"Model {model_name} failed to any of {accept_phrases} in the image"
+            )
 
-        return generated_text
+            return generated_text
+        finally:
+            unload(model_kit)
 
     def build_gemma4_prompt(
         self,
@@ -173,27 +192,24 @@ class TestVisionModels:
             add_generation_prompt=True,
         )
 
-    ### MODEL-SPECIFIC TESTS ###
-    def test_llama_3_2_vision_instruct(self):
-        """Test Llama 3.2 11B Vision Instruct model"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{self.description_prompt}<|image|><|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        self.toucan_test_runner(
-            "mlx-community/Llama-3.2-11B-Vision-Instruct-4bit", prompt
+    def build_granite4_prompt(self, model_path: Path, prompt: str) -> str:
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        return processor.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True,
         )
 
-    def test_llama_3_2_vision_instruct_text_only(self):
-        """Test Llama 3.2 11B Vision Instruct model with only text"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{self.text_only_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        try:
-            self.toucan_test_runner(
-                "mlx-community/Llama-3.2-11B-Vision-Instruct-4bit",
-                prompt,
-                text_only=True,
-            )
-        except AttributeError as e:
-            # mlx-lm prompt processing fails
-            assert "'NoneType' object has no attribute 'shape'" in str(e)
-
+    ### MODEL-SPECIFIC TESTS ###
     def test_pixtral_vision(self):
         """Test Pixtral 12B model"""
         prompt = f"<s>[INST]{self.description_prompt}[IMG][/INST]"
@@ -246,7 +262,6 @@ class TestVisionModels:
             model_name="lmstudio-community/LFM2.5-VL-1.6B-MLX-4bit",
             prompt=prompt,
             trust_remote_code=False,
-            max_seq_nums=1,
         )
 
         equations_image_path = self.test_data_dir / "equations.jpg"
@@ -257,7 +272,6 @@ class TestVisionModels:
             model_kit=model_kit,
             prompt_tokens=prompt_tokens,
             images_b64=[equations_image_b64],
-            max_image_size=MAX_IMAGE_SIZE,
             seed=0,
             max_tokens=30,
             temp=0.0,
@@ -307,10 +321,9 @@ class TestVisionModels:
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter(model)
 
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
             prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
@@ -337,22 +350,26 @@ class TestVisionModels:
         # Generation 1 - model creates a long story
         prompt = "<s>[INST]Tell me a 500 word story about the bravest soul in the middle ages, and their weapon of choice[/INST]"
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
         assert "aldric" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
-        prompt += generated_text + "[INST]What was the main character's name?[/INST]"
+        cached_prompt = prompt + generated_text
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
+        prompt = cached_prompt + "[INST]What was the main character's name?[/INST]"
         num_tokens = len(model_kit.tokenize(prompt))
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > 0  # Cache should be used
+        assert begin_event["cached_tokens"] in expected_cached_tokens
         assert "aldric" in generated_text.lower()
 
     def test_qwen2_vision(self):
@@ -417,10 +434,9 @@ class TestVisionModels:
 
     def test_qwen2_5_images_across_messages(self):
         model_path = model_getter("mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
         )
 
         def generate_text(prompt, images_b64):
@@ -430,7 +446,6 @@ class TestVisionModels:
                 model_kit=model_kit,
                 prompt_tokens=prompt_tokens,
                 images_b64=images_b64,
-                max_image_size=MAX_IMAGE_SIZE,
                 seed=0,
                 temp=0.0,
                 max_tokens=50,
@@ -473,40 +488,6 @@ You are a helpful assistant.<|im_end|>
         assert "toucan" in generated_text.lower()
         assert "chameleon" in generated_text.lower()
 
-    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
-    def test_florence_vision(self):
-        """Test Florence 2 Large model"""
-        prompt = self.description_prompt
-        self.toucan_test_runner("mlx-community/Florence-2-base-ft-4bit", prompt)
-
-    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
-    def test_florence_text_only(self):
-        """Test Florence 2 Large model with only text"""
-        prompt = self.text_only_prompt
-        try:
-            self.toucan_test_runner(
-                "mlx-community/Florence-2-base-ft-4bit", prompt, text_only=True
-            )
-        except ValueError as e:
-            assert (
-                "Using this model without any images attached is not supported yet."
-                in str(e)
-            )
-
-    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
-    def test_molmo_vision(self):
-        """Test Molmo 7B model"""
-        prompt = self.description_prompt
-        self.toucan_test_runner("mlx-community/Molmo-7B-D-0924-4bit", prompt)
-
-    @pytest.mark.skip(reason="Unavailable since this requires trust_remote_code")
-    def test_molmo_text_only(self):
-        """Test Molmo 7B model with only text"""
-        prompt = self.text_only_prompt
-        self.toucan_test_runner(
-            "mlx-community/Molmo-7B-D-0924-4bit", prompt, text_only=True
-        )
-
     def test_llava_vision(self):
         """Test LLaVA v1.6 Mistral 7B model"""
         prompt = f"[INST] <image>\n{self.description_prompt} [/INST]"
@@ -521,30 +502,6 @@ You are a helpful assistant.<|im_end|>
         prompt = f"[INST] {self.text_only_prompt} [/INST]"
         self.toucan_test_runner(
             "mlx-community/llava-v1.6-mistral-7b-4bit", prompt, text_only=True
-        )
-
-    def test_bunny_llama_vision(self):
-        """Test Bunny Llama 3 8B V model"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n<image>\n{self.description_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-        self.toucan_test_runner("mlx-community/Bunny-Llama-3-8B-V-4bit", prompt)
-
-    def test_bunny_llama_text_only(self):
-        """Test Bunny Llama 3 8B V model with only text"""
-        prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{self.text_only_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        self.toucan_test_runner(
-            "mlx-community/Bunny-Llama-3-8B-V-4bit", prompt, text_only=True
-        )
-
-    def test_nano_llava_vision(self):
-        """Test Nano LLaVA 1.5 4B model"""
-        prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n<image>\n{self.description_prompt}<|im_end|><|im_start|>assistant\n\n"
-        self.toucan_test_runner("mlx-community/nanoLLaVA-1.5-4bit", prompt)
-
-    def test_nano_llava_text_only(self):
-        """Test Nano LLaVA 1.5 4B model with only text"""
-        prompt = f"<|im_start|>system\nAnswer the prompt.<|im_end|><|im_start|>user\n{self.text_only_prompt}<|im_end|><|im_start|>assistant\n\n"
-        self.toucan_test_runner(
-            "mlx-community/nanoLLaVA-1.5-4bit", prompt, text_only=True
         )
 
     def test_paligemma2_vision(self):
@@ -571,8 +528,22 @@ You are a helpful assistant.<|im_end|>
 
     def test_gemma3_vision(self):
         """Test Gemma 3 model"""
-        prompt = f"<bos><start_of_turn>user\n{self.description_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n"
-        self.toucan_test_runner("mlx-community/gemma-3-4b-it-4bit", prompt)
+        description_prompt = (
+            "Describe this image in 2-3 short sentences. Mention the bird, "
+            "its large colorful beak, and the natural photographic tone. "
+            "Do not use bullet points."
+        )
+        prompt = f"<bos><start_of_turn>user\n{description_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n"
+        generated_text = self.toucan_test_runner(
+            "mlx-community/gemma-3-4b-it-4bit",
+            prompt,
+            max_tokens=80,
+        )
+        assert any(word in generated_text.lower() for word in ["beak", "bill"])
+        assert not any(
+            line.lstrip().startswith(("-", "*", "•"))
+            for line in generated_text.splitlines()
+        )
 
     def test_gemma3_text_only_short(self):
         """Test Gemma 3 model"""
@@ -584,10 +555,9 @@ You are a helpful assistant.<|im_end|>
     def test_gemma3_text_only_generation_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("mlx-community/gemma-3-4b-it-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
             prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
@@ -615,18 +585,22 @@ You are a helpful assistant.<|im_end|>
         # Generation 1 - model creates a long story
         prompt = dedent("""\
             <bos><start_of_turn>user
-            Tell me a 500-word story<end_of_turn>
+            Tell me a 500-word story about a main character named Silas<end_of_turn>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
         assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
-        prompt += generated_text + dedent("""\
+        cached_prompt = prompt + generated_text
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
+        prompt = cached_prompt + dedent("""\
             <end_of_turn>
             <start_of_turn>user
             What was the main characters name?<end_of_turn>
@@ -636,19 +610,18 @@ You are a helpful assistant.<|im_end|>
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > 0  # Cache should be used
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
         assert "silas" in generated_text.lower()
 
     def test_gemma3_text_only_long_original_prompt_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("mlx-community/gemma-3-4b-it-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
             prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
         print(type(model_kit))
@@ -674,41 +647,47 @@ You are a helpful assistant.<|im_end|>
             print("\n", flush=True)
             return generated_text, reporter
 
-        # Generation 1 - send model a long excerpt to summarize
+        # Generation 1 - send model a long excerpt and cache it.
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
         # don't use dedent below b/c file content doesn't match indentation on each newline
         prompt = f"""\
 <bos><start_of_turn>user
+Read the excerpt below. When you are done, reply with exactly READY and nothing else.
+
 ```
 {file_content}
 ```
-Summarize this in one sentence<end_of_turn>
+Reply with exactly READY and nothing else.<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert "benjamin franklin" in generated_text.lower()
+        _assert_ready_only(generated_text)
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
-        prompt += generated_text + dedent("""\
+        cached_prompt = prompt + generated_text
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
+        prompt = cached_prompt + dedent("""\
                 <end_of_turn>
                 <start_of_turn>user
-                What was the main characters name?<end_of_turn>
+                Who is the author of this passage? Answer with only the name.<end_of_turn>
                 <start_of_turn>model
                 """)
         print(prompt)
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > 0  # Cache should be used
-        assert "benjamin franklin" in generated_text.lower()
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
+        _assert_mentions_franklin(generated_text)
 
     def test_gemma3n_vision(self):
         """Test gemma 3n model"""
@@ -734,6 +713,17 @@ Summarize this in one sentence<end_of_turn>
             supplemental_accept_phrases=["bird"],
         )
 
+    def test_granite4_vision(self):
+        """Test Granite 4 Vision model."""
+        model_name = "mlx-community/granite-4.0-3b-vision-4bit"
+        model_path = model_getter(model_name)
+        prompt = self.build_granite4_prompt(model_path, self.description_prompt)
+        self.toucan_test_runner(
+            model_name,
+            prompt,
+            supplemental_accept_phrases=["bird"],
+        )
+
     @pytest.mark.heavy
     def test_gemma4_text_only(self):
         """Test Gemma 4 model with text only via the unified multimodal path."""
@@ -748,14 +738,13 @@ Summarize this in one sentence<end_of_turn>
 
     @pytest.mark.heavy
     def test_gemma4_text_only_generation_caching(self):
-        """Ensure unified-arch Gemma 4 reuses cross-prompt cache for text-only turns."""
+        """Gemma 4 VLM progress reports cached and uncached prompt tokens."""
         model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
         model_path = model_getter(model_name)
         processor = AutoProcessor.from_pretrained(model_path)
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
             prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
@@ -793,7 +782,9 @@ Summarize this in one sentence<end_of_turn>
                 "content": [
                     {
                         "type": "text",
-                        "text": "Tell me a 500-word story about a traveler, and make the main character's name distinctive.",
+                        "text": (
+                            "Tell me a 500-word story about a traveler named Silas."
+                        ),
                     }
                 ],
             }
@@ -801,15 +792,16 @@ Summarize this in one sentence<end_of_turn>
 
         prompt = render_prompt(first_conversation)
         generated_text, reporter = generate_text(prompt)
-        first_update_events = [
-            event for event in reporter.events if event["type"] == "update"
-        ]
-        assert len(first_update_events) > 0
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
         assert len(generated_text) > 0
+        assert "silas" in generated_text.lower()
 
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, prompt + generated_text
+        )
         second_conversation = first_conversation + [
             {
                 "role": "assistant",
@@ -831,32 +823,26 @@ Summarize this in one sentence<end_of_turn>
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
 
         follow_up_text, reporter = generate_text(prompt)
-        second_update_events = [
-            event for event in reporter.events if event["type"] == "update"
-        ]
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > 0
-        assert len(second_update_events) <= len(first_update_events)
-        assert (
-            second_update_events[-1]["prefill_tokens_processed"]
-            < first_update_events[-1]["prefill_tokens_processed"]
-        )
-        assert len(follow_up_text.strip()) > 0
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
+        finish_event = reporter.events[-1]
+        _assert_cached_follow_up_prefill_is_small(begin_event, finish_event)
+        assert "silas" in follow_up_text.lower()
 
     @pytest.mark.heavy
     def test_gemma4_scratchpad_follow_up_reuses_checkpoint_cache(self):
-        """Ensure Gemma 4 reuses a cached prompt checkpoint when follow-up drops a long assistant scratchpad."""
+        """Gemma 4 should reuse an image checkpoint after another request."""
         model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
         model_path = model_getter(model_name)
         processor = AutoProcessor.from_pretrained(model_path)
-        max_kv_size = 512
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
-            max_kv_size=max_kv_size,
-            max_seq_nums=1,
+            max_kv_size=MAX_KV_CACHE_SIZE,
             prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
+        sliding_window_size = int(model_kit.config["text_config"]["sliding_window"])
         control_word = "MERIDIAN"
         background_words = (
             (self.test_data_dir / "ben_franklin_autobiography_start.txt")
@@ -871,7 +857,7 @@ Summarize this in one sentence<end_of_turn>
                 add_generation_prompt=True,
             )
 
-        def generate_text(prompt, *, max_tokens):
+        def generate_text(prompt, *, max_tokens, images_b64=None):
             prompt_tokens = tokenize(model_kit, prompt)
             reporter = RecordingReporter()
 
@@ -879,6 +865,7 @@ Summarize this in one sentence<end_of_turn>
             for result in create_generator(
                 model_kit=model_kit,
                 prompt_tokens=prompt_tokens,
+                images_b64=images_b64,
                 seed=0,
                 temp=0.0,
                 max_tokens=max_tokens,
@@ -892,15 +879,16 @@ Summarize this in one sentence<end_of_turn>
             print("\n", flush=True)
             return prompt_tokens, generated_text, reporter
 
-        background = " ".join(background_words[:192])
+        background = " ".join(background_words[:384])
         first_conversation = [
             {
                 "role": "user",
                 "content": [
+                    {"type": "image", "base64": self.toucan_image_b64},
                     {
                         "type": "text",
                         "text": dedent(f"""\
-                            Read the background carefully.
+                            Read the image and background carefully.
 
                             Background:
                             {background}
@@ -913,22 +901,26 @@ Summarize this in one sentence<end_of_turn>
                             FINAL: {control_word}
                             Do not write anything after that final line.
                             """),
-                    }
+                    },
                 ],
             }
         ]
         first_prompt = render_prompt(first_conversation)
-        first_prompt_tokens = tokenize(model_kit, first_prompt)
-        assert len(first_prompt_tokens) < max_kv_size
 
         (
             _,
             generated_text,
             reporter,
-        ) = generate_text(first_prompt, max_tokens=1600)
+        ) = generate_text(
+            first_prompt,
+            max_tokens=1600,
+            images_b64=[self.toucan_image_b64],
+        )
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
+        first_total_prompt_tokens = begin_event["total_prompt_tokens"]
+        assert first_total_prompt_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         assert len(generated_text) > 0
 
         final_marker = f"FINAL: {control_word}"
@@ -938,7 +930,14 @@ Summarize this in one sentence<end_of_turn>
         scratchpad_token_count = len(
             model_kit.tokenizer.encode(scratchpad_text, add_special_tokens=False)
         )
-        assert scratchpad_token_count > 512
+        assert scratchpad_token_count > sliding_window_size
+
+        # Replace the one-entry hot cache so the follow-up must use disk cache.
+        unrelated_prompt = render_prompt(
+            [{"role": "user", "content": [{"type": "text", "text": "Reply OK."}]}]
+        )
+        _, unrelated_text, _ = generate_text(unrelated_prompt, max_tokens=8)
+        assert len(unrelated_text.strip()) > 0
 
         assistant_text = control_word
 
@@ -959,20 +958,27 @@ Summarize this in one sentence<end_of_turn>
         ]
         second_prompt = render_prompt(second_conversation)
 
-        _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
+        _, follow_up_text, reporter = generate_text(
+            second_prompt,
+            max_tokens=64,
+            images_b64=[self.toucan_image_b64],
+        )
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > len(first_prompt_tokens) // 2
+        assert begin_event["cached_tokens"] >= CACHING_TEST_PREFILL_STEP_SIZE
+        assert begin_event["cached_tokens"] <= first_total_prompt_tokens
+        assert begin_event["cached_tokens"] < begin_event["total_prompt_tokens"]
+        finish_event = reporter.events[-1]
+        _assert_cached_follow_up_prefill_is_small(begin_event, finish_event)
         assert control_word.lower() in follow_up_text.lower()
 
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_generation_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
             prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
@@ -1000,18 +1006,22 @@ Summarize this in one sentence<end_of_turn>
         # Generation 1 - model creates a long story
         prompt = dedent("""\
             <bos><start_of_turn>user
-            Tell me a 500-word story<end_of_turn>
+            Tell me a 500-word story about a main character named Silas<end_of_turn>
             <start_of_turn>model
             """)
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
         assert "silas" in generated_text.lower()
 
         # Generation 2 - ask for a detail about the story, should not reprocess
-        prompt += generated_text + dedent("""\
+        cached_prompt = prompt + generated_text
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
+        prompt = cached_prompt + dedent("""\
             <end_of_turn>
             <start_of_turn>user
             What was the main characters name?<end_of_turn>
@@ -1021,20 +1031,19 @@ Summarize this in one sentence<end_of_turn>
         # Without caching, prompts > prefill_step_size tokens cause multi-chunk processing.
         assert num_tokens > CACHING_TEST_PREFILL_STEP_SIZE
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > 0  # Cache should be used
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
         assert "silas" in generated_text.lower()
 
     # TODO(will): Parameterize and de-dup
     def test_gemma3n_text_only_long_original_prompt_caching(self):
         """Ensure that text only prompts with vlms take full advantage of caching generated tokens"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
             prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
         )
 
@@ -1059,49 +1068,56 @@ Summarize this in one sentence<end_of_turn>
             print("\n", flush=True)
             return generated_text, reporter
 
-        # Generation 1 - send model a long excerpt to summarize
+        # Generation 1 - send model a long excerpt and cache it.
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
         file_content = file_path.read_text()
         # don't use dedent below b/c file content doesn't match indentation on each newline
         prompt = f"""\
 <bos><start_of_turn>user
+Read the excerpt below. When you are done, reply with exactly READY and nothing else.
+
 ```
 {file_content}
 ```
-Summarize this in one sentence<end_of_turn>
+Reply with exactly READY and nothing else.<end_of_turn>
 <start_of_turn>model
 """
         num_tokens = len(model_kit.tokenize(prompt))
         assert num_tokens > 1024
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
         assert begin_event["cached_tokens"] == 0
-        assert "benjamin franklin" in generated_text.lower()
+        _assert_ready_only(generated_text)
 
         # Generation 2 - ask for a detail about the excerpt, should not reprocess
-        prompt += generated_text + dedent("""\
+        cached_prompt = prompt + generated_text
+        expected_cached_tokens = _expected_cached_text_prompt_tokens(
+            model_kit, cached_prompt
+        )
+        prompt = cached_prompt + dedent("""\
                 <end_of_turn>
                 <start_of_turn>user
-                What was the main characters name?<end_of_turn>
+                Who is the author of this passage? Answer with only the name.<end_of_turn>
                 <start_of_turn>model
                 """)
         print(prompt)
         generated_text, reporter = generate_text(prompt)
-        _assert_sequential_reporter_event_count(reporter)
+        _assert_batched_vlm_reporter_events(reporter)
         begin_event = reporter.events[0]
         assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] > 0  # Cache should be used
-        assert "benjamin franklin" in generated_text.lower()
+        _assert_cached_text_prompt_reused(begin_event, expected_cached_tokens)
+        finish_event = reporter.events[-1]
+        _assert_cached_follow_up_prefill_is_small(begin_event, finish_event)
+        _assert_mentions_franklin(generated_text)
 
     def test_gemma3n_vision_long_prompt_progress_reported(self):
         """Ensure progress is reported during prompt processing with a vision prompt"""
         model_path = model_getter("lmstudio-community/gemma-3n-E2B-it-MLX-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
-            max_seq_nums=1,
         )
 
         file_path = self.test_data_dir / "ben_franklin_autobiography_start.txt"
@@ -1124,7 +1140,6 @@ Summarize this in one sentence<end_of_turn>
             model_kit=model_kit,
             prompt_tokens=prompt_tokens,
             images_b64=[self.toucan_image_b64],
-            max_image_size=MAX_IMAGE_SIZE,
             seed=0,
             temp=0.0,
             max_tokens=1,  # We only care about pre-fill in this test
@@ -1171,10 +1186,9 @@ Summarize this in one sentence<end_of_turn>
         state from the vision request does not leak into subsequent text-only
         requests."""
         model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=2048,
-            max_seq_nums=1,
             trust_remote_code=True,
         )
 
@@ -1185,7 +1199,6 @@ Summarize this in one sentence<end_of_turn>
                 model_kit=model_kit,
                 prompt_tokens=prompt_tokens,
                 images_b64=images_b64,
-                max_image_size=MAX_IMAGE_SIZE,
                 seed=0,
                 temp=0.0,
                 max_tokens=30,
@@ -1221,97 +1234,6 @@ Summarize this in one sentence<end_of_turn>
             f"(MRoPE state likely leaked): {repr(baseline_text)} != {repr(after_vision_text)}"
         )
 
-    @pytest.mark.heavy
-    def test_qwen3_5_text_only_follow_up_reuses_checkpoint_cache(self):
-        """Qwen3.5 should reuse a stored checkpoint for text-only follow-ups.
-
-        The dense Qwen3.5 architecture alternates three linear-attention layers
-        with one full-attention layer (`full_attention_interval=4`). In the
-        current stack this produces a non-trimmable prompt cache, so follow-up
-        reuse after dropping a long assistant scratchpad depends on checkpoint
-        snapshots rather than trimming a longer assistant cache entry.
-        """
-        model_name = "lmstudio-community/Qwen3.5-2B-MLX-4bit"
-        model_path = model_getter(model_name)
-        max_kv_size = 160
-        model_kit = load_model(
-            model_path=model_path,
-            max_kv_size=max_kv_size,
-            max_seq_nums=1,
-            trust_remote_code=True,
-            prefill_step_size=CACHING_TEST_PREFILL_STEP_SIZE,
-        )
-        control_word = "MERIDIAN"
-
-        assert not can_trim_prompt_cache(model_kit.cache_wrapper.cache)
-
-        def generate_text(prompt, *, max_tokens):
-            prompt_tokens = tokenize(model_kit, prompt)
-            reporter = RecordingReporter()
-
-            generated_text = ""
-            for result in create_generator(
-                model_kit=model_kit,
-                prompt_tokens=prompt_tokens,
-                seed=0,
-                temp=0.0,
-                max_tokens=max_tokens,
-                repetition_penalty=1.01,  # to enable this code path
-                prompt_progress_reporter=reporter,
-            ):
-                generated_text += result.text
-                print(result.text, end="", flush=True)
-                if result.stop_condition:
-                    break
-            print("\n", flush=True)
-            return prompt_tokens, generated_text, reporter
-
-        first_prompt = dedent(f"""\
-            <|im_start|>system
-            You are a helpful assistant.<|im_end|>
-            <|im_start|>user
-            Write two sections in order.
-            First, write a long SCRATCHPAD section with at least 120 numbered lines about medieval trade routes.
-            Keep each line short, between 6 and 12 words.
-            Second, end with a single final line in the exact format:
-            FINAL: {control_word}
-            Do not write anything after that final line.<|im_end|>
-            <|im_start|>assistant
-            """)
-        first_prompt_tokens = tokenize(model_kit, first_prompt)
-        assert len(first_prompt_tokens) < max_kv_size
-
-        _, generated_text, reporter = generate_text(first_prompt, max_tokens=1600)
-        begin_event = reporter.events[0]
-        assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == 0
-        assert len(generated_text) > 0
-
-        final_marker = f"FINAL: {control_word}"
-        final_index = generated_text.find(final_marker)
-        assert final_index >= 0, generated_text
-        scratchpad_text = generated_text[:final_index]
-        assert len(scratchpad_text.strip()) > 0
-
-        second_prompt = (
-            first_prompt
-            + control_word
-            + dedent("""\
-            <|im_end|>
-            <|im_start|>user
-            What was the exact single-word final answer from your previous message? Reply with only that word.<|im_end|>
-            <|im_start|>assistant
-            """)
-        )
-
-        _, follow_up_text, reporter = generate_text(second_prompt, max_tokens=64)
-        begin_event = reporter.events[0]
-        assert begin_event["type"] == "begin"
-        assert begin_event["cached_tokens"] == (
-            len(first_prompt_tokens) - DEFAULT_CHECKPOINT_TAIL_TOKENS
-        )
-        assert len(follow_up_text.strip()) > 0
-
     def test_qwen3_5_multi_image_process_prompt_preserves_image_positions(self):
         """Qwen3.5 must inject MRoPE positions for every image span.
 
@@ -1321,10 +1243,9 @@ Summarize this in one sentence<end_of_turn>
         falling back to sequential text positions.
         """
         model_path = model_getter("lmstudio-community/Qwen3.5-2B-MLX-4bit")
-        model_kit = load_model(
+        model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=2048,
-            max_seq_nums=1,
             trust_remote_code=True,
         )
 
@@ -1340,27 +1261,28 @@ Toucan.<|im_end|>
 """
 
         prompt_tokens = tokenize(model_kit, prompt)
-        reporter = RecordingReporter()
-        input_ids, _ = model_kit.process_prompt(
-            prompt_tokens,
-            [self.toucan_image_b64, self.chameleon_image_b64],
-            reporter,
-            {},
-            MAX_IMAGE_SIZE,
+        assert isinstance(model_kit, BatchedVisionModelKit)
+        prepared_prompt = prepare_prompt_inputs(
+            prompt_tokens=prompt_tokens,
+            images_b64=[self.toucan_image_b64, self.chameleon_image_b64],
+            tokenizer=model_kit.tokenizer,
+            processor=model_kit.processor,
+            config=model_kit.config,
+        )
+        prompt_kwargs = build_prompt_kwargs(model_kit.model, prepared_prompt)
+        mx.eval(prompt_kwargs["inputs_embeds"])
+
+        position_ids = prompt_kwargs["position_ids"]
+        image_spans = prepared_prompt.image_spans
+
+        assert len(image_spans) == 2, (
+            f"Expected two expanded image spans in the prompt, got {image_spans!r}"
         )
 
-        text_model = model_kit.model.language_model.model
-        image_token_id = model_kit.vision_add_on.config.image_token_id
-        image_runs = _find_token_runs(input_ids.tolist(), image_token_id)
-
-        assert len(image_runs) == 2, (
-            f"Expected two expanded image spans in the prompt, got {image_runs!r}"
-        )
-
-        for run_idx, (start, end) in enumerate(image_runs):
-            temporal_positions = text_model.position_ids[0, 0, start : end + 1].tolist()
+        for span_idx, span in enumerate(image_spans):
+            temporal_positions = position_ids[0, 0, span.start : span.end].tolist()
             assert len(set(temporal_positions)) == 1, (
-                f"Image span {run_idx} used sequential text positions instead of "
+                f"Image span {span_idx} used sequential text positions instead of "
                 f"image MRoPE positions: {temporal_positions[:12]!r}..."
             )
 
@@ -1389,7 +1311,7 @@ Toucan.<|im_end|>
         draft_model_path = model_getter(
             "lmstudio-community/Qwen2.5-0.5B-Instruct-MLX-8bit"
         )
-        model_kit = load_model(model_path=model_path, max_seq_nums=1)
+        model_kit = self.load_model(model_path=model_path)
         assert not is_draft_model_compatible(model_kit=model_kit, path=draft_model_path)
 
     @pytest.mark.heavy

@@ -34,7 +34,12 @@ from mlx_lm.models.base import (
     scaled_dot_product_attention,
 )
 from mlx_lm.models.gated_delta import gated_delta_update
+from mlx_lm.models.rope_utils import initialize_rope
+from mlx_lm.models.qwen3_next import Qwen3NextAttention
+from mlx_vlm.models.base import LanguageModelOutput
 from mlx_vlm.models.qwen3_5.language import (
+    LanguageModel as VlmQwen3_5LanguageModel,
+    Qwen3_5Attention as VlmQwen3_5Attention,
     Qwen3_5RotaryEmbedding,
     apply_multimodal_rotary_pos_emb,
 )
@@ -43,6 +48,9 @@ from mlx_vlm.models.qwen3_5.language import (
 # mutates mlx_lm.models.qwen3_5 in place.
 OriginalDecoderLayer = DecoderLayer
 OriginalQwen3_5TextModel = Qwen3_5TextModel
+OriginalVlmQwen3_5AttentionInit = VlmQwen3_5Attention.__init__
+OriginalVlmQwen3_5AttentionCall = VlmQwen3_5Attention.__call__
+OriginalVlmQwen3_5LanguageModelCall = VlmQwen3_5LanguageModel.__call__
 
 
 class PatchedDecoderLayer(DecoderLayer):
@@ -379,11 +387,121 @@ class PatchedQwen3_5TextModel(Qwen3_5TextModel):
         return mx.broadcast_to(position_ids, (3, batch_size, seq_length))
 
 
+def _patched_vlm_qwen3_5_attention_init(self, args):
+    OriginalVlmQwen3_5AttentionInit(self, args)
+    rope_params = args.rope_parameters
+    self.rope = initialize_rope(
+        int(self.head_dim * rope_params["partial_rotary_factor"]),
+        base=rope_params["rope_theta"],
+        traditional=False,
+        scaling_config=rope_params,
+        max_position_embeddings=args.max_position_embeddings,
+    )
+
+
+def _patched_vlm_qwen3_5_attention_call(
+    self,
+    x: mx.array,
+    mask: Optional[mx.array] = None,
+    cache: Optional[Any] = None,
+    position_ids: Optional[mx.array] = None,
+) -> mx.array:
+    if position_ids is not None:
+        return OriginalVlmQwen3_5AttentionCall(self, x, mask, cache, position_ids)
+
+    return Qwen3NextAttention.__call__(self, x, mask, cache)
+
+
+def _is_vlm_qwen3_5_text_only(
+    *,
+    mask,
+    position_ids,
+    pixel_values,
+    image_grid_thw,
+    video_grid_thw,
+    capture_layer_ids,
+    rope_deltas_kw,
+    stored_position_ids,
+    stored_rope_deltas,
+) -> bool:
+    return (
+        mask is None
+        and position_ids is None
+        and pixel_values is None
+        and image_grid_thw is None
+        and video_grid_thw is None
+        and capture_layer_ids is None
+        and rope_deltas_kw is None
+        and stored_position_ids is None
+        and stored_rope_deltas is None
+    )
+
+
+def _patched_vlm_qwen3_5_language_model_call(
+    self,
+    inputs: mx.array,
+    inputs_embeds: Optional[mx.array] = None,
+    mask: Optional[mx.array] = None,
+    cache=None,
+    **kwargs,
+):
+    position_ids = kwargs.get("position_ids")
+    pixel_values = kwargs.get("pixel_values")
+    image_grid_thw = kwargs.get("image_grid_thw")
+    video_grid_thw = kwargs.get("video_grid_thw")
+    capture_layer_ids = kwargs.get("capture_layer_ids")
+    rope_deltas_kw = kwargs.get("rope_deltas")
+
+    if _is_vlm_qwen3_5_text_only(
+        mask=mask,
+        position_ids=position_ids,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
+        video_grid_thw=video_grid_thw,
+        capture_layer_ids=capture_layer_ids,
+        rope_deltas_kw=rope_deltas_kw,
+        stored_position_ids=getattr(self, "_position_ids", None),
+        stored_rope_deltas=getattr(self, "_rope_deltas", None),
+    ):
+        out = self.model(
+            inputs,
+            cache=cache,
+            inputs_embeds=inputs_embeds,
+            position_ids=None,
+        )
+        if self.args.tie_word_embeddings:
+            out = self.model.embed_tokens.as_linear(out)
+        else:
+            out = self.lm_head(out)
+        return LanguageModelOutput(
+            logits=out,
+            hidden_states=None,
+            gdn_states=None,
+        )
+
+    if rope_deltas_kw is not None:
+        # mlx-vlm gates kwarg rope_deltas on this side state during decode.
+        self._rope_deltas = rope_deltas_kw
+
+    return OriginalVlmQwen3_5LanguageModelCall(
+        self,
+        inputs,
+        inputs_embeds=inputs_embeds,
+        mask=mask,
+        cache=cache,
+        **kwargs,
+    )
+
+
 def apply_patches():
     """
-    Apply Qwen3.5 MRoPE patches by replacing classes in the mlx_lm module.
+    Apply Qwen3.5 MRoPE patches.
     """
     import mlx_lm.models.qwen3_5
 
     mlx_lm.models.qwen3_5.DecoderLayer = PatchedDecoderLayer
     mlx_lm.models.qwen3_5.Qwen3_5TextModel = PatchedQwen3_5TextModel
+
+    VlmQwen3_5Attention.__init__ = _patched_vlm_qwen3_5_attention_init
+    VlmQwen3_5Attention.__call__ = _patched_vlm_qwen3_5_attention_call
+    VlmQwen3_5LanguageModel.__call__ = _patched_vlm_qwen3_5_language_model_call
