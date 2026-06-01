@@ -16,6 +16,11 @@ from mlx_engine.utils.prompt_progress_reporter import (
     PromptProgressReporter,
     StopPromptProcessing,
 )
+from mlx_engine.utils.turboquant import (
+    TurboQuantKVCache,
+    make_wh_rotation,
+    lloyd_max_centroids,
+)
 
 
 PROMPT_PROCESSING_CHUNK_SIZE = 2048
@@ -201,7 +206,11 @@ class CacheWrapper:
 
             current_chunk = remaining_tokens[:current_chunk_size]
             model(current_chunk[None], cache=cache)
-            maybe_quantize_kv_cache(prompt_cache=cache, **self._kv_cache_qtn_params)
+            kv_bits = self._kv_cache_qtn_params.get("kv_bits")
+            if isinstance(kv_bits, str) and kv_bits.startswith("turbo"):
+                _apply_turboquant_to_cache(cache, kv_bits)
+            else:
+                maybe_quantize_kv_cache(prompt_cache=cache, **self._kv_cache_qtn_params)
             self._live_cache[cache_start : cache_start + len(cache)] = cache
             mx.eval([entry.state for entry in cache])
 
@@ -226,8 +235,34 @@ class CacheWrapper:
                 logger.info("Prompt processing was cancelled by the user.")
                 live_cache_size = self._num_tokens_in_cache()
                 if live_cache_size is None:
-                    self._live_tokens = None
-                    self._live_cache = self._make_cache()
+        self._live_tokens = None
+        self._live_cache = self._make_cache()
+
+
+def _apply_turboquant_to_cache(cache: List[Any], turbo_mode: str) -> None:
+    """Apply TurboQuant PolarQuant compression to all cache entries.
+
+    Args:
+        cache: List of KVCache entries from the model.
+        turbo_mode: One of "turbo2", "turbo3", "turbo4".
+    """
+    bit_map = {"turbo2": 2, "turbo3": 3, "turbo4": 4}
+    bits = bit_map.get(turbo_mode, 3)
+
+    for i, entry in enumerate(cache):
+        if hasattr(entry, "state") and entry.state is not None:
+            keys, values = entry.state
+            if keys is None:
+                continue
+            head_dim = keys.shape[-1]
+            tq = TurboQuantKVCache(head_dim=head_dim, k_bits=bits, v_bits=bits)
+            k_idx, v_idx, k_norm, v_norm = tq.quantize_kv(keys, values)
+            entry.keys = k_idx
+            entry.values = None
+            entry._turbo_k_norms = k_norm
+            entry._turbo_v_norms = v_norm
+            entry._turbo_head_dim = head_dim
+            entry._turbo_bits = bits
                 else:
                     self._live_tokens = self._live_tokens[:live_cache_size]
                 raise StopPromptProcessing
