@@ -228,6 +228,86 @@ def test_generation_batch_extends_mixed_rope_rows_without_broadcasting():
     assert model.calls[-1]["rope_deltas"] == [[9], [0]]
 
 
+def test_generation_batch_append_materializes_pending_state_before_cache_extend(
+    monkeypatch,
+):
+    calls = []
+
+    class RecordingCache(_FakeBatchCache):
+        def extend(self, other):
+            calls.append(("extend-cache", self.name, other.name))
+            super().extend(other)
+
+    def record_eval(batch):
+        calls.append(("eval", tuple(batch.uids)))
+
+    monkeypatch.setattr(GenerationBatch, "_eval_pending_state", record_eval)
+    batch = GenerationBatch(
+        model=_FakeModel(),
+        uids=[1],
+        inputs=mx.array([5], dtype=mx.int32),
+        prompt_cache=[RecordingCache("active")],
+        samplers=[_argmax_sampler],
+        stop_criteria=lambda _token: False,
+        max_tokens=[3],
+        all_tokens=[[5]],
+        logits_processors=[[]],
+        prefix_cache_save_states=_prefix_cache_save_states(1),
+    )
+    prefilled = GenerationBatch(
+        model=_FakeModel(),
+        uids=[2],
+        inputs=mx.array([6], dtype=mx.int32),
+        prompt_cache=[RecordingCache("prefilled")],
+        samplers=[_argmax_sampler],
+        stop_criteria=lambda _token: False,
+        max_tokens=[3],
+        all_tokens=[[6]],
+        logits_processors=[[]],
+        prefix_cache_save_states=_prefix_cache_save_states(1),
+    )
+
+    batch.append_prefilled_sequence(prefilled)
+
+    assert calls == [
+        ("eval", (1,)),
+        ("eval", (2,)),
+        ("extend-cache", "active", "prefilled"),
+    ]
+
+
+def test_generation_batch_filter_materializes_pending_state_before_cache_filter(
+    monkeypatch,
+):
+    calls = []
+
+    class RecordingCache(_FakeBatchCache):
+        def filter(self, keep):
+            calls.append(("filter-cache", keep.tolist()))
+            super().filter(keep)
+
+    def record_eval(batch):
+        calls.append(("eval", tuple(batch.uids)))
+
+    monkeypatch.setattr(GenerationBatch, "_eval_pending_state", record_eval)
+    batch = GenerationBatch(
+        model=_FakeModel(),
+        uids=[1, 2],
+        inputs=mx.array([5, 6], dtype=mx.int32),
+        prompt_cache=[RecordingCache()],
+        samplers=[_argmax_sampler, _argmax_sampler],
+        stop_criteria=lambda _token: False,
+        max_tokens=[3, 3],
+        all_tokens=[[5], [6]],
+        logits_processors=[[], []],
+        prefix_cache_save_states=_prefix_cache_save_states(2),
+    )
+
+    batch.filter([0])
+
+    assert calls == [("eval", (1, 2)), ("filter-cache", [0])]
+
+
 def test_capture_rope_deltas_keeps_qwen3_5_text_only_none():
     """Qwen3.5 text-only decode stays on the fast text RoPE path."""
     qwen3_5_model = SimpleNamespace(
