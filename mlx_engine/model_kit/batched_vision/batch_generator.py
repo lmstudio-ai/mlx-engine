@@ -113,6 +113,23 @@ def _sync_scalar_rope_deltas(model: nn.Module, prompt_cache: list[Any], rope_del
         language_model._rope_deltas = rope_deltas
 
 
+def _clear_qwen3_5_text_rope_state(model: nn.Module, prompt_kwargs: dict) -> None:
+    """Clear stale Qwen MRoPE side state before text-only prompt prefill.
+
+    Qwen3.5-family VLM decode stores RoPE deltas on the shared language model.
+    Continuous batching can run an active image decode step immediately before a
+    new text-only prefill, so text-only prompt calls must explicitly enter the
+    model with no image/MRoPE state.
+    """
+    if "position_ids" in prompt_kwargs or "rope_deltas" in prompt_kwargs:
+        return
+    language_model = getattr(model, "language_model", model)
+    if not str(getattr(language_model, "model_type", "")).startswith("qwen3_5"):
+        return
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+
+
 def _extend_cache(cache_a, cache_b):
     if not cache_a:
         return cache_b
@@ -762,12 +779,19 @@ class _PromptPrefill:
 
     def prompt_step(self) -> int:
         n = self._next_prompt_step_size()
-        self.model(
-            self._input_ids[:, :n],
-            cache=self.prompt_cache,
-            inputs_embeds=self._inputs_embeds[:, :n],
-            **self._prompt_kwargs_for_next(n),
-        )
+        prompt_kwargs = self._prompt_kwargs_for_next(n)
+        # Prompt kwargs with explicit MRoPE state belong to an image prompt; otherwise
+        # this text-only chunk must not inherit state from the active decode batch.
+        _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
+        try:
+            self.model(
+                self._input_ids[:, :n],
+                cache=self.prompt_cache,
+                inputs_embeds=self._inputs_embeds[:, :n],
+                **prompt_kwargs,
+            )
+        finally:
+            _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
         mx.eval([c.state for c in self.prompt_cache])
         self._inputs_embeds = self._inputs_embeds[:, n:]
         self._input_ids = self._input_ids[:, n:]
@@ -858,12 +882,17 @@ class _PromptPrefill:
             logger.debug("Skipping prefill prompt-cache snapshot.", exc_info=True)
 
     def generate(self, stop_criteria) -> tuple[GenerationBatch, list[Response]]:
-        output = self.model(
-            self._input_ids,
-            cache=self.prompt_cache,
-            inputs_embeds=self._inputs_embeds,
-            **self._prompt_kwargs,
-        )
+        # This final prompt pass runs after active batched decode in the same tick.
+        _clear_qwen3_5_text_rope_state(self.model, self._prompt_kwargs)
+        try:
+            output = self.model(
+                self._input_ids,
+                cache=self.prompt_cache,
+                inputs_embeds=self._inputs_embeds,
+                **self._prompt_kwargs,
+            )
+        finally:
+            _clear_qwen3_5_text_rope_state(self.model, self._prompt_kwargs)
         self._processed_prefix_len = len(self._all_tokens) + len(self._prompt_token_ids)
         self._emit_cache_save_snapshots()
         prompt_responses = self.progress_responses()
