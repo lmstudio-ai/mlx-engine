@@ -7,8 +7,10 @@ from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
 import mlx_lm.models.qwen3_5 as qwen3_5_module
+from mlx_lm.models.qwen3_next import Qwen3NextAttention
 from transformers import AutoTokenizer
 
+from mlx_engine.model_kit.patches import qwen3_5 as qwen3_5_patches
 from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     PreparedPrompt,
@@ -132,6 +134,65 @@ def qwen3_5_chat_prompt_tokens(model_path) -> mx.array:
         add_generation_prompt=True,
     )
     return mx.array(tokenizer.encode(prompt, add_special_tokens=False))[None, :]
+
+
+def test_vlm_qwen3_5_attention_text_fast_path_uses_qwen3_next(monkeypatch):
+    calls = []
+
+    def fake_qwen3_next_call(self, x, mask=None, cache=None):
+        calls.append(("qwen3_next", self, x, mask, cache))
+        return "fast"
+
+    def fake_original_call(*args, **kwargs):
+        raise AssertionError("original VLM attention should not be used")
+
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    self_obj = object()
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="mask",
+        cache="cache",
+    )
+
+    assert result == "fast"
+    assert calls == [("qwen3_next", self_obj, "x", "mask", "cache")]
+
+
+def test_vlm_qwen3_5_attention_target_verify_uses_original_vlm(monkeypatch):
+    calls = []
+
+    def fake_qwen3_next_call(*args, **kwargs):
+        raise AssertionError("Qwen3Next fast path should not be used")
+
+    def fake_original_call(self, x, mask=None, cache=None, position_ids=None, **kwargs):
+        calls.append((self, x, mask, cache, position_ids, kwargs))
+        return "target-verify"
+
+    self_obj = object()
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="mask",
+        cache="cache",
+        target_verify=True,
+    )
+
+    assert result == "target-verify"
+    assert calls == [(self_obj, "x", "mask", "cache", None, {"target_verify": True})]
 
 
 def _first_generate_step_logprobs(
