@@ -35,8 +35,10 @@ def load_and_parse_config(
     config_dict = json.loads(config_path.read_text())
     config = model_config_class.from_dict(config_dict)
     _sync_config_dict_quantization_fields(config, config_dict)
-    config.vision_config = vision_config_class.from_dict(config.vision_config)
-    config.text_config = text_config_class.from_dict(config.text_config)
+    config.vision_config = _deserialize_nested_config(
+        vision_config_class, config.vision_config
+    )
+    config.text_config = _deserialize_nested_config(text_config_class, config.text_config)
 
     # hack for lfm2_vl, which uses a `vision_feature_layer` to reduce the number of actual layers
     # https://github.com/Blaizzy/mlx-vlm/blob/f02d63e8f5b521e8c75f129a63d2660efd132693/mlx_vlm/models/lfm2_vl/lfm2_vl.py#L98-L101
@@ -59,6 +61,12 @@ def _sync_config_dict_quantization_fields(config: Any, config_dict: dict) -> Non
         quantization_value = getattr(config, quantization_key, None)
         if quantization_value is not None and quantization_key in config_dict:
             config_dict[quantization_key] = quantization_value
+
+
+def _deserialize_nested_config(config_class: Any, value: Any) -> Any:
+    if isinstance(value, config_class):
+        return value
+    return config_class.from_dict(value)
 
 
 class VisionComponents(nn.Module):
