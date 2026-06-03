@@ -3,8 +3,10 @@ import json
 import mlx.core as mx
 from mlx_vlm.models import qwen3_5, qwen3_5_moe, qwen3_vl, qwen3_vl_moe
 
+from mlx_engine.model_kit.vision_add_ons import qwen3_5 as qwen3_5_addon
 from mlx_engine.model_kit.vision_add_ons import load_utils
 from mlx_engine.model_kit.vision_add_ons.mistral3 import _sanitize_mistral3_split_weights
+from mlx_engine.model_kit.vision_add_ons.qwen3_5 import sanitize_qwen3_5_key
 
 
 class _FakeComponents:
@@ -89,6 +91,59 @@ def test_mistral3_split_weight_sanitizer_rewrites_prefiltered_keys(
         "multi_modal_projector.linear.weight",
         "vision_tower.vision_model.patch_conv.weight",
     ]
+
+
+def test_load_and_filter_weights_can_transform_qwen3_5_keys_before_filtering(
+    monkeypatch,
+    tmp_path,
+):
+    weight_file = tmp_path / "weights.safetensors"
+    weight_file.touch()
+    weights = {
+        "model.language_model.visual.blocks.0.attn.qkv.weight": mx.array([1]),
+        "model.visual.patch_embed.proj.weight": mx.array([2]),
+        "model.language_model.layers.0.weight": mx.array([3]),
+        "lm_head.weight": mx.array([4]),
+    }
+
+    monkeypatch.setattr(load_utils.mx, "load", lambda _path: weights)
+    components = _FakeComponents()
+
+    filtered = load_utils.load_and_filter_weights(
+        tmp_path,
+        components,
+        weight_key_transformer=sanitize_qwen3_5_key,
+    )
+
+    assert set(filtered) == {
+        "vision_tower.blocks.0.attn.qkv.weight",
+        "vision_tower.patch_embed.proj.weight",
+    }
+
+
+def test_qwen3_5_init_common_passes_weight_key_transformer(monkeypatch, tmp_path):
+    captured_kwargs = {}
+
+    def fake_load_vision_addon(**kwargs):
+        captured_kwargs.update(kwargs)
+        return object(), None, object(), object()
+
+    monkeypatch.setattr(qwen3_5_addon, "load_vision_addon", fake_load_vision_addon)
+    addon = qwen3_5_addon.Qwen3_5VisionAddOn.__new__(
+        qwen3_5_addon.Qwen3_5VisionAddOn
+    )
+
+    addon._init_common(
+        model_path=tmp_path,
+        model_cls=object,
+        model_config_class=object,
+        vision_config_class=object,
+        text_config_class=object,
+        vision_tower_class=object,
+        addon_logger=object(),
+    )
+
+    assert captured_kwargs["weight_key_transformer"] is sanitize_qwen3_5_key
 
 
 def test_config_dict_sync_keeps_qwen3_5_quantization_key_sanitization():

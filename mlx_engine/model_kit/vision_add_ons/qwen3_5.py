@@ -15,6 +15,7 @@ from mlx_vlm.models.qwen3_5 import (
     TextConfig as Qwen3_5TextConfig,
     Model as Qwen3_5VLModel,
 )
+from mlx_vlm.models.qwen3_5.qwen3_5 import sanitize_key as sanitize_qwen3_5_key
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ class Qwen3_5VisionAddOn(BaseVisionAddOn):
             vision_tower_class=vision_tower_class,
             multi_modal_projector_class=None,
             logger=addon_logger,
+            weight_key_transformer=sanitize_qwen3_5_key,
         )
 
     def clear_prediction_state(self, text_model: nn.Module) -> None:

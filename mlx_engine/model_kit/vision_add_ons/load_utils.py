@@ -104,6 +104,7 @@ def create_vision_components(
 def load_and_filter_weights(
     model_path: Path,
     components: nn.Module,
+    weight_key_transformer: Callable[[str], str] | None = None,
 ) -> dict:
     """
     Load model weights from safetensors files and filter for vision-related weights.
@@ -141,6 +142,8 @@ def load_and_filter_weights(
     # Filter only vision-related weights
     vision_weights = {}
     for key, value in weights.items():
+        if weight_key_transformer is not None:
+            key = weight_key_transformer(key)
         normalized_key = normalize_component_weight_key(key)
         if normalized_key is not None:
             vision_weights[normalized_key] = value
@@ -224,6 +227,7 @@ def load_vision_addon(
     multi_modal_projector_class: Type[nn.Module] | None,
     logger: logging.Logger,
     processor_kwargs: dict | None = None,
+    weight_key_transformer: Callable[[str], str] | None = None,
     weight_sanitizer: Callable[[dict], dict] | None = None,
 ) -> Tuple[nn.Module, nn.Module | None, Any, Any]:
     """
@@ -265,7 +269,9 @@ def load_vision_addon(
     )
 
     # Load and filter weights
-    vision_weights = load_and_filter_weights(model_path, components)
+    vision_weights = load_and_filter_weights(
+        model_path, components, weight_key_transformer=weight_key_transformer
+    )
 
     if weight_sanitizer is not None:
         vision_weights = weight_sanitizer(vision_weights)
