@@ -182,6 +182,10 @@ def slice_prompt_kwargs(
         sliced["mask"] = sliced["mask"][:, :, start:end, :mask_key_end]
     if "per_layer_inputs" in sliced:
         sliced["per_layer_inputs"] = sliced["per_layer_inputs"][:, start:end]
+    if "mm_token_type_ids" in sliced:
+        sliced["mm_token_type_ids"] = sliced["mm_token_type_ids"][:, start:end]
+    if "token_type_ids" in sliced:
+        sliced["token_type_ids"] = sliced["token_type_ids"][:, start:end]
 
     visual_pos_masks = prompt_kwargs.get("visual_pos_masks")
     if visual_pos_masks is not None:
@@ -311,6 +315,10 @@ def _prompt_kwargs_token_len(prompt_kwargs: dict) -> int | None:
         return prompt_kwargs["visual_pos_masks"].shape[1]
     if "per_layer_inputs" in prompt_kwargs:
         return prompt_kwargs["per_layer_inputs"].shape[1]
+    if "mm_token_type_ids" in prompt_kwargs:
+        return prompt_kwargs["mm_token_type_ids"].shape[1]
+    if "token_type_ids" in prompt_kwargs:
+        return prompt_kwargs["token_type_ids"].shape[1]
     if "inputs_embeds" in prompt_kwargs:
         return prompt_kwargs["inputs_embeds"].shape[1]
     if "mask" in prompt_kwargs:

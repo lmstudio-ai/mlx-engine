@@ -6,6 +6,7 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     PreparedPrompt,
     build_cached_prompt_kwargs,
     build_prompt_kwargs,
+    drop_prompt_kwargs_prefix,
     prepare_prompt_inputs,
     slice_prompt_kwargs,
 )
@@ -295,12 +296,16 @@ def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeyp
     inputs_embeds = mx.arange(12, dtype=mx.float32).reshape(1, 6, 2)
     position_ids = mx.arange(18, dtype=mx.int32).reshape(3, 1, 6)
     mask = mx.arange(36, dtype=mx.int32).reshape(1, 1, 6, 6)
+    mm_token_type_ids = mx.array([[0, 1, 1, 0, 2, 2]], dtype=mx.int32)
+    token_type_ids = mx.array([[0, 0, 1, 1, 0, 1]], dtype=mx.int32)
 
     def build_prompt_kwargs(_model, _prepared_prompt):
         return {
             "inputs_embeds": inputs_embeds,
             "position_ids": position_ids,
             "mask": mask,
+            "mm_token_type_ids": mm_token_type_ids,
+            "token_type_ids": token_type_ids,
             "rope_deltas": mx.array([5], dtype=mx.int32),
         }
 
@@ -324,7 +329,50 @@ def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeyp
     assert prompt_kwargs["inputs_embeds"].tolist() == inputs_embeds[:, 4:].tolist()
     assert prompt_kwargs["position_ids"].tolist() == position_ids[:, :, 4:].tolist()
     assert prompt_kwargs["mask"].tolist() == mask[:, :, 4:, :].tolist()
+    assert (
+        prompt_kwargs["mm_token_type_ids"].tolist()
+        == mm_token_type_ids[:, 4:].tolist()
+    )
+    assert prompt_kwargs["token_type_ids"].tolist() == token_type_ids[:, 4:].tolist()
     assert prompt_kwargs["rope_deltas"].tolist() == [5]
+
+
+def test_slice_prompt_kwargs_slices_gemma4_token_type_ids():
+    """Gemma4 token-type masks are sequence-local prompt kwargs."""
+    inputs_embeds = mx.zeros((1, 6, 2), dtype=mx.float32)
+    mm_token_type_ids = mx.array([[0, 1, 1, 0, 2, 2]], dtype=mx.int32)
+    token_type_ids = mx.array([[0, 0, 1, 1, 0, 1]], dtype=mx.int32)
+
+    sliced = slice_prompt_kwargs(
+        {
+            "inputs_embeds": inputs_embeds,
+            "mm_token_type_ids": mm_token_type_ids,
+            "token_type_ids": token_type_ids,
+        },
+        2,
+        5,
+    )
+
+    assert sliced["inputs_embeds"].shape == (1, 3, 2)
+    assert sliced["mm_token_type_ids"].tolist() == [[1, 0, 2]]
+    assert sliced["token_type_ids"].tolist() == [[1, 1, 0]]
+
+
+def test_drop_prompt_kwargs_prefix_uses_gemma4_token_type_ids():
+    """Token-type kwargs keep prefix restore trimming after inputs_embeds is popped."""
+    mm_token_type_ids = mx.array([[0, 1, 1, 0, 2, 2]], dtype=mx.int32)
+    token_type_ids = mx.array([[0, 0, 1, 1, 0, 1]], dtype=mx.int32)
+
+    prompt_kwargs = drop_prompt_kwargs_prefix(
+        {
+            "mm_token_type_ids": mm_token_type_ids,
+            "token_type_ids": token_type_ids,
+        },
+        4,
+    )
+
+    assert prompt_kwargs["mm_token_type_ids"].tolist() == [[2, 2]]
+    assert prompt_kwargs["token_type_ids"].tolist() == [[0, 1]]
 
 
 def test_slice_prompt_kwargs_slices_full_sequence_deepstack_embeds():
