@@ -405,11 +405,18 @@ def _patched_vlm_qwen3_5_attention_call(
     mask: Optional[mx.array] = None,
     cache: Optional[Any] = None,
     position_ids: Optional[mx.array] = None,
+    position_embeddings: Optional[tuple[mx.array, mx.array]] = None,
     target_verify: bool = False,
 ) -> mx.array:
-    if position_ids is not None or target_verify:
+    if position_ids is not None or position_embeddings is not None or target_verify:
         return OriginalVlmQwen3_5AttentionCall(
-            self, x, mask, cache, position_ids, target_verify=target_verify
+            self,
+            x,
+            mask=mask,
+            cache=cache,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            target_verify=target_verify,
         )
 
     return Qwen3NextAttention.__call__(self, x, mask, cache)

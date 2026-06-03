@@ -171,8 +171,16 @@ def test_vlm_qwen3_5_attention_target_verify_uses_original_vlm(monkeypatch):
     def fake_qwen3_next_call(*args, **kwargs):
         raise AssertionError("Qwen3Next fast path should not be used")
 
-    def fake_original_call(self, x, mask=None, cache=None, position_ids=None, **kwargs):
-        calls.append((self, x, mask, cache, position_ids, kwargs))
+    def fake_original_call(
+        self,
+        x,
+        mask=None,
+        cache=None,
+        position_ids=None,
+        position_embeddings=None,
+        **kwargs,
+    ):
+        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
         return "target-verify"
 
     self_obj = object()
@@ -192,7 +200,58 @@ def test_vlm_qwen3_5_attention_target_verify_uses_original_vlm(monkeypatch):
     )
 
     assert result == "target-verify"
-    assert calls == [(self_obj, "x", "mask", "cache", None, {"target_verify": True})]
+    assert calls == [
+        (self_obj, "x", "mask", "cache", None, None, {"target_verify": True})
+    ]
+
+
+def test_vlm_qwen3_5_attention_position_embeddings_uses_original_vlm(monkeypatch):
+    calls = []
+    position_embeddings = ("cos", "sin")
+
+    def fake_qwen3_next_call(*args, **kwargs):
+        raise AssertionError("Qwen3Next fast path should not be used")
+
+    def fake_original_call(
+        self,
+        x,
+        mask=None,
+        cache=None,
+        position_ids=None,
+        position_embeddings=None,
+        **kwargs,
+    ):
+        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
+        return "position-embeddings"
+
+    self_obj = object()
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="mask",
+        cache="cache",
+        position_embeddings=position_embeddings,
+    )
+
+    assert result == "position-embeddings"
+    assert calls == [
+        (
+            self_obj,
+            "x",
+            "mask",
+            "cache",
+            None,
+            position_embeddings,
+            {"target_verify": False},
+        )
+    ]
 
 
 def _first_generate_step_logprobs(
