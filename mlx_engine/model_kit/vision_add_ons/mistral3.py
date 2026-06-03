@@ -21,6 +21,11 @@ from mlx_engine.model_kit.vision_add_ons.load_utils import load_vision_addon
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_mistral3_split_weights(weights: dict) -> dict:
+    # The sanitizer does not read `self`; avoid constructing the full text model here.
+    return Mistral3CombinedModel.sanitize(Mistral3CombinedModel, weights)
+
+
 class Mistral3VisionAddOn(BaseVisionAddOn):
     """
     Vision add-on for Mistral3 models.
@@ -51,6 +56,7 @@ class Mistral3VisionAddOn(BaseVisionAddOn):
                 multi_modal_projector_class=Mistral3MultiModalProjector,
                 logger=logger,
                 processor_kwargs=processor_kwargs,
+                weight_sanitizer=_sanitize_mistral3_split_weights,
             )
         )
 

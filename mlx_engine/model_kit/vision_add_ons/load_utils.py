@@ -1,7 +1,7 @@
 import glob
 import json
 from pathlib import Path
-from typing import Any, Tuple, Type
+from typing import Any, Callable, Tuple, Type
 import mlx.core as mx
 from mlx import nn
 from mlx_vlm.utils import sanitize_weights, load_processor, skip_multimodal_module
@@ -111,12 +111,23 @@ def load_and_filter_weights(
     for wf in weight_files:
         weights.update(mx.load(wf))
 
+    component_names = tuple(components.children().keys())
+
+    def normalize_component_weight_key(key: str) -> str | None:
+        for name in component_names:
+            if key == name or key.startswith(f"{name}."):
+                return key
+            model_prefix = f"model.{name}."
+            if key.startswith(model_prefix):
+                return key[len("model.") :]
+        return None
+
     # Filter only vision-related weights
-    vision_weights = {
-        k: v
-        for k, v in weights.items()
-        if any(k.startswith(name) for name in components.children().keys())
-    }
+    vision_weights = {}
+    for key, value in weights.items():
+        normalized_key = normalize_component_weight_key(key)
+        if normalized_key is not None:
+            vision_weights[normalized_key] = value
 
     return vision_weights
 
@@ -197,6 +208,7 @@ def load_vision_addon(
     multi_modal_projector_class: Type[nn.Module] | None,
     logger: logging.Logger,
     processor_kwargs: dict | None = None,
+    weight_sanitizer: Callable[[dict], dict] | None = None,
 ) -> Tuple[nn.Module, nn.Module | None, Any, Any]:
     """
     Load vision add-on components, configuration, and processor.
@@ -238,6 +250,9 @@ def load_vision_addon(
 
     # Load and filter weights
     vision_weights = load_and_filter_weights(model_path, components)
+
+    if weight_sanitizer is not None:
+        vision_weights = weight_sanitizer(vision_weights)
 
     # Sanitize weights for vision tower
     vision_weights = sanitize_weights(
