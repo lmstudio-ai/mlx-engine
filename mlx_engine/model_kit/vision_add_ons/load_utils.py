@@ -34,6 +34,7 @@ def load_and_parse_config(
 
     config_dict = json.loads(config_path.read_text())
     config = model_config_class.from_dict(config_dict)
+    _sync_config_dict_quantization_fields(config, config_dict)
     config.vision_config = vision_config_class.from_dict(config.vision_config)
     config.text_config = text_config_class.from_dict(config.text_config)
 
@@ -51,6 +52,13 @@ def load_and_parse_config(
             )
 
     return config, config_dict
+
+
+def _sync_config_dict_quantization_fields(config: Any, config_dict: dict) -> None:
+    for quantization_key in ("quantization", "quantization_config"):
+        quantization_value = getattr(config, quantization_key, None)
+        if quantization_value is not None and quantization_key in config_dict:
+            config_dict[quantization_key] = quantization_value
 
 
 class VisionComponents(nn.Module):

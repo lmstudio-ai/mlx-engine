@@ -1,4 +1,5 @@
 import mlx.core as mx
+from mlx_vlm.models import qwen3_5, qwen3_5_moe
 
 from mlx_engine.model_kit.vision_add_ons import load_utils
 from mlx_engine.model_kit.vision_add_ons.mistral3 import _sanitize_mistral3_split_weights
@@ -86,3 +87,82 @@ def test_mistral3_split_weight_sanitizer_rewrites_prefiltered_keys(
         "multi_modal_projector.linear.weight",
         "vision_tower.vision_model.patch_conv.weight",
     ]
+
+
+def test_config_dict_sync_keeps_qwen3_5_quantization_key_sanitization():
+    quantization = {
+        "group_size": 128,
+        "bits": 4,
+        "model.language_model.layers.0.linear_attn.in_proj_qkv": False,
+        "model.visual.blocks.0.attn.qkv": False,
+        "lm_head": False,
+    }
+
+    cases = (
+        (
+            qwen3_5,
+            {
+                "model_type": "qwen3_5",
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "linear_num_value_heads": 1,
+                "linear_num_key_heads": 1,
+                "linear_key_head_dim": 4,
+                "linear_value_head_dim": 4,
+                "linear_conv_kernel_dim": 4,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 1,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 32,
+                "num_key_value_heads": 1,
+                "max_position_embeddings": 128,
+            },
+        ),
+        (
+            qwen3_5_moe,
+            {
+                "model_type": "qwen3_5_moe",
+                "hidden_size": 8,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 1,
+                "linear_num_value_heads": 1,
+                "linear_num_key_heads": 1,
+                "linear_key_head_dim": 4,
+                "linear_value_head_dim": 4,
+                "linear_conv_kernel_dim": 4,
+                "num_experts": 2,
+                "num_experts_per_tok": 1,
+                "shared_expert_intermediate_size": 8,
+                "moe_intermediate_size": 8,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 32,
+                "num_key_value_heads": 1,
+                "max_position_embeddings": 128,
+            },
+        ),
+    )
+
+    for module, text_config in cases:
+        config_dict = {
+            "model_type": module.__name__.rsplit(".", 1)[-1],
+            "text_config": text_config,
+            "vision_config": {},
+            "quantization": quantization,
+            "quantization_config": quantization,
+        }
+        config = module.ModelConfig.from_dict(config_dict)
+        load_utils._sync_config_dict_quantization_fields(config, config_dict)
+
+        assert config_dict["quantization"] is config.quantization
+        assert config_dict["quantization_config"] is config.quantization_config
+        assert (
+            "language_model.model.layers.0.linear_attn.in_proj_qkv"
+            in config_dict["quantization"]
+        )
+        assert "vision_tower.blocks.0.attn.qkv" in config_dict["quantization"]
+        assert "language_model.lm_head" in config_dict["quantization"]
+        assert (
+            "model.language_model.layers.0.linear_attn.in_proj_qkv"
+            not in config_dict["quantization"]
+        )
+        assert "model.visual.blocks.0.attn.qkv" not in config_dict["quantization"]
