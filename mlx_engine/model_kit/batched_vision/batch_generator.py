@@ -23,6 +23,10 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     drop_prompt_kwargs_prefix,
     slice_prompt_kwargs,
 )
+from mlx_engine.model_kit.patches.gemma4 import (
+    prepare_cached_suffix_prompt_kwargs as prepare_gemma4_cached_suffix_prompt_kwargs,
+    visual_prefill_prefix_len as gemma4_visual_prefill_prefix_len,
+)
 from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
     DEFAULT_MAX_TOKENS,
@@ -79,47 +83,6 @@ class _PendingSequence:
     rope_deltas: Any | None
     prompt_kwargs: dict
     prefix_cache_save_state: _PrefixCacheSaveState
-
-
-def _is_gemma4_unified_model_type(model_type: str | None) -> bool:
-    return str(model_type or "").startswith("gemma4_unified")
-
-
-def _gemma4_visual_prefill_prefix_len(
-    model: nn.Module,
-    prompt_kwargs: dict,
-    image_spans: list[PromptImageSpan],
-    cached_prefix_len: int,
-) -> int | None:
-    """Return the remaining prefix Gemma4 must prefill before normal chunking.
-
-    Gemma4's vision attention overlay is built from the token-type ids visible
-    to one language-model call. If an image block is evaluated after a cached KV
-    prefix, the overlay no longer describes the full key sequence. Keep the
-    first prefill call anchored at prompt offset 0 through the last visual token;
-    text after that visual prefix can use normal chunked prefill and cache saves.
-    """
-    language_model = getattr(model, "language_model", model)
-    if not _is_gemma4_unified_model_type(getattr(language_model, "model_type", None)):
-        return None
-
-    token_types = prompt_kwargs.get("mm_token_type_ids")
-    if token_types is None:
-        token_types = prompt_kwargs.get("token_type_ids")
-    if not isinstance(token_types, mx.array):
-        # Token types are authoritative when present. Image spans are a fallback
-        # for processor/model combinations that omit them but still carry images.
-        last_visual_end = max((span.end for span in image_spans), default=0)
-        relative_visual_end = last_visual_end - cached_prefix_len
-        return relative_visual_end if relative_visual_end > 0 else None
-
-    values = token_types.reshape(-1).tolist()
-    last_visual_idx = -1
-    for idx, value in enumerate(values):
-        if value in (1, 2):
-            last_visual_idx = idx
-
-    return None if last_visual_idx < 0 else last_visual_idx + 1
 
 
 def _batch_single_cache(cache: list[Any]) -> list[Any]:
@@ -797,7 +760,7 @@ class _PromptPrefill:
         self._all_tokens = list(all_tokens) if all_tokens is not None else []
         self._processed_prefix_len = len(self._all_tokens)
         self._prefix_cache_save_state = prefix_cache_save_state
-        self._visual_prefill_prefix_len = _gemma4_visual_prefill_prefix_len(
+        self._visual_prefill_prefix_len = gemma4_visual_prefill_prefix_len(
             model,
             prompt_kwargs,
             prefix_cache_save_state.image_spans,
@@ -864,9 +827,8 @@ class _PromptPrefill:
             return 0
 
         # Apply the Gemma4 visual-prefix rule before normal cache-boundary
-        # alignment. Restores that would place the cached prefix before this
-        # visual prefix are rejected in model_kit, so this call still starts at
-        # the prompt origin for image prompts.
+        # alignment. If a restore lands before a new image, token-type padding
+        # lets the image suffix build its mask against the restored KV prefix.
         visual_prefix_remaining = self._visual_prefill_prefix_remaining()
         if visual_prefix_remaining is not None:
             if visual_prefix_remaining < remaining_tokens:
@@ -908,11 +870,15 @@ class _PromptPrefill:
 
     def _prompt_kwargs_for_next(self, n: int) -> dict:
         # Slice locally instead of relying on model-specific n_to_process hacks.
-        return slice_prompt_kwargs(
+        prompt_kwargs = slice_prompt_kwargs(
             self._prompt_kwargs,
             0,
             n,
             mask_key_end=self._processed_prefix_len + n,
+        )
+        return self._prepare_cached_suffix_prompt_kwargs(
+            prompt_kwargs,
+            self._processed_prefix_len + n,
         )
 
     def _drop_processed_prompt_kwargs(self, n: int) -> None:
@@ -950,16 +916,17 @@ class _PromptPrefill:
 
     def generate(self, stop_criteria) -> tuple[GenerationBatch, list[Response]]:
         # This final prompt pass runs after active batched decode in the same tick.
-        _clear_qwen3_5_text_rope_state(self.model, self._prompt_kwargs)
+        prompt_kwargs = self._prompt_kwargs_for_final()
+        _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
         try:
             output = self.model(
                 self._input_ids,
                 cache=self.prompt_cache,
                 inputs_embeds=self._inputs_embeds,
-                **self._prompt_kwargs,
+                **prompt_kwargs,
             )
         finally:
-            _clear_qwen3_5_text_rope_state(self.model, self._prompt_kwargs)
+            _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
         self._processed_prefix_len = len(self._all_tokens) + len(self._prompt_token_ids)
         self._emit_cache_save_snapshots()
         prompt_responses = self.progress_responses()
@@ -1003,6 +970,27 @@ class _PromptPrefill:
 
         self.prompt_cache = []
         return gen_batch, prompt_responses
+
+    def _prompt_kwargs_for_final(self) -> dict:
+        prompt_kwargs = slice_prompt_kwargs(
+            self._prompt_kwargs,
+            0,
+            self._inputs_embeds.shape[1],
+            mask_key_end=self._processed_prefix_len + self._inputs_embeds.shape[1],
+        )
+        return self._prepare_cached_suffix_prompt_kwargs(
+            prompt_kwargs,
+            self._processed_prefix_len + self._inputs_embeds.shape[1],
+        )
+
+    def _prepare_cached_suffix_prompt_kwargs(
+        self,
+        prompt_kwargs: dict,
+        key_len: int,
+    ) -> dict:
+        if self._visual_prefill_prefix_len is None:
+            return prompt_kwargs
+        return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
 
 
 class BatchGenerator:

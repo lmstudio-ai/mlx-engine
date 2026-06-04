@@ -489,6 +489,77 @@ def test_batch_generator_uses_image_spans_without_gemma4_token_types(monkeypatch
     assert [len(call["input_ids"][0]) for call in model.calls] == [8, 2]
 
 
+def test_batch_generator_pads_gemma4_token_types_after_restore(monkeypatch):
+    """A new-image suffix can build masks against restored cached prefix keys."""
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    model = _gemma4_unified_model()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=4,
+    )
+    prompt = list(range(8))
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={
+                "mm_token_type_ids": mx.array(
+                    [[0, 0, 1, 1, 0, 0, 0, 0]],
+                    dtype=mx.int32,
+                )
+            },
+            prefix_cache_chunks=[],
+            cache=[_FakeScalarCache()],
+            all_tokens=[100, 101, 102, 103, 104],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+        )
+
+        generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [4]
+    assert model.calls[0]["mm_token_type_ids"] == [[0, 0, 0, 0, 0, 0, 0, 1, 1]]
+
+
+def test_batch_generator_pads_gemma4_token_types_for_final_prefill(monkeypatch):
+    """Final prefill also needs key-length token types when restored before image."""
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    model = _gemma4_unified_model()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=4,
+    )
+    prompt = list(range(3))
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={"mm_token_type_ids": mx.array([[0, 1, 1]], dtype=mx.int32)},
+            prefix_cache_chunks=[],
+            cache=[_FakeScalarCache()],
+            all_tokens=[100, 101, 102, 103, 104],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+        )
+
+        generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [3]
+    assert model.calls[0]["mm_token_type_ids"] == [[0, 0, 0, 0, 0, 0, 1, 1]]
+
+
 def test_batch_generator_does_not_apply_unified_visual_policy_to_gemma4(monkeypatch):
     """Non-unified Gemma4 models keep their existing chunking behavior."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())

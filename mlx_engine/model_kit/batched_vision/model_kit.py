@@ -61,13 +61,13 @@ from mlx_engine.model_kit.batched_vision.transformers_compatibility import (
 from mlx_engine.model_kit.batched_vision.vision_feature_memoizer import (
     VisionFeatureMemoizer,
 )
+from mlx_engine.model_kit.patches.gemma4 import (
+    is_unified_model_type as is_gemma4_unified_model_type,
+    patch_loaded_model as patch_loaded_gemma4_model,
+)
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_SEQ_NUMS = 4
-
-
-def _is_gemma4_unified_model_type(model_type: str | None) -> bool:
-    return str(model_type or "").startswith("gemma4_unified")
 
 
 def _requires_global_no_chunked_prefill(model, model_type: str | None) -> bool:
@@ -75,24 +75,19 @@ def _requires_global_no_chunked_prefill(model, model_type: str | None) -> bool:
         return False
     # Gemma4 unified visual prompts need a request-local policy because only
     # visual token blocks require the bidirectional-mask prefill constraint.
-    return not _is_gemma4_unified_model_type(model_type)
+    return not is_gemma4_unified_model_type(model_type)
 
 
-def _restore_conflicts_with_gemma4_visual_prefix(
+def _restore_splits_gemma4_image_span(
     *,
     model_type: str | None,
     cached_prefix_len: int,
     image_spans,
 ) -> bool:
-    """Return true when a restore would make Gemma4 prefill visual tokens late."""
-    if not _is_gemma4_unified_model_type(model_type) or cached_prefix_len <= 0:
+    """Return true when a Gemma4 restore would split an image token span."""
+    if not is_gemma4_unified_model_type(model_type) or cached_prefix_len <= 0:
         return False
-    last_visual_end = max((span.end for span in image_spans), default=0)
-    # Restoring to the prompt boundary after a completed turn is allowed and is
-    # the important follow-up path. Restoring before the visual prefix would make
-    # the remaining image tokens run against an existing KV prefix, which breaks
-    # Gemma4's bidirectional vision mask assumption.
-    return cached_prefix_len < last_visual_end
+    return any(span.start < cached_prefix_len < span.end for span in image_spans)
 
 
 class BatchedVisionModelKit:
@@ -217,6 +212,7 @@ class BatchedVisionModelKit:
         self.model = (
             loaded_model[0] if isinstance(loaded_model, tuple) else loaded_model
         )
+        patch_loaded_gemma4_model(self.model)
         mx.synchronize()
         mx.clear_cache()
 
@@ -409,7 +405,7 @@ class BatchedVisionModelKit:
         restored = prepared_insert.restored
         full_prompt_input_ids = prepared_prompt.prompt_input_ids
         prompt_token_count = len(full_prompt_input_ids)
-        if restored is not None and _restore_conflicts_with_gemma4_visual_prefix(
+        if restored is not None and _restore_splits_gemma4_image_span(
             model_type=self.model_type,
             cached_prefix_len=restored.cached_prefix_len,
             image_spans=prepared_prompt.image_spans,
