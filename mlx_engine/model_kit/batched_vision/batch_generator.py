@@ -81,6 +81,59 @@ class _PendingSequence:
     prefix_cache_save_state: _PrefixCacheSaveState
 
 
+def _is_gemma4_unified_model_type(model_type: str | None) -> bool:
+    return str(model_type or "").startswith("gemma4_unified")
+
+
+def _uses_gemma4_unified_bidirectional_vision(model: nn.Module) -> bool:
+    language_model = getattr(model, "language_model", model)
+    model_type = str(getattr(language_model, "model_type", ""))
+    config = getattr(language_model, "config", None)
+    return _is_gemma4_unified_model_type(model_type) and (
+        getattr(config, "use_bidirectional_attention", None) == "vision"
+    )
+
+
+def _gemma4_visual_prefill_prefix_len(
+    model: nn.Module,
+    prompt_kwargs: dict,
+    image_spans: list[PromptImageSpan],
+    cached_prefix_len: int,
+) -> int | None:
+    """Return the remaining prefix Gemma4 must prefill before normal chunking.
+
+    Gemma4's vision attention overlay is built from the token-type ids visible
+    to one language-model call. If an image block is evaluated after a cached KV
+    prefix, the overlay no longer describes the full key sequence. Keep the
+    first prefill call anchored at prompt offset 0 through the last visual token;
+    text after that visual prefix can use normal chunked prefill and cache saves.
+    """
+    if not _uses_gemma4_unified_bidirectional_vision(model):
+        return None
+
+    token_types = prompt_kwargs.get("mm_token_type_ids")
+    if token_types is None:
+        token_types = prompt_kwargs.get("token_type_ids")
+    if not isinstance(token_types, mx.array):
+        # Token types are authoritative when present. Image spans are a fallback
+        # for processor/model combinations that omit them but still carry images.
+        last_visual_end = max((span.end for span in image_spans), default=0)
+        relative_visual_end = last_visual_end - cached_prefix_len
+        return relative_visual_end if relative_visual_end > 0 else None
+
+    values = token_types.reshape(-1).tolist()
+    has_audio = any(value == 3 for value in values)
+    if has_audio:
+        return None
+
+    last_visual_idx = -1
+    for idx, value in enumerate(values):
+        if value in (1, 2):
+            last_visual_idx = idx
+
+    return None if last_visual_idx < 0 else last_visual_idx + 1
+
+
 def _batch_single_cache(cache: list[Any]) -> list[Any]:
     """Convert one scalar restored cache into a batch-size-one cache."""
     batch_cache = []
@@ -756,6 +809,12 @@ class _PromptPrefill:
         self._all_tokens = list(all_tokens) if all_tokens is not None else []
         self._processed_prefix_len = len(self._all_tokens)
         self._prefix_cache_save_state = prefix_cache_save_state
+        self._visual_prefill_prefix_len = _gemma4_visual_prefill_prefix_len(
+            model,
+            prompt_kwargs,
+            prefix_cache_save_state.image_spans,
+            len(self._all_tokens),
+        )
         # Restored exact hot caches may carry an existing row. Trimmed/disk
         # restores pass None and let prompt prep recompute it.
         self._rope_deltas = _normalize_rope_deltas(rope_deltas)
@@ -816,6 +875,16 @@ class _PromptPrefill:
         if remaining_tokens <= 1:
             return 0
 
+        # Apply the Gemma4 visual-prefix rule before normal cache-boundary
+        # alignment. Restores that would place the cached prefix before this
+        # visual prefix are rejected in model_kit, so this call still starts at
+        # the prompt origin for image prompts.
+        visual_prefix_remaining = self._visual_prefill_prefix_remaining()
+        if visual_prefix_remaining is not None:
+            if visual_prefix_remaining < remaining_tokens:
+                return visual_prefix_remaining
+            return 0
+
         saving_prompt_cache = self._prefix_cache_save_state.callback is not None
         processed_remainder = self._processed_prefix_len % self.prefill_step_size
         if saving_prompt_cache and processed_remainder:
@@ -839,6 +908,15 @@ class _PromptPrefill:
                 return target_prefix_len - self._processed_prefix_len
 
         return 0
+
+    def _visual_prefill_prefix_remaining(self) -> int | None:
+        if self._visual_prefill_prefix_len is None:
+            return None
+        processed_prompt_len = self._processed_prefix_len - len(self._all_tokens)
+        remaining = self._visual_prefill_prefix_len - processed_prompt_len
+        if remaining <= 0:
+            return None
+        return remaining
 
     def _prompt_kwargs_for_next(self, n: int) -> dict:
         # Slice locally instead of relying on model-specific n_to_process hacks.

@@ -68,6 +68,16 @@ class DiskPromptCacheRestorePlan:
     record_keys_by_chunk_key: dict[str, list[str]]
 
 
+def _prefix_len_splits_image_span(
+    prefix_len: int,
+    image_spans: list[PromptImageSpan],
+) -> bool:
+    # A chunk ending inside an image span can be an internal record written from
+    # a later full visual-prefill snapshot, but it is not a valid terminal restore
+    # point because the cached image-token states depended on later image tokens.
+    return any(span.start < prefix_len < span.end for span in image_spans)
+
+
 class VlmPromptCacheStore:
     """Cache-I/O-thread-owned index and temporary safetensor blob store.
 
@@ -132,6 +142,8 @@ class VlmPromptCacheStore:
         # missing old rotating records, so scan downward for the best boundary.
         for end_idx in range(len(eligible_chunks), 0, -1):
             chunks = eligible_chunks[:end_idx]
+            if _prefix_len_splits_image_span(chunks[-1].end, image_spans):
+                continue
             record_keys_by_chunk_key = (
                 restore_planner.restore_record_keys_for_chunk_chain(chunks)
             )

@@ -66,6 +66,35 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_SEQ_NUMS = 4
 
 
+def _is_gemma4_unified_model_type(model_type: str | None) -> bool:
+    return str(model_type or "").startswith("gemma4_unified")
+
+
+def _requires_global_no_chunked_prefill(model, model_type: str | None) -> bool:
+    if not getattr(model, "no_chunked_prefill", False):
+        return False
+    # Gemma4 unified visual prompts need a request-local policy because only
+    # visual token blocks require the bidirectional-mask prefill constraint.
+    return not _is_gemma4_unified_model_type(model_type)
+
+
+def _restore_conflicts_with_gemma4_visual_prefix(
+    *,
+    model_type: str | None,
+    cached_prefix_len: int,
+    image_spans,
+) -> bool:
+    """Return true when a restore would make Gemma4 prefill visual tokens late."""
+    if not _is_gemma4_unified_model_type(model_type) or cached_prefix_len <= 0:
+        return False
+    last_visual_end = max((span.end for span in image_spans), default=0)
+    # Restoring to the prompt boundary after a completed turn is allowed and is
+    # the important follow-up path. Restoring before the visual prefix would make
+    # the remaining image tokens run against an existing KV prefix, which breaks
+    # Gemma4's bidirectional vision mask assumption.
+    return cached_prefix_len < last_visual_end
+
+
 class BatchedVisionModelKit:
     """
     VLM batching backend built on a local mlx-vlm-style batcher.
@@ -346,7 +375,7 @@ class BatchedVisionModelKit:
             completion_batch_size=self._max_seq_nums,
             prefill_step_size=(
                 None
-                if getattr(self.model, "no_chunked_prefill", False)
+                if _requires_global_no_chunked_prefill(self.model, self.model_type)
                 else self.prefill_step_size
             ),
         )
@@ -380,6 +409,12 @@ class BatchedVisionModelKit:
         restored = prepared_insert.restored
         full_prompt_input_ids = prepared_prompt.prompt_input_ids
         prompt_token_count = len(full_prompt_input_ids)
+        if restored is not None and _restore_conflicts_with_gemma4_visual_prefix(
+            model_type=self.model_type,
+            cached_prefix_len=restored.cached_prefix_len,
+            image_spans=prepared_prompt.image_spans,
+        ):
+            restored = None
 
         prompt_input_ids = full_prompt_input_ids
         prompt_kwargs = None
@@ -410,7 +445,7 @@ class BatchedVisionModelKit:
             )
             inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
-        if getattr(self.model, "no_chunked_prefill", False):
+        if _requires_global_no_chunked_prefill(self.model, self.model_type):
             # One-shot prefill skips exact intermediate prompt boundaries.
             prompt_progress_for_cache_chunks = prompt_token_count
         else:
