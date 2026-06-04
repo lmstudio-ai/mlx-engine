@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,9 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSp
 from mlx_engine.model_kit.batched_vision.qwen_mrope import (
     apply_qwen_image_mrope_state,
 )
+from mlx_engine.model_kit.batched_vision.vision_feature_memoizer import (
+    VisionFeatureMemoizer,
+)
 from mlx_engine.utils.image_utils import convert_to_pil
 
 
@@ -20,6 +24,7 @@ class PreparedPrompt:
     prompt_input_ids: list[int]
     raw_inputs: dict[str, Any] | None
     image_spans: list[PromptImageSpan]
+    vision_cache_key: str | None = None
 
 
 def prepare_prompt_inputs(
@@ -39,6 +44,7 @@ def prepare_prompt_inputs(
             prompt_input_ids=list(prompt_tokens),
             raw_inputs=None,
             image_spans=[],
+            vision_cache_key=None,
         )
 
     # Request prep runs on the cache I/O thread before generation insertion.
@@ -63,6 +69,7 @@ def prepare_prompt_inputs(
             image_hashes,
             image_token_index,
         ),
+        vision_cache_key=_build_vision_cache_key(image_hashes),
     )
 
 
@@ -73,7 +80,11 @@ def _eval_mlx_arrays(value: Any) -> None:
         mx.eval(arrays)
 
 
-def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
+def build_prompt_kwargs(
+    model,
+    prepared_prompt: PreparedPrompt,
+    vision_feature_memoizer: VisionFeatureMemoizer | None = None,
+) -> dict:
     """Build model kwargs for a full prompt prefill."""
     if prepared_prompt.raw_inputs is None:
         input_ids = mx.array(prepared_prompt.prompt_input_ids, dtype=mx.int32)[None, :]
@@ -95,11 +106,21 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
         for key, value in raw_inputs.items()
         if key not in {"input_ids", "pixel_values", "attention_mask"}
     }
+    embedding_kwargs = {
+        **data_kwargs,
+        **_build_vision_feature_cache_kwargs(
+            model,
+            prepared_prompt,
+            pixel_values,
+            data_kwargs,
+            vision_feature_memoizer,
+        ),
+    }
     embedding_output = model.get_input_embeddings(
         input_ids,
         pixel_values,
         mask=attention_mask,
-        **data_kwargs,
+        **embedding_kwargs,
     )
     apply_qwen_image_mrope_state(
         model,
@@ -124,11 +145,19 @@ def build_cached_prompt_kwargs(
     prepared_prompt: PreparedPrompt,
     cached_prefix_len: int,
     rope_deltas: Any | None,
+    vision_feature_memoizer: VisionFeatureMemoizer | None = None,
 ) -> dict:
     """Build model kwargs for the uncached suffix after a prefix restore."""
     prompt_input_ids = prepared_prompt.prompt_input_ids[cached_prefix_len:]
     if prepared_prompt.raw_inputs is not None:
-        prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+        if vision_feature_memoizer is None:
+            prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+        else:
+            prompt_kwargs = build_prompt_kwargs(
+                model,
+                prepared_prompt,
+                vision_feature_memoizer,
+            )
         return slice_prompt_kwargs(
             prompt_kwargs,
             cached_prefix_len,
@@ -220,6 +249,77 @@ def _route_attention_mask_4d(model, prompt_kwargs: dict) -> None:
     attention_mask_4d = prompt_kwargs.pop("attention_mask_4d", None)
     if attention_mask_4d is not None:
         prompt_kwargs["mask"] = attention_mask_4d
+
+
+def _build_vision_feature_cache_kwargs(
+    model,
+    prepared_prompt: PreparedPrompt,
+    pixel_values: mx.array | None,
+    data_kwargs: dict,
+    vision_feature_memoizer: VisionFeatureMemoizer | None,
+) -> dict:
+    cache_key = prepared_prompt.vision_cache_key
+    if vision_feature_memoizer is None or cache_key is None or pixel_values is None:
+        return {}
+
+    if hasattr(model, "encode_image") and _can_accept_embedding_kwarg(
+        model, "cached_image_features"
+    ):
+        encode_kwargs = _encode_image_kwargs(model, data_kwargs)
+        return {
+            "cached_image_features": vision_feature_memoizer.get_or_compute_key(
+                cache_key,
+                _encode_image_features,
+                model,
+                pixel_values,
+                encode_kwargs,
+            )
+        }
+
+    if not (
+        _can_accept_embedding_kwarg(model, "vision_cache")
+        and _can_accept_embedding_kwarg(model, "_image_key")
+    ):
+        return {}
+
+    # Some upstream VLMs, including Qwen3.5, own the image-feature computation
+    # internally and only need a cache object plus stable key.
+    return {
+        "vision_cache": vision_feature_memoizer.cache,
+        "_image_key": cache_key,
+    }
+
+
+def _can_accept_embedding_kwarg(model, kwarg_name: str) -> bool:
+    try:
+        signature = inspect.signature(model.get_input_embeddings)
+    except (TypeError, ValueError):
+        return True
+
+    return kwarg_name in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _encode_image_features(
+    model,
+    pixel_values: mx.array,
+    encode_kwargs: dict,
+) -> mx.array:
+    return model.encode_image(pixel_values, **encode_kwargs)
+
+
+def _encode_image_kwargs(model, data_kwargs: dict) -> dict:
+    encode_image = model.encode_image
+    signature = inspect.signature(encode_image)
+    kwargs = {}
+    if (
+        "image_position_ids" in signature.parameters
+        and "image_position_ids" in data_kwargs
+    ):
+        kwargs["image_position_ids"] = data_kwargs["image_position_ids"]
+    return kwargs
 
 
 def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
@@ -351,6 +451,10 @@ def _hash_prompt_image(image) -> str:
     digest.update(f"{image.size[0]}x{image.size[1]}".encode())
     digest.update(image.tobytes())
     return digest.hexdigest()
+
+
+def _build_vision_cache_key(image_hashes: list[str]) -> str:
+    return f"prepared-images:{'|'.join(image_hashes)}"
 
 
 def _get_image_spans(

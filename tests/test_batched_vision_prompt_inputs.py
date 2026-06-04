@@ -133,6 +133,38 @@ def test_prepare_prompt_inputs_builds_image_spans_from_processor_tokens(monkeypa
     assert prompt.image_spans[0].image_hash != prompt.image_spans[1].image_hash
 
 
+def test_prepare_prompt_inputs_cache_key_uses_prepared_image_identity(monkeypatch):
+    """Different request encodings can reuse features when prepared images match."""
+    images = [_FakeImage(b"a")]
+    monkeypatch.setattr(prompt_inputs_module, "convert_to_pil", lambda _b64: images)
+    monkeypatch.setattr(
+        prompt_inputs_module.mlx_vlm,
+        "prepare_inputs",
+        lambda **_kwargs: {
+            "input_ids": mx.array([[1, 20, 2]], dtype=mx.int32),
+            "pixel_values": mx.array([1], dtype=mx.float32),
+        },
+    )
+
+    first = prepare_prompt_inputs(
+        prompt_tokens=[9],
+        images_b64=["image-a"],
+        tokenizer=_FakeTokenizer(),
+        processor=object(),
+        config={"image_token_id": 20},
+    )
+    second = prepare_prompt_inputs(
+        prompt_tokens=[9],
+        images_b64=["different-request-encoding"],
+        tokenizer=_FakeTokenizer(),
+        processor=object(),
+        config={"image_token_id": 20},
+    )
+
+    assert first.vision_cache_key == second.vision_cache_key
+    assert first.image_spans[0].image_hash == second.image_spans[0].image_hash
+
+
 def test_prepare_prompt_inputs_falls_back_to_whole_prompt_on_image_span_mismatch(
     monkeypatch,
 ):
@@ -330,8 +362,7 @@ def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeyp
     assert prompt_kwargs["position_ids"].tolist() == position_ids[:, :, 4:].tolist()
     assert prompt_kwargs["mask"].tolist() == mask[:, :, 4:, :].tolist()
     assert (
-        prompt_kwargs["mm_token_type_ids"].tolist()
-        == mm_token_type_ids[:, 4:].tolist()
+        prompt_kwargs["mm_token_type_ids"].tolist() == mm_token_type_ids[:, 4:].tolist()
     )
     assert prompt_kwargs["token_type_ids"].tolist() == token_type_ids[:, 4:].tolist()
     assert prompt_kwargs["rope_deltas"].tolist() == [5]

@@ -58,6 +58,9 @@ from mlx_engine.model_kit.batched_vision.transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
 )
+from mlx_engine.model_kit.batched_vision.vision_feature_memoizer import (
+    VisionFeatureMemoizer,
+)
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_SEQ_NUMS = 4
@@ -122,6 +125,7 @@ class BatchedVisionModelKit:
             self._prompt_cache_store,
             self._cache_io_thread.enqueue_save,
         )
+        self._vision_feature_memoizer = VisionFeatureMemoizer()
 
         self._init_tokenizer_only()
         self.processor = mlx_vlm.utils.load_processor(
@@ -181,7 +185,9 @@ class BatchedVisionModelKit:
             lazy=False,
             trust_remote_code=self._trust_remote_code,
         )
-        self.model = loaded_model[0] if isinstance(loaded_model, tuple) else loaded_model
+        self.model = (
+            loaded_model[0] if isinstance(loaded_model, tuple) else loaded_model
+        )
         mx.synchronize()
         mx.clear_cache()
 
@@ -289,6 +295,7 @@ class BatchedVisionModelKit:
             self.processor = None
             self.tokenizer = None
             self.detokenizer = None
+            self._vision_feature_memoizer.clear()
             self._generation_thread = None
             gc.collect()
             mx.clear_cache()
@@ -388,6 +395,7 @@ class BatchedVisionModelKit:
                 prepared_prompt,
                 restored.cached_prefix_len,
                 restored.rope_deltas,
+                self._vision_feature_memoizer,
             )
             inputs_embeds = prompt_kwargs.pop("inputs_embeds")
             cached_prefix_len = restored.cached_prefix_len
@@ -395,7 +403,11 @@ class BatchedVisionModelKit:
             all_tokens = full_prompt_input_ids[: restored.cached_prefix_len]
             rope_deltas = restored.rope_deltas
         else:
-            prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
+            prompt_kwargs = build_prompt_kwargs(
+                self.model,
+                prepared_prompt,
+                self._vision_feature_memoizer,
+            )
             inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
         if getattr(self.model, "no_chunked_prefill", False):
@@ -560,6 +572,7 @@ class BatchedVisionModelKit:
             self._generation_thread_state = None
             mx.synchronize()
             self.model = None
+            self._vision_feature_memoizer.clear()
             gc.collect()
             mx.clear_cache()
 
