@@ -54,7 +54,7 @@ from mlx_engine.utils.prompt_progress_events import (
 )
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
-from mlx_engine.vision_model_kit._transformers_compatibility import (
+from mlx_engine.model_kit.batched_vision.transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
 )
@@ -176,11 +176,12 @@ class BatchedVisionModelKit:
             image_processor.input_data_format = ChannelDimension.FIRST
 
     def _load_model(self) -> None:
-        self.model, _ = mlx_vlm.utils.load_model(
+        loaded_model = mlx_vlm.utils.load_model(
             self._model_path,
             lazy=False,
             trust_remote_code=self._trust_remote_code,
         )
+        self.model = loaded_model[0] if isinstance(loaded_model, tuple) else loaded_model
         mx.synchronize()
         mx.clear_cache()
 
@@ -285,11 +286,6 @@ class BatchedVisionModelKit:
             if self._generation_thread:
                 self._generation_thread.join()
             self._cache_io_thread.close()
-            if self._generation_thread_state is not None:
-                self._generation_thread_state.batch_generator.close()
-                self._generation_thread_state = None
-            self._prompt_cache_coordinator.clear_hot_prompt_cache()
-            self.model = None
             self.processor = None
             self.tokenizer = None
             self.detokenizer = None
@@ -551,14 +547,21 @@ class BatchedVisionModelKit:
             finish_response=self._finish_response,
         )
 
-        while not self._shutdown.is_set():
-            timeout = None if state.active or state.ready else 0.1
-            controller.drain_generation_events(timeout)
-            controller.insert_ready_requests()
-            controller.admit_pending_requests()
-            controller.step_generation()
-
-        controller.cancel_all_requests()
+        try:
+            while not self._shutdown.is_set():
+                timeout = None if state.active or state.ready else 0.1
+                controller.drain_generation_events(timeout)
+                controller.insert_ready_requests()
+                controller.admit_pending_requests()
+                controller.step_generation()
+        finally:
+            controller.cancel_all_requests()
+            self._prompt_cache_coordinator.clear_hot_prompt_cache()
+            self._generation_thread_state = None
+            mx.synchronize()
+            self.model = None
+            gc.collect()
+            mx.clear_cache()
 
     def __del__(self):
         self.shutdown()

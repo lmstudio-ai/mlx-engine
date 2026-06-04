@@ -79,6 +79,7 @@ class PromptCacheIOThread:
             return
         self._enqueue(_SHUTDOWN_JOB_PRIORITY, None)
         self._thread.join()
+        self._close_cache_store()
 
     def enqueue_restore(self, request: GenerationRequest) -> None:
         self._enqueue(_RESTORE_JOB_PRIORITY, RestoreJob(request))
@@ -117,7 +118,6 @@ class PromptCacheIOThread:
             _, _, job = self._queue.get()
             if job is None:
                 self._discard_queued_jobs()
-                self._close_cache_store()
                 return
 
             if isinstance(job, RestoreJob):

@@ -23,7 +23,6 @@ from mlx_lm.models.cache import make_prompt_cache
 from mlx_vlm.structured import build_json_schema_logits_processor
 
 from mlx_engine.model_kit.model_kit import ModelKit
-from mlx_engine.vision_model_kit.vision_model_kit import VisionModelKit
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
@@ -65,7 +64,7 @@ from mlx_engine.utils.sampling import create_sampler
 
 logger = logging.getLogger(__name__)
 
-SequentialGenerationKit: TypeAlias = ModelKit | VisionModelKit
+SequentialGenerationKit: TypeAlias = ModelKit
 BatchedGenerationKit: TypeAlias = BatchedModelKit | BatchedVisionModelKit
 LoadedModelKit: TypeAlias = SequentialGenerationKit | BatchedGenerationKit
 
@@ -220,7 +219,6 @@ def load_model(
     Returns:
         LoadedModelKit: An initialized model instance:
             - ModelKit: for sequential text-only models and vocab-only loads
-            - VisionModelKit: for legacy sequential vision loads
             - BatchedModelKit: for text-only continuous batching
             - BatchedVisionModelKit: for mlx-vlm continuous batching
 
@@ -269,8 +267,8 @@ def load_model(
             seed=seed,
         )
     else:
-        # For non-vision models or ModelKit-supported vision models, choose between
-        # BatchedModelKit (continuous batching) and ModelKit (sequential)
+        # For non-vision models, choose between BatchedModelKit
+        # (continuous batching) and ModelKit (sequential).
         kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
             kv_bits,
             kv_group_size,
@@ -416,9 +414,7 @@ def create_generator(
     """
     if isinstance(model_kit, (BatchedModelKit, BatchedVisionModelKit)):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
-    if type(model_kit) is ModelKit:
-        return _SequentialModelKitGenerator(model_kit, prompt_tokens, kwargs)
-    return _sequential_generation(model_kit, prompt_tokens, **kwargs)
+    return _SequentialModelKitGenerator(model_kit, prompt_tokens, kwargs)
 
 
 @contextmanager
@@ -499,16 +495,15 @@ def _sequential_generation(
             prompt_progress_reporter = LoggerReporter()
 
         # Set up kv cache
-        if type(model_kit) is not VisionModelKit:
-            for attr in [
-                "max_kv_size",
-                "kv_bits",
-                "kv_group_size",
-                "quantized_kv_start",
-            ]:
-                value = getattr(model_kit, attr, None)
-                if value is not None:
-                    generate_args[attr] = value
+        for attr in [
+            "max_kv_size",
+            "kv_bits",
+            "kv_group_size",
+            "quantized_kv_start",
+        ]:
+            value = getattr(model_kit, attr, None)
+            if value is not None:
+                generate_args[attr] = value
 
         # Set up speculative decoding
         draft_model = determine_draft_model_for_generation(
@@ -547,17 +542,6 @@ def _sequential_generation(
         generate_args["sampler"] = create_sampler(
             temp, top_p, min_p, min_tokens_to_keep, top_k
         )
-
-        # If using VisionModelKit, immediately record the token once it's sampled
-        if type(model_kit) is VisionModelKit:
-            sampler_func = generate_args["sampler"]
-
-            def sampler_func_wrapper(*args, **kwargs):
-                token = sampler_func(*args, **kwargs)
-                model_kit.record_sampled_token(token)
-                return token
-
-            generate_args["sampler"] = sampler_func_wrapper
 
         # Validate top_logprobs
         top_logprobs = validate_top_logprobs(top_logprobs)

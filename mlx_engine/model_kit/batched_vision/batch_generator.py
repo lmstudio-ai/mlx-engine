@@ -487,46 +487,10 @@ class GenerationBatch:
         # restores intentionally recompute RoPE side state during prompt prep.
         return mx.contiguous(self._rope_deltas[idx : idx + 1])
 
-    def _eval_pending_state(self) -> None:
-        targets = []
-
-        def append_arrays(value):
-            if isinstance(value, mx.array):
-                targets.append(value)
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    append_arrays(item)
-            elif isinstance(value, dict):
-                for item in value.values():
-                    append_arrays(item)
-
-        append_arrays(
-            (
-                self._current_tokens,
-                self._current_token_logprobs,
-                self._next_tokens,
-                self._next_token_logprobs,
-                self._next_top_idx,
-                self._next_top_logprobs,
-                self._rope_deltas,
-            )
-        )
-        for cache in self.prompt_cache:
-            try:
-                append_arrays(cache.state)
-            except (AttributeError, TypeError):
-                pass
-
-        if targets:
-            mx.eval(*targets)
-
     def append_prefilled_sequence(self, prefilled: "GenerationBatch"):
         """Append the one sequence that just finished prompt prefill."""
         count = len(self)
         prefilled_count = len(prefilled)
-        if count > 0 and prefilled_count > 0:
-            self._eval_pending_state()
-            prefilled._eval_pending_state()
 
         self._rows.extend(prefilled._rows)
         self.prompt_cache = _extend_cache(self.prompt_cache, prefilled.prompt_cache)
@@ -600,9 +564,6 @@ class GenerationBatch:
         self.top_logprobs_k = next_top_logprobs_k
 
     def filter(self, keep: list[int]):
-        if len(keep) < len(self._rows):
-            self._eval_pending_state()
-
         self._rows = [self._rows[idx] for idx in keep]
         self.top_logprobs_k = max(
             (row.top_logprobs for row in self._rows),

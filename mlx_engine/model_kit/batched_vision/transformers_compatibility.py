@@ -1,6 +1,6 @@
 import json
-from pathlib import Path
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,6 @@ def fix_qwen2_5_vl_image_processor(model_path: Path):
     ):
         return
 
-    # Replace image_processor_type with Qwen2VLImageProcessor
     logger.warning(
         "Replacing `image_processor_type` with Qwen2VLImageProcessor in preprocessor_config.json"
     )
