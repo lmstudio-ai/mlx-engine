@@ -85,15 +85,6 @@ def _is_gemma4_unified_model_type(model_type: str | None) -> bool:
     return str(model_type or "").startswith("gemma4_unified")
 
 
-def _uses_gemma4_unified_bidirectional_vision(model: nn.Module) -> bool:
-    language_model = getattr(model, "language_model", model)
-    model_type = str(getattr(language_model, "model_type", ""))
-    config = getattr(language_model, "config", None)
-    return _is_gemma4_unified_model_type(model_type) and (
-        getattr(config, "use_bidirectional_attention", None) == "vision"
-    )
-
-
 def _gemma4_visual_prefill_prefix_len(
     model: nn.Module,
     prompt_kwargs: dict,
@@ -108,7 +99,8 @@ def _gemma4_visual_prefill_prefix_len(
     first prefill call anchored at prompt offset 0 through the last visual token;
     text after that visual prefix can use normal chunked prefill and cache saves.
     """
-    if not _uses_gemma4_unified_bidirectional_vision(model):
+    language_model = getattr(model, "language_model", model)
+    if not _is_gemma4_unified_model_type(getattr(language_model, "model_type", None)):
         return None
 
     token_types = prompt_kwargs.get("mm_token_type_ids")
@@ -122,10 +114,6 @@ def _gemma4_visual_prefill_prefix_len(
         return relative_visual_end if relative_visual_end > 0 else None
 
     values = token_types.reshape(-1).tolist()
-    has_audio = any(value == 3 for value in values)
-    if has_audio:
-        return None
-
     last_visual_idx = -1
     for idx, value in enumerate(values):
         if value in (1, 2):
