@@ -1,5 +1,4 @@
 import hashlib
-import inspect
 from dataclasses import dataclass
 from typing import Any
 
@@ -112,7 +111,6 @@ def build_prompt_kwargs(
             model,
             prepared_prompt,
             pixel_values,
-            data_kwargs,
             vision_feature_memoizer,
         ),
     }
@@ -255,71 +253,18 @@ def _build_vision_feature_cache_kwargs(
     model,
     prepared_prompt: PreparedPrompt,
     pixel_values: mx.array | None,
-    data_kwargs: dict,
     vision_feature_memoizer: VisionFeatureMemoizer | None,
 ) -> dict:
     cache_key = prepared_prompt.vision_cache_key
     if vision_feature_memoizer is None or cache_key is None or pixel_values is None:
         return {}
 
-    if hasattr(model, "encode_image") and _can_accept_embedding_kwarg(
-        model, "cached_image_features"
-    ):
-        encode_kwargs = _encode_image_kwargs(model, data_kwargs)
-        return {
-            "cached_image_features": vision_feature_memoizer.get_or_compute_key(
-                cache_key,
-                _encode_image_features,
-                model,
-                pixel_values,
-                encode_kwargs,
-            )
-        }
-
-    if not (
-        _can_accept_embedding_kwarg(model, "vision_cache")
-        and _can_accept_embedding_kwarg(model, "_image_key")
-    ):
-        return {}
-
-    # Some upstream VLMs, including Qwen3.5, own the image-feature computation
-    # internally and only need a cache object plus stable key.
+    # Match mlx-vlm's batched server path: pass the image-key cache kwargs
+    # broadly, then keep them out of the language-model prefill kwargs.
     return {
         "vision_cache": vision_feature_memoizer.cache,
         "_image_key": cache_key,
     }
-
-
-def _can_accept_embedding_kwarg(model, kwarg_name: str) -> bool:
-    try:
-        signature = inspect.signature(model.get_input_embeddings)
-    except (TypeError, ValueError):
-        return True
-
-    return kwarg_name in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-
-
-def _encode_image_features(
-    model,
-    pixel_values: mx.array,
-    encode_kwargs: dict,
-) -> mx.array:
-    return model.encode_image(pixel_values, **encode_kwargs)
-
-
-def _encode_image_kwargs(model, data_kwargs: dict) -> dict:
-    encode_image = model.encode_image
-    signature = inspect.signature(encode_image)
-    kwargs = {}
-    if (
-        "image_position_ids" in signature.parameters
-        and "image_position_ids" in data_kwargs
-    ):
-        kwargs["image_position_ids"] = data_kwargs["image_position_ids"]
-    return kwargs
 
 
 def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
