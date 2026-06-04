@@ -128,14 +128,14 @@ class BatchedVisionModelKit:
         self._vision_feature_memoizer = VisionFeatureMemoizer()
 
         self._init_tokenizer_only()
+        image_processor = mlx_vlm.utils.load_image_processor(
+            self._model_path,
+            trust_remote_code=self._trust_remote_code,
+        )
         self.processor = mlx_vlm.utils.load_processor(
             self._model_path,
             True,
             eos_token_ids=self._get_eos_token_ids(),
-            trust_remote_code=self._trust_remote_code,
-        )
-        image_processor = mlx_vlm.utils.load_image_processor(
-            self._model_path,
             trust_remote_code=self._trust_remote_code,
         )
         if image_processor is not None:
