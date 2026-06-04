@@ -11,7 +11,9 @@ from mlx_lm.models.qwen3_next import Qwen3NextAttention
 from transformers import AutoTokenizer
 
 from mlx_engine.model_kit.patches import qwen3_5 as qwen3_5_patches
-from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
+from mlx_engine.model_kit.batched_vision.qwen_mrope import (
+    build_qwen_image_mrope_state,
+)
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     PreparedPrompt,
     build_cached_prompt_kwargs,
@@ -460,9 +462,14 @@ def test_qwen3_5_image_prompt_patched_matches_vlm(model_name):
     )
     mx.eval(vlm_position_ids, vlm_rope_deltas)
 
-    addon_position_ids, addon_rope_deltas = _compute_image_mrope_state(
-        mx.array(tokens_list), image_grid_thw, config
+    mrope_state = build_qwen_image_mrope_state(
+        input_ids=tokens,
+        image_grid_thw=image_grid_thw,
+        image_token_id=config.image_token_id,
+        spatial_merge_size=config.vision_config.spatial_merge_size,
     )
+    addon_position_ids = mrope_state.position_ids
+    addon_rope_deltas = mrope_state.rope_deltas
     mx.eval(addon_position_ids, addon_rope_deltas)
 
     assert mx.array_equal(addon_position_ids, vlm_position_ids).item(), (
