@@ -298,14 +298,11 @@ class DistributedModelKit:
         if self.group.size() <= 1:
             raise ValueError("DistributedModelKit requires more than one MLX rank")
 
-        if self.uses_distributed_batching():
-            self._load_model_shard()
-        else:
-            self._start_model_thread()
-            self._run_on_model_thread_sync(
-                "distributed-model-load",
-                self._load_model_shard,
-            )
+        self._start_model_thread()
+        self._run_on_model_thread_sync(
+            "distributed-model-load",
+            self._load_model_shard,
+        )
 
     def _load_model_shard(self) -> None:
         logger.info(
@@ -802,13 +799,10 @@ class DistributedModelKit:
             ) from caught_error
 
     def start(self):
-        if not self.uses_distributed_batching():
-            self._run_on_model_thread_sync(
-                "distributed-model-start",
-                self._start_on_current_thread,
-            )
-            return
-        self._start_on_current_thread()
+        self._run_on_model_thread_sync(
+            "distributed-model-start",
+            self._start_on_current_thread,
+        )
 
     def _start_on_current_thread(self) -> None:
         log_mlx_stream_state(
@@ -834,13 +828,47 @@ class DistributedModelKit:
                 self.group.size(),
             )
             if self.group.rank() == 0:
-                self._generation_thread = threading.Thread(
-                    target=self._generate_with_exception_handling,
-                    daemon=True,
-                    name="mlx-distributed-batched-scheduler",
-                )
-                self._generation_thread.start()
+                self._start_batched_scheduler_on_model_thread()
+
         logger.info("Distributed model start synchronized on rank %s", self.group.rank())
+
+    def _start_batched_scheduler_on_model_thread(self) -> None:
+        if self._model_thread_requests is None:
+            logger.warning(
+                "Starting distributed batched scheduler on a dedicated thread because "
+                "model thread is disabled rank=%s/%s caller_thread=%s",
+                self.group.rank(),
+                self.group.size(),
+                _current_thread_summary(),
+            )
+            self._generation_thread = threading.Thread(
+                target=self._generate_with_exception_handling,
+                daemon=True,
+                name="mlx-distributed-batched-scheduler",
+            )
+            self._generation_thread.start()
+            return
+
+        logger.info(
+            "Queueing distributed-batched-scheduler-on-model-thread rank=%s/%s "
+            "caller_thread=%s model_thread_ident=%s",
+            self.group.rank(),
+            self.group.size(),
+            _current_thread_summary(),
+            self._model_thread_ident,
+        )
+        self._model_thread_requests.put(
+            DistributedModelThreadRequest(
+                description="distributed-batched-scheduler-on-model-thread",
+                callback=self._generate_with_exception_handling,
+                response_queue=Queue(),
+                stream_results=False,
+                created_at=time.monotonic(),
+                caller_thread_name=threading.current_thread().name,
+                caller_thread_ident=threading.current_thread().ident,
+                caller_stopped=None,
+            )
+        )
 
     def uses_distributed_batching(self) -> bool:
         # The distributed scheduler is also the MLX server-compatible path for
@@ -1103,6 +1131,13 @@ class DistributedModelKit:
             self._requests.put(DistributedSchedulerShutdownRequest())
             if self._generation_thread is not None:
                 self._generation_thread.join()
+            if self._model_thread_requests is not None:
+                self._model_thread_requests.put(None)
+            if (
+                self._model_thread is not None
+                and threading.get_ident() != self._model_thread_ident
+            ):
+                self._model_thread.join(timeout=5)
             self._shutdown.set()
             return
         self._shutdown.set()
@@ -1138,11 +1173,17 @@ class DistributedModelKit:
         if self.group.rank() == 0:
             raise RuntimeError("Distributed batched worker loop cannot run on rank 0")
         logger.info(
-            "Distributed batched worker rank %s/%s entering scheduler loop",
+            "Distributed batched worker rank %s/%s queueing scheduler loop on model "
+            "thread caller_thread=%s model_thread_ident=%s",
             self.group.rank(),
             self.group.size(),
+            _current_thread_summary(),
+            self._model_thread_ident,
         )
-        self._generate_with_exception_handling()
+        self._run_on_model_thread_sync(
+            "distributed-batched-worker-loop-on-model-thread",
+            self._generate_with_exception_handling,
+        )
 
     def _generate_with_exception_handling(self) -> None:
         try:
@@ -1463,14 +1504,27 @@ class DistributedModelKit:
 
     def _generate(self) -> None:
         logger.info(
-            "Distributed batched scheduler loop starting on rank %s/%s",
+            "Distributed batched scheduler loop starting on rank %s/%s thread=%s "
+            "model_thread_ident=%s",
             self.group.rank(),
             self.group.size(),
+            _current_thread_summary(),
+            self._model_thread_ident,
+        )
+        log_mlx_stream_state(
+            reason="distributed-batched-scheduler-loop-before-stream",
+            distributed_group=self.group,
+            details=f"model_thread_ident={self._model_thread_ident}",
         )
         generation_stream = prepare_mlx_lm_generation_stream(
             reason="distributed-batched-scheduler",
             distributed_group=self.group,
             use_default_stream=True,
+        )
+        log_mlx_stream_state(
+            reason="distributed-batched-scheduler-loop-after-stream",
+            distributed_group=self.group,
+            details=f"generation_stream={generation_stream!r}",
         )
         batch_generator = BatchGenerator(
             self.model,
