@@ -12,10 +12,9 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Tuple
 
 import mlx.core as mx
-from mlx_lm.generate import BatchGenerator
+from mlx_lm.generate import BatchGenerator, SequenceStateMachine
 from mlx_lm.server import LRUPromptCache
 from mlx_lm.utils import _download, load_model, load_tokenizer
-from mlx.utils import tree_flatten
 
 from mlx_engine.model_kit.batched_model_kit import _prepare_prompt_cache_for_generation
 from mlx_engine.model_kit.batched_model_kit_types import (
@@ -46,11 +45,14 @@ SCHEDULER_GENERATION_STEPS_PER_TICK = 1
 class DistributedSchedulerGenerationRequest:
     response_queue: Queue | None
     prompt_tokens: list[int]
+    prompt_segments: list[list[int]] | None
+    segment_types: list[str] | None
     request_id: str
     sampler: Any
     logits_processors: list[Any]
     top_logprobs: int
     max_tokens: int
+    stop_strings: list[str]
     sampling: dict[str, Any]
     repetition_penalty: Optional[float]
     repetition_context_size: Optional[int]
@@ -197,7 +199,7 @@ def _instrumented_tensor_sharded_load(
         distributed_group=tensor_group,
     )
     logger.info("[sharded_load] rank %s/%s evaluating model parameters", rank, size)
-    _evaluate_model_parameters_with_trace(model, rank, size, started_at)
+    mx.eval(model.parameters())
     logger.info(
         "[sharded_load] rank %s/%s model parameters evaluated after %.1fs",
         rank,
@@ -227,44 +229,6 @@ def _instrumented_tensor_sharded_load(
     )
 
     return model, tokenizer
-
-
-def _evaluate_model_parameters_with_trace(
-    model: Any,
-    rank: int,
-    size: int,
-    started_at: float,
-) -> None:
-    parameters = tree_flatten(model.parameters())
-    logger.info(
-        "[sharded_load] rank %s/%s evaluating %s model parameters one-by-one",
-        rank,
-        size,
-        len(parameters),
-    )
-    for parameter_index, (parameter_name, parameter) in enumerate(parameters):
-        parameter_started_at = time.monotonic()
-        logger.info(
-            "[sharded_load] rank %s/%s evaluating parameter %s/%s %s shape=%s dtype=%s",
-            rank,
-            size,
-            parameter_index + 1,
-            len(parameters),
-            parameter_name,
-            getattr(parameter, "shape", "<unknown>"),
-            getattr(parameter, "dtype", "<unknown>"),
-        )
-        mx.eval(parameter)
-        logger.info(
-            "[sharded_load] rank %s/%s evaluated parameter %s/%s %s after %.1fs total=%.1fs",
-            rank,
-            size,
-            parameter_index + 1,
-            len(parameters),
-            parameter_name,
-            time.monotonic() - parameter_started_at,
-            time.monotonic() - started_at,
-        )
 
 
 class DistributedModelKit:
@@ -879,7 +843,12 @@ class DistributedModelKit:
         logger.info("Distributed model start synchronized on rank %s", self.group.rank())
 
     def uses_distributed_batching(self) -> bool:
-        return self.max_seq_nums > 1
+        # The distributed scheduler is also the MLX server-compatible path for
+        # concurrency 1; BatchGenerator just runs with one active sequence.
+        return self.max_seq_nums >= 1
+
+    def supports_request_level_seed(self) -> bool:
+        return self.max_seq_nums == 1
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
@@ -932,10 +901,13 @@ class DistributedModelKit:
         prompt_progress_callback,
         top_logprobs,
         max_tokens,
+        stop_strings,
         sampling: dict[str, Any],
         repetition_penalty: Optional[float],
         repetition_context_size: Optional[int],
         min_tokens_to_keep: Optional[int],
+        chat_messages: Optional[List[dict[str, str]]] = None,
+        chat_template_kwargs: Optional[dict[str, Any]] = None,
     ) -> Iterable[BatchedGenerationResponse]:
         if not self.uses_distributed_batching():
             raise RuntimeError("Distributed batched generation is not enabled")
@@ -946,16 +918,35 @@ class DistributedModelKit:
         if self.group.rank() != 0:
             raise RuntimeError("Only distributed rank 0 can accept generation requests")
 
+        prompt_tokens = list(prompt_tokens)
+        prompt_segments = None
+        segment_types = None
+        chat_prompt_segments = self._make_chat_prompt_segments(
+            prompt_tokens,
+            chat_messages,
+            chat_template_kwargs,
+        )
+        if chat_prompt_segments is not None:
+            prompt_segments, segment_types = chat_prompt_segments
+        if len(prompt_tokens) == 0:
+            logger.warning(
+                "Received empty prompt. Generation quality will likely be poor"
+            )
+            prompt_tokens = self.tokenize(" ")
+
         response_queue: Queue = Queue()
         self._requests.put(
             DistributedSchedulerGenerationRequest(
                 response_queue=response_queue,
-                prompt_tokens=list(prompt_tokens),
+                prompt_tokens=prompt_tokens,
+                prompt_segments=prompt_segments,
+                segment_types=segment_types,
                 request_id=request_id,
                 sampler=sampler,
                 logits_processors=logits_processors,
                 top_logprobs=top_logprobs,
                 max_tokens=max_tokens,
+                stop_strings=[] if stop_strings is None else stop_strings,
                 sampling=sampling,
                 repetition_penalty=repetition_penalty,
                 repetition_context_size=repetition_context_size,
@@ -985,6 +976,109 @@ class DistributedModelKit:
                 yield response
 
         return _inner()
+
+    def _make_chat_prompt_segments(
+        self,
+        expected_prompt_tokens: list[int],
+        chat_messages: Optional[List[dict[str, str]]],
+        chat_template_kwargs: Optional[dict[str, Any]],
+    ) -> tuple[list[list[int]], list[str]] | None:
+        if chat_messages is None or len(chat_messages) == 0:
+            return None
+        if not getattr(self.tokenizer, "has_chat_template", False):
+            return None
+
+        messages = []
+        for message in chat_messages:
+            role = message.get("role")
+            content = message.get("content")
+            if not isinstance(role, str) or not isinstance(content, str):
+                return None
+            messages.append({"role": role, "content": content})
+
+        rendered_prompt_tokens = self._ensure_token_list(
+            self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                **(chat_template_kwargs or {}),
+            )
+        )
+        if rendered_prompt_tokens != expected_prompt_tokens:
+            logger.debug(
+                "Skipping distributed chat segmentation because rendered chat tokens "
+                "do not match the context-checked prompt tokens"
+            )
+            return None
+        segments, segment_types = self._split_chat_prompt_for_cache(
+            expected_prompt_tokens,
+            messages,
+            chat_template_kwargs,
+        )
+        return segments, segment_types
+
+    def _ensure_token_list(self, tokens: Any) -> list[int]:
+        if hasattr(tokens, "tolist"):
+            tokens = tokens.tolist()
+        return [int(token) for token in tokens]
+
+    def _split_chat_prompt_for_cache(
+        self,
+        prompt_tokens: list[int],
+        messages: list[dict[str, str]],
+        chat_template_kwargs: Optional[dict[str, Any]],
+    ) -> tuple[list[list[int]], list[str]]:
+        if len(messages) == 0 or messages[-1]["role"] != "user":
+            return [prompt_tokens], ["assistant"]
+
+        initial_system_message_count = 0
+        system_prompt_end = 0
+        for message in messages:
+            if message["role"] != "system":
+                break
+            initial_system_message_count += 1
+
+        segments = []
+        segment_types = []
+        if initial_system_message_count > 0:
+            system_tokens = self._ensure_token_list(
+                self.tokenizer.apply_chat_template(
+                    messages[:initial_system_message_count]
+                    + [{"role": "user", "content": ""}],
+                    add_generation_prompt=False,
+                    tokenize=True,
+                    **(chat_template_kwargs or {}),
+                )
+            )
+            for token_index, (system_token, prompt_token) in enumerate(
+                zip(system_tokens, prompt_tokens)
+            ):
+                if system_token != prompt_token:
+                    system_prompt_end = token_index
+                    break
+            if system_prompt_end > 0 and system_prompt_end < len(prompt_tokens):
+                segments.append(prompt_tokens[:system_prompt_end])
+                segment_types.append("system")
+
+        tail_start = len(prompt_tokens)
+        if getattr(self.tokenizer, "has_thinking", False):
+            think_start = self.tokenizer.rfind_think_start(
+                prompt_tokens,
+                start=tail_start - 11,
+            )
+            if think_start >= 0:
+                tail_start = think_start
+
+        if system_prompt_end < tail_start:
+            segments.append(prompt_tokens[system_prompt_end:tail_start])
+            segment_types.append("user")
+        if tail_start < len(prompt_tokens):
+            segments.append(prompt_tokens[tail_start:])
+            segment_types.append("assistant")
+        if len(segments) == 0:
+            return [prompt_tokens], ["assistant"]
+
+        return segments, segment_types
 
     def remove(self, request_id: str):
         if self.uses_distributed_batching():
@@ -1137,7 +1231,10 @@ class DistributedModelKit:
             "type": SCHEDULER_MESSAGE_GENERATE,
             "requestId": item.request_id,
             "promptTokens": item.prompt_tokens,
+            "promptSegments": item.prompt_segments,
+            "segmentTypes": item.segment_types,
             "maxTokens": item.max_tokens,
+            "stopStrings": item.stop_strings,
             "sampling": item.sampling,
             "repetitionPenalty": item.repetition_penalty,
             "repetitionContextSize": item.repetition_context_size,
@@ -1173,6 +1270,8 @@ class DistributedModelKit:
         return DistributedSchedulerGenerationRequest(
             response_queue=None,
             prompt_tokens=prompt_tokens,
+            prompt_segments=message.get("promptSegments"),
+            segment_types=message.get("segmentTypes"),
             request_id=message["requestId"],
             sampler=create_sampler(
                 sampling["temperature"],
@@ -1191,6 +1290,7 @@ class DistributedModelKit:
             ),
             top_logprobs=0,
             max_tokens=message["maxTokens"],
+            stop_strings=message.get("stopStrings", []),
             sampling=sampling,
             repetition_penalty=repetition_penalty,
             repetition_context_size=repetition_context_size,
@@ -1237,26 +1337,129 @@ class DistributedModelKit:
         current_model_key: str,
         request: DistributedSchedulerGenerationRequest,
     ) -> None:
+        seed = request.sampling.get("seed")
+        if self.supports_request_level_seed() and isinstance(seed, int):
+            mx.random.seed(seed)
+
         cache, cached_prefix, rest = _prepare_prompt_cache_for_generation(
             self._prompt_cache, current_model_key, request.prompt_tokens
         )
+        if request.prompt_segments is not None and request.segment_types is not None:
+            segments, segment_types = self._trim_cached_prompt_segments(
+                request.prompt_segments,
+                request.segment_types,
+                len(cached_prefix),
+                rest,
+            )
+        else:
+            segments, segment_types = self._make_prompt_cache_segments(
+                request.prompt_tokens, len(cached_prefix), rest
+            )
 
-        (uid,) = batch_generator.insert(
-            [rest],
+        (uid,) = batch_generator.insert_segments(
+            [segments],
             [request.max_tokens],
             caches=[cache],
             all_tokens=[cached_prefix],
             samplers=[request.sampler],
             logits_processors=[request.logits_processors],
+            state_machines=[self._make_sequence_state_machine(request.stop_strings)],
         )
 
         self._batch_results[uid] = {
             "cache_key": request.prompt_tokens[:],
             "response_queue": request.response_queue,
             "detokenizer": self.tokenizer.detokenizer,
+            "segment_types": segment_types[::-1],
             "top_logprobs": request.top_logprobs,
             "request_id": request.request_id,
         }
+
+    def _trim_cached_prompt_segments(
+        self,
+        prompt_segments: list[list[int]],
+        prompt_segment_types: list[str],
+        cached_prefix_len: int,
+        rest: list[int],
+    ) -> tuple[list[list[int]], list[str]]:
+        segments = [segment[:] for segment in prompt_segments]
+        segment_types = prompt_segment_types[:]
+
+        remaining_cached_prefix_len = cached_prefix_len
+        while remaining_cached_prefix_len > 0 and len(segments) > 0:
+            if remaining_cached_prefix_len >= len(segments[0]):
+                remaining_cached_prefix_len -= len(segments.pop(0))
+                segment_types.pop(0)
+            else:
+                segments[0] = segments[0][remaining_cached_prefix_len:]
+                remaining_cached_prefix_len = 0
+
+        if len(segments) == 0:
+            segments = [rest]
+            segment_types = []
+
+        return segments, segment_types
+
+    def _make_prompt_cache_segments(
+        self,
+        prompt_tokens: list[int],
+        cached_prefix_len: int,
+        rest: list[int],
+    ) -> tuple[list[list[int]], list[str]]:
+        prompt_segments, segment_types = self._split_prompt_for_cache(prompt_tokens)
+        return self._trim_cached_prompt_segments(
+            prompt_segments,
+            segment_types,
+            cached_prefix_len,
+            rest,
+        )
+
+    def _split_prompt_for_cache(
+        self, prompt_tokens: list[int]
+    ) -> tuple[list[list[int]], list[str]]:
+        if len(prompt_tokens) <= 1:
+            return [prompt_tokens], []
+
+        tail_start = len(prompt_tokens)
+        if getattr(self.tokenizer, "has_thinking", False):
+            think_start = self.tokenizer.rfind_think_start(
+                prompt_tokens,
+                start=tail_start - 11,
+            )
+            if think_start >= 0:
+                tail_start = think_start
+
+        segments = []
+        segment_types = []
+
+        if tail_start > 0:
+            segments.append(prompt_tokens[:tail_start])
+            segment_types.append("user")
+
+        if tail_start < len(prompt_tokens):
+            segments.append(prompt_tokens[tail_start:])
+            segment_types.append("assistant")
+
+        if len(segments) == 0:
+            return [prompt_tokens], []
+
+        return segments, segment_types
+
+    def _make_sequence_state_machine(
+        self, stop_strings: list[str]
+    ) -> SequenceStateMachine:
+        transitions = {
+            "normal": [
+                ((token,), None) for token in self.tokenizer.eos_token_ids
+            ]
+        }
+        for stop_string in stop_strings:
+            stop_tokens = tuple(
+                self.tokenizer.encode(stop_string, add_special_tokens=False)
+            )
+            if len(stop_tokens) > 0:
+                transitions["normal"].append((stop_tokens, None))
+        return SequenceStateMachine(transitions, initial="normal")
 
     def _generate(self) -> None:
         logger.info(
@@ -1312,6 +1515,26 @@ class DistributedModelKit:
                         processed, total = response.progress
                         response_queue.put((min(processed, total), total))
 
+                eos_ids = [
+                    response.uid
+                    for response in prompt_responses
+                    if response.end_of_segment
+                    and not response.end_of_prompt
+                    and self._batch_results.get(response.uid) is not None
+                    and self._batch_results[response.uid]["segment_types"]
+                ]
+                caches = batch_generator.extract_cache(eos_ids)
+                for uid, (cache, cache_key) in caches.items():
+                    result = self._batch_results.get(uid)
+                    if result is None:
+                        continue
+                    self._prompt_cache.insert_cache(
+                        current_model_key,
+                        cache_key[:],
+                        cache,
+                        cache_type=result["segment_types"].pop(),
+                    )
+
                 for response in generation_responses:
                     result = self._batch_results[response.uid]
                     result["cache_key"].append(response.token)
@@ -1358,10 +1581,16 @@ class DistributedModelKit:
                     if response.finish_reason is not None:
                         if response_queue is not None:
                             response_queue.put(None)
+                        cache_key = (
+                            response.all_tokens[:]
+                            if response.all_tokens is not None
+                            else result["cache_key"]
+                        )
                         self._prompt_cache.insert_cache(
                             current_model_key,
-                            result["cache_key"],
+                            cache_key,
                             response.prompt_cache,
+                            cache_type="assistant",
                         )
                         del self._batch_results[response.uid]
 

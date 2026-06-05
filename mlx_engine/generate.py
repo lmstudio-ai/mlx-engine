@@ -757,6 +757,8 @@ def _batched_generation(
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
     request_id: str | None = None,
+    chat_messages: Optional[List[dict[str, str]]] = None,
+    chat_template_kwargs: Optional[dict[str, Any]] = None,
 ) -> Iterator[GenerationResult]:
     is_distributed_batched = isinstance(model_kit, DistributedModelKit)
     if is_distributed_batched:
@@ -770,7 +772,10 @@ def _batched_generation(
             raise ValueError(
                 "Distributed batched generation does not support structured JSON output yet"
             )
-        if seed is not None:
+        if (
+            seed is not None
+            and not model_kit.supports_request_level_seed()
+        ):
             raise ValueError(
                 "Distributed batched generation does not support request-level seeds yet"
             )
@@ -852,6 +857,9 @@ def _batched_generation(
                 "repetition_penalty": repetition_penalty,
                 "repetition_context_size": repetition_context_size,
                 "min_tokens_to_keep": min_tokens_to_keep,
+                "stop_strings": [] if stop_strings is None else stop_strings,
+                "chat_messages": chat_messages,
+                "chat_template_kwargs": chat_template_kwargs,
             }
         )
 
@@ -908,7 +916,8 @@ def _batched_generation(
                 token_buffer,
                 top_logprobs_buffer,
             )
-            model_kit.remove(request_id)
+            if generation_result.finish_reason is None:
+                model_kit.remove(request_id)
             break  # stop generation
 
         # If we currently have generated a partial match with a stop sequence, or detected an
