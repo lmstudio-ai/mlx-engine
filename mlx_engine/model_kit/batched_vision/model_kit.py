@@ -204,13 +204,10 @@ class BatchedVisionModelKit:
             image_processor.input_data_format = ChannelDimension.FIRST
 
     def _load_model(self) -> None:
-        loaded_model = mlx_vlm.utils.load_model(
+        self.model = mlx_vlm.utils.load_model(
             self._model_path,
             lazy=False,
-            trust_remote_code=self._trust_remote_code,
-        )
-        self.model = (
-            loaded_model[0] if isinstance(loaded_model, tuple) else loaded_model
+            trust_remote_code=False,
         )
         patch_loaded_gemma4_model(self.model)
         mx.synchronize()
