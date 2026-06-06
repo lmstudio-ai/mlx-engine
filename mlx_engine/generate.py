@@ -412,6 +412,22 @@ def create_generator(
                 **kwargs,
             ),
         )
+    if type(model_kit) is ModelKit and model_kit.uses_model_thread():
+        request_id = kwargs.get("request_id")
+        logger.info(
+            "Routing sequential ModelKit generation request_id=%s prompt_tokens=%s "
+            "through model thread",
+            request_id,
+            len(prompt_tokens),
+        )
+        return model_kit.run_generator_on_model_thread(
+            description=f"sequential-generation request_id={request_id}",
+            callback=lambda: _sequential_generation(
+                model_kit,
+                prompt_tokens,
+                **kwargs,
+            ),
+        )
     return _sequential_generation(model_kit, prompt_tokens, **kwargs)
 
 

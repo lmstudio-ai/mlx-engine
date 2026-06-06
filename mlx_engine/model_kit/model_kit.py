@@ -1,5 +1,7 @@
 import json
-from typing import Optional, List, Tuple
+from dataclasses import dataclass
+from queue import Empty, Full, Queue
+from typing import Any, Callable, Iterable, Optional, List, Tuple
 import mlx_lm
 from mlx_lm.tokenizer_utils import TokenizerWrapper, StreamingDetokenizer
 from mlx_engine.cache_wrapper import CacheWrapper
@@ -22,6 +24,15 @@ from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 import threading
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ModelThreadRequest:
+    description: str
+    callback: Callable[[], Any]
+    response_queue: Queue
+    stream_results: bool
+    caller_stopped: Optional[threading.Event]
 
 
 class ModelKit:
@@ -68,6 +79,10 @@ class ModelKit:
     generation_lock: threading.Lock
     pending_requests: dict[str, threading.Event]
     _shutdown: threading.Event
+    _uses_model_thread: bool
+    _model_thread: Optional[threading.Thread]
+    _model_thread_ident: Optional[int]
+    _model_thread_requests: Optional[Queue]
 
     # multi-modal add-ons
     vision_add_on: Optional[BaseVisionAddOn] = None
@@ -133,22 +148,191 @@ class ModelKit:
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
         self._shutdown = threading.Event()
+        self._uses_model_thread = False
+        self._model_thread = None
+        self._model_thread_ident = None
+        self._model_thread_requests = None
         # Public because the generation loop in generate.py reads this from the model_kit instance
         self.prefill_step_size = prefill_step_size
         if vocab_only:
             self._vocab_only_init(model_path)
         else:
-            self._full_model_init(
-                model_path,
-                prefill_step_size,
-                max_kv_size=max_kv_size,
-                kv_bits=kv_bits,
-                kv_group_size=kv_group_size,
-                quantized_kv_start=quantized_kv_start,
-            )
+            self._uses_model_thread = self._should_use_model_thread(model_path)
+            if self._uses_model_thread:
+                self._start_model_thread()
+                self._run_on_model_thread_sync(
+                    "model-load",
+                    lambda: self._full_model_init(
+                        model_path,
+                        prefill_step_size,
+                        max_kv_size=max_kv_size,
+                        kv_bits=kv_bits,
+                        kv_group_size=kv_group_size,
+                        quantized_kv_start=quantized_kv_start,
+                    ),
+                )
+            else:
+                self._full_model_init(
+                    model_path,
+                    prefill_step_size,
+                    max_kv_size=max_kv_size,
+                    kv_bits=kv_bits,
+                    kv_group_size=kv_group_size,
+                    quantized_kv_start=quantized_kv_start,
+                )
 
     def start(self):
-        mx.synchronize()
+        self._run_on_model_thread_sync("model-start", mx.synchronize)
+
+    @staticmethod
+    def _should_use_model_thread(model_path: Path) -> bool:
+        config_json = json.loads((Path(model_path) / "config.json").read_text())
+        return config_json.get("model_type", None) == "gemma4"
+
+    def uses_model_thread(self) -> bool:
+        return self._uses_model_thread
+
+    def _start_model_thread(self) -> None:
+        if self._model_thread is not None:
+            return
+        self._model_thread_requests = Queue()
+        self._model_thread = threading.Thread(
+            target=self._model_thread_loop,
+            daemon=True,
+            name="mlx-model-thread",
+        )
+        self._model_thread.start()
+
+    def _model_thread_loop(self) -> None:
+        self._model_thread_ident = threading.get_ident()
+        model_thread_requests = self._model_thread_requests
+        if model_thread_requests is None:
+            return
+
+        while True:
+            request = model_thread_requests.get()
+            if request is None:
+                return
+            try:
+                if request.stream_results:
+                    result = request.callback()
+                    completed = False
+                    try:
+                        for item in result:
+                            if (
+                                request.caller_stopped is not None
+                                and request.caller_stopped.is_set()
+                            ):
+                                break
+                            if not self._put_model_thread_stream_response(
+                                request, item
+                            ):
+                                break
+                        else:
+                            completed = True
+                    finally:
+                        close_result = getattr(result, "close", None)
+                        if callable(close_result):
+                            close_result()
+                    if completed:
+                        self._put_model_thread_stream_response(request, None)
+                else:
+                    request.response_queue.put((True, request.callback()))
+            except Exception as caught_error:
+                logger.exception("Model thread failed during %s", request.description)
+                if request.stream_results:
+                    self._put_model_thread_stream_response(request, caught_error)
+                else:
+                    request.response_queue.put((False, caught_error))
+
+    def _put_model_thread_stream_response(
+        self,
+        request: ModelThreadRequest,
+        item: Any,
+    ) -> bool:
+        while True:
+            if (
+                request.caller_stopped is not None
+                and request.caller_stopped.is_set()
+            ):
+                return False
+            if self._shutdown.is_set():
+                return False
+            try:
+                request.response_queue.put(item, timeout=0.1)
+                return True
+            except Full:
+                continue
+
+    def _run_on_model_thread_sync(self, description: str, callback: Callable[[], Any]):
+        model_thread_requests = getattr(self, "_model_thread_requests", None)
+        if model_thread_requests is None:
+            return callback()
+        if threading.get_ident() == getattr(self, "_model_thread_ident", None):
+            return callback()
+
+        response_queue: Queue = Queue()
+        model_thread_requests.put(
+            ModelThreadRequest(
+                description=description,
+                callback=callback,
+                response_queue=response_queue,
+                stream_results=False,
+                caller_stopped=None,
+            )
+        )
+        success, value = response_queue.get()
+        if success:
+            return value
+        raise value
+
+    def run_generator_on_model_thread(
+        self,
+        *,
+        description: str,
+        callback: Callable[[], Iterable[Any]],
+    ) -> Iterable[Any]:
+        model_thread_requests = getattr(self, "_model_thread_requests", None)
+        if model_thread_requests is None:
+            yield from callback()
+            return
+        if threading.get_ident() == getattr(self, "_model_thread_ident", None):
+            yield from callback()
+            return
+
+        response_queue: Queue = Queue(maxsize=1)
+        caller_stopped = threading.Event()
+        model_thread_requests.put(
+            ModelThreadRequest(
+                description=description,
+                callback=callback,
+                response_queue=response_queue,
+                stream_results=True,
+                caller_stopped=caller_stopped,
+            )
+        )
+
+        stream_finished = False
+        stream_failed = False
+        try:
+            while True:
+                try:
+                    item = response_queue.get(timeout=0.1)
+                except Empty:
+                    if self._shutdown.is_set():
+                        stream_finished = True
+                        return
+                    continue
+                if item is None:
+                    stream_finished = True
+                    return
+                if isinstance(item, Exception):
+                    stream_failed = True
+                    raise item
+                yield item
+        finally:
+            if not stream_finished and not stream_failed:
+                caller_stopped.set()
 
     def tokenize(self, prompt: str) -> List[int]:
         ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(prompt))
@@ -235,6 +419,12 @@ class ModelKit:
         return True
 
     def load_draft_model(self, path: str | Path) -> None:
+        self._run_on_model_thread_sync(
+            "draft-model-load",
+            lambda: self._load_draft_model(path),
+        )
+
+    def _load_draft_model(self, path: str | Path) -> None:
         logger.info(f"Loading draft model from {path}...")
         path = Path(path)
         if self.model is None:
@@ -246,6 +436,9 @@ class ModelKit:
         logger.info("Draft model loaded")
 
     def unload_draft_model(self) -> None:
+        self._run_on_model_thread_sync("draft-model-unload", self._unload_draft_model)
+
+    def _unload_draft_model(self) -> None:
         if self.draft_model is None:
             logger.info("No loaded draft model to unload")
         else:
@@ -262,7 +455,18 @@ class ModelKit:
         return False
 
     def shutdown(self) -> None:
+        if self._shutdown.is_set():
+            return
         self._shutdown.set()
+        model_thread_requests = getattr(self, "_model_thread_requests", None)
+        if model_thread_requests is not None:
+            model_thread_requests.put(None)
+        model_thread = getattr(self, "_model_thread", None)
+        if (
+            model_thread is not None
+            and threading.get_ident() != getattr(self, "_model_thread_ident", None)
+        ):
+            model_thread.join()
 
-    def is_shutdown(self) -> None:
+    def is_shutdown(self) -> bool:
         return self._shutdown.is_set()
