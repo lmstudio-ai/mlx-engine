@@ -256,6 +256,194 @@ def test_vlm_qwen3_5_attention_position_embeddings_uses_original_vlm(monkeypatch
     ]
 
 
+class _FakeVlmGatedDeltaNet:
+    hidden_size = 4
+    num_v_heads = 1
+    num_k_heads = 1
+    head_k_dim = 1
+    head_v_dim = 1
+    key_dim = 1
+    value_dim = 1
+    conv_kernel_size = 2
+    conv_dim = 3
+    A_log = mx.array([0.0])
+    dt_bias = mx.array([0.0])
+    training = False
+
+    def __init__(self):
+        self.conv_calls = 0
+
+    def in_proj_qkv(self, inputs):
+        return mx.ones((*inputs.shape[:2], self.conv_dim))
+
+    def in_proj_z(self, inputs):
+        return mx.ones((*inputs.shape[:2], self.value_dim))
+
+    def in_proj_b(self, inputs):
+        return mx.zeros((*inputs.shape[:2], self.num_v_heads))
+
+    def in_proj_a(self, inputs):
+        return mx.zeros((*inputs.shape[:2], self.num_v_heads))
+
+    def conv1d(self, conv_input):
+        self.conv_calls += 1
+        return conv_input[:, -1:, :]
+
+    def _causal_conv1d_decode(self, conv_input):
+        raise AssertionError("upstream decode-only conv fast path should not be used")
+
+    def norm(self, out, z):
+        return out
+
+    def out_proj(self, out):
+        return out
+
+
+def test_vlm_qwen3_5_gated_delta_fast_path_skips_upstream_decode_conv(monkeypatch):
+    calls = []
+
+    def fake_gated_delta_update(*args, **kwargs):
+        calls.append((args, kwargs))
+        q = args[0]
+        state = args[7]
+        return mx.ones_like(q), state
+
+    monkeypatch.setattr(qwen3_5_patches, "gated_delta_update", fake_gated_delta_update)
+
+    layer = _FakeVlmGatedDeltaNet()
+    inputs = mx.ones((1, 1, layer.hidden_size))
+
+    output = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
+        layer,
+        inputs,
+        cache=[None, None],
+    )
+
+    assert layer.conv_calls == 1
+    assert output.shape == (1, 1, layer.value_dim)
+    assert len(calls) == 1
+    assert calls[0][1]["use_kernel"] is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"target_verify": True},
+        {"gdn_sink": []},
+    ],
+)
+def test_vlm_qwen3_5_gated_delta_special_cases_use_original_vlm(
+    monkeypatch,
+    kwargs,
+):
+    calls = []
+
+    def fake_original_call(self, inputs, **call_kwargs):
+        calls.append((self, inputs, call_kwargs))
+        return "original"
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5GatedDeltaNetCall",
+        fake_original_call,
+    )
+
+    layer = _FakeVlmGatedDeltaNet()
+    inputs = mx.ones((1, 1, layer.hidden_size))
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
+        layer,
+        inputs,
+        **kwargs,
+    )
+
+    assert result == "original"
+    assert calls == [
+        (
+            layer,
+            inputs,
+            {
+                "mask": None,
+                "cache": None,
+                "gdn_sink": kwargs.get("gdn_sink"),
+                "target_verify": kwargs.get("target_verify", False),
+            },
+        )
+    ]
+
+
+def test_vlm_qwen3_5_gated_delta_ragged_cache_uses_original_vlm(monkeypatch):
+    calls = []
+
+    class CacheWithLengths(list):
+        lengths = mx.array([1])
+
+    def fake_original_call(self, inputs, **call_kwargs):
+        calls.append((self, inputs, call_kwargs))
+        return "ragged"
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5GatedDeltaNetCall",
+        fake_original_call,
+    )
+
+    layer = _FakeVlmGatedDeltaNet()
+    inputs = mx.ones((1, 1, layer.hidden_size))
+    cache = CacheWithLengths([None, None])
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
+        layer,
+        inputs,
+        cache=cache,
+    )
+
+    assert result == "ragged"
+    assert calls == [
+        (
+            layer,
+            inputs,
+            {
+                "mask": None,
+                "cache": cache,
+                "gdn_sink": None,
+                "target_verify": False,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("left_padding", "expected"),
+    [
+        ([0], False),
+        ([3], True),
+    ],
+)
+def test_vlm_qwen3_5_single_row_batch_cache_requires_real_left_padding(
+    left_padding,
+    expected,
+):
+    class Cache:
+        pass
+
+    cache = Cache()
+    cache.left_padding = mx.array(left_padding)
+
+    assert (
+        qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache)
+        is expected
+    )
+
+
+def test_vlm_qwen3_5_single_row_batch_cache_ignores_non_batch_cache():
+    class Cache:
+        pass
+
+    cache = Cache()
+    assert qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache) is False
+
+
 def _first_generate_step_logprobs(
     model,
     tokens: mx.array,
