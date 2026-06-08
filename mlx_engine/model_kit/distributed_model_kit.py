@@ -255,6 +255,7 @@ class DistributedModelKit:
         self._requests: Queue = Queue()
         self._prompt_cache = LRUPromptCache()
         self._batch_results: dict[int, dict[str, Any]] = {}
+        self._cancelled_request_ids: set[str] = set()
         self._backend_exception: Exception | None = None
         self._generation_thread: threading.Thread | None = None
         self._model_thread: threading.Thread | None = None
@@ -1363,6 +1364,7 @@ class DistributedModelKit:
         for uid, entry in list(self._batch_results.items()):
             if entry.get("request_id") == request_id:
                 found_request_id = True
+                self._cancelled_request_ids.discard(request_id)
                 batch_generator.remove([uid])
                 response_queue = entry.get("response_queue")
                 if response_queue is not None:
@@ -1370,7 +1372,11 @@ class DistributedModelKit:
                 del self._batch_results[uid]
                 break
         if not found_request_id:
-            logger.warning("Could not cancel request_id=%s (id not found)", request_id)
+            self._cancelled_request_ids.add(request_id)
+            logger.info(
+                "Recorded cancel for request_id=%s before it reached the distributed batch",
+                request_id,
+            )
 
     def _insert_scheduler_request(
         self,
@@ -1378,6 +1384,16 @@ class DistributedModelKit:
         current_model_key: str,
         request: DistributedSchedulerGenerationRequest,
     ) -> None:
+        if request.request_id in self._cancelled_request_ids:
+            self._cancelled_request_ids.discard(request.request_id)
+            logger.info(
+                "Skipping distributed request_id=%s because it was already cancelled",
+                request.request_id,
+            )
+            if request.response_queue is not None:
+                request.response_queue.put(RequestCancelled())
+            return
+
         seed = request.sampling.get("seed")
         if self.supports_request_level_seed() and isinstance(seed, int):
             mx.random.seed(seed)
