@@ -132,6 +132,21 @@ class VisionModelKit(ModelKit):
         Returns the processed prompt tokens to be input to the `generate_step` function, and optionally input
         embeddings. For VisionModelKit, the input embeddings are always none.
         """
+        return self._run_on_model_thread_sync(
+            "vision-process-prompt",
+            lambda: self._process_prompt_on_current_thread(
+                prompt_tokens,
+                images_b64,
+                max_image_size,
+            ),
+        )
+
+    def _process_prompt_on_current_thread(
+        self,
+        prompt_tokens,
+        images_b64: Optional[List[str]],
+        max_image_size: tuple[int, int] | None,
+    ) -> Tuple[mx.array, Optional[mx.array]]:
         if self.has_processed_prompt:
             self._reset_for_prediction()
 

@@ -187,7 +187,14 @@ class ModelKit:
     @staticmethod
     def _should_use_model_thread(model_path: Path) -> bool:
         config_json = json.loads((Path(model_path) / "config.json").read_text())
-        return config_json.get("model_type", None) == "gemma4"
+        model_type = config_json.get("model_type", None)
+        if model_type == "gemma4":
+            return True
+        # Qwen VLM add-ons compute image features and MRoPE state that are
+        # consumed by mlx-lm during generation; keep those on one MLX thread.
+        return (
+            model_type in ("qwen3_5", "qwen3_5_moe") and "vision_config" in config_json
+        )
 
     def uses_model_thread(self) -> bool:
         return self._uses_model_thread
@@ -251,10 +258,7 @@ class ModelKit:
         item: Any,
     ) -> bool:
         while True:
-            if (
-                request.caller_stopped is not None
-                and request.caller_stopped.is_set()
-            ):
+            if request.caller_stopped is not None and request.caller_stopped.is_set():
                 return False
             if self._shutdown.is_set():
                 return False
@@ -462,9 +466,8 @@ class ModelKit:
         if model_thread_requests is not None:
             model_thread_requests.put(None)
         model_thread = getattr(self, "_model_thread", None)
-        if (
-            model_thread is not None
-            and threading.get_ident() != getattr(self, "_model_thread_ident", None)
+        if model_thread is not None and threading.get_ident() != getattr(
+            self, "_model_thread_ident", None
         ):
             model_thread.join()
 
