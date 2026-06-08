@@ -940,23 +940,24 @@ Reply with exactly READY and nothing else.<end_of_turn>
         assert len(unrelated_text.strip()) > 0
 
         assistant_text = control_word
+        follow_up_question = (
+            "What was the exact single-word final answer from your previous "
+            "message? Reply with only that word."
+        )
 
-        second_conversation = first_conversation + [
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "What was the exact single-word final answer from your previous message? Reply with only that word.",
-                    }
-                ],
-            },
-        ]
-        second_prompt = render_prompt(second_conversation)
+        # Keep the image marker in the original user turn. Gemma4's HF chat
+        # renderer rewrites prior image blocks into the latest user turn when a
+        # multi-turn conversation is rendered from typed content, which would
+        # intentionally change the prefix chunks under test here.
+        second_prompt = (
+            first_prompt
+            + assistant_text
+            + "<turn|>\n"
+            + "<|turn>user\n"
+            + follow_up_question
+            + "<turn|>\n"
+            + "<|turn>model\n"
+        )
 
         _, follow_up_text, reporter = generate_text(
             second_prompt,
