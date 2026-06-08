@@ -412,11 +412,12 @@ def create_generator(
                 **kwargs,
             ),
         )
-    if type(model_kit) is ModelKit and model_kit.uses_model_thread():
+    if isinstance(model_kit, ModelKit) and model_kit.uses_model_thread():
         request_id = kwargs.get("request_id")
         logger.info(
-            "Routing sequential ModelKit generation request_id=%s prompt_tokens=%s "
-            "through model thread",
+            "Routing sequential %s generation request_id=%s prompt_tokens=%s through "
+            "model thread",
+            type(model_kit).__name__,
             request_id,
             len(prompt_tokens),
         )

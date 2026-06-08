@@ -42,6 +42,10 @@ class VisionModelKit(ModelKit):
         self.generation_lock = threading.Lock()
         self.pending_requests = {}
         self._shutdown = threading.Event()
+        self._uses_model_thread = not vocab_only
+        self._model_thread = None
+        self._model_thread_ident = None
+        self._model_thread_requests = None
         self.prefill_step_size = prefill_step_size
 
         fix_qwen2_5_vl_image_processor(model_path)
@@ -52,7 +56,11 @@ class VisionModelKit(ModelKit):
         self.trust_remote_code = trust_remote_code
         self.vocab_only = vocab_only
         self.model_path = model_path
-        self._initializer()
+        if self._uses_model_thread:
+            self._start_model_thread()
+            self._run_on_model_thread_sync("vision-model-load", self._initializer)
+        else:
+            self._initializer()
 
     def _vocab_only_init(self):
         self.tokenizer = mlx_vlm.tokenizer_utils.load_tokenizer(self.model_path)
