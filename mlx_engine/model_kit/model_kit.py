@@ -12,6 +12,9 @@ from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
+from mlx_engine.utils.mlx_threading import (
+    install_mlx_compile_cache_cleanup_for_thread,
+)
 from mlx_engine.utils.set_seed import set_seed
 import threading
 
@@ -111,6 +114,7 @@ class ModelKit:
         self.prefill_step_size = prefill_step_size
 
         def initialize() -> None:
+            install_mlx_compile_cache_cleanup_for_thread()
             set_seed(seed)
             if vocab_only:
                 self._vocab_only_init(model_path)

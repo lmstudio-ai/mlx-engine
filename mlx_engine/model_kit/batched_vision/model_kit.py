@@ -54,6 +54,9 @@ from mlx_engine.utils.prompt_progress_events import (
 )
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
+from mlx_engine.utils.mlx_threading import (
+    install_mlx_compile_cache_cleanup_for_thread,
+)
 from mlx_engine.model_kit.batched_vision.transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
@@ -569,6 +572,7 @@ class BatchedVisionModelKit:
             request.rqueue.put(error)
 
     def _generate(self):
+        install_mlx_compile_cache_cleanup_for_thread()
         set_seed(self._seed)
 
         if self.model is None:

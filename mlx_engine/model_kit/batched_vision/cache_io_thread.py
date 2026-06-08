@@ -19,6 +19,9 @@ from mlx_engine.model_kit.batched_vision.request_lifecycle import (
     GenerationRequest,
     PreparedInsert,
 )
+from mlx_engine.utils.mlx_threading import (
+    install_mlx_compile_cache_cleanup_for_thread,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +117,7 @@ class PromptCacheIOThread:
                 return
 
     def _run(self) -> None:
+        install_mlx_compile_cache_cleanup_for_thread()
         while True:
             _, _, job = self._queue.get()
             if job is None:
