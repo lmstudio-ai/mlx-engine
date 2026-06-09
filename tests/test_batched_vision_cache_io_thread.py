@@ -63,8 +63,8 @@ class _FakeCacheStore:
         self.closed = True
 
 
-def test_cache_io_thread_commits_queued_save_before_restore():
-    """Queued saves should be visible to later restores before budget work runs."""
+def test_cache_io_thread_prioritizes_restore_before_budget_and_save():
+    """Restores should not wait behind disk writes queued earlier."""
     store = _FakeCacheStore()
     generation_queue = Queue()
     request = _request("restore")
@@ -87,7 +87,7 @@ def test_cache_io_thread_commits_queued_save_before_restore():
 
     assert isinstance(result, PreparedInsert)
     assert result.request is request
-    assert store.calls == [("save", "save"), ("budget", 123)]
+    assert store.calls == [("budget", 123), ("save", "save")]
     assert store.closed
 
 
