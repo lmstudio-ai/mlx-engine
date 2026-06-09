@@ -609,7 +609,7 @@ def _vlm_qwen3_5_batched_left_padding_position_ids(
     seq_length: int,
     dtype,
 ) -> mx.array | None:
-    if cache is None or fa_idx >= len(cache):
+    if cache is None or fa_idx >= len(cache) or seq_length != 1:
         return None
     fa_cache = cache[fa_idx]
     left_padding = getattr(fa_cache, "left_padding", None)

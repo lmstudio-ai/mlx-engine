@@ -791,6 +791,59 @@ def test_vlm_qwen3_5_text_left_padded_decode_uses_original_vlm(monkeypatch):
     assert position_ids.tolist() == [[7], [5]]
 
 
+def test_vlm_qwen3_5_text_left_padded_prefill_uses_fast_path(monkeypatch):
+    """Multi-token prefill must not build positions over padded query columns."""
+    calls = []
+
+    class FakeInnerModel:
+        fa_idx = 0
+
+        def __call__(self, inputs, cache=None, inputs_embeds=None, position_ids=None):
+            calls.append((inputs, cache, inputs_embeds, position_ids))
+            return "hidden"
+
+        class embed_tokens:
+            @staticmethod
+            def as_linear(hidden):
+                return f"logits:{hidden}"
+
+    class FakeLanguageModel:
+        model = FakeInnerModel()
+        _position_ids = None
+        _rope_deltas = None
+
+        class args:
+            tie_word_embeddings = True
+
+    class FakeCache:
+        left_padding = mx.array([0, 2])
+        offset = mx.array([4, 2])
+
+    def fake_original_call(*args, **kwargs):
+        raise AssertionError("original VLM path should not be used")
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5LanguageModelCall",
+        fake_original_call,
+    )
+
+    cache = [FakeCache()]
+    inputs = mx.array([[1, 2, 3, 4], [0, 0, 5, 6]])
+    result = qwen3_5_patches._patched_vlm_qwen3_5_language_model_call(
+        FakeLanguageModel(),
+        inputs,
+        cache=cache,
+    )
+
+    assert result.logits == "logits:hidden"
+    assert len(calls) == 1
+    assert calls[0][0] is inputs
+    assert calls[0][1] is cache
+    assert calls[0][2] is None
+    assert calls[0][3] is None
+
+
 def test_vlm_qwen3_5_mrope_path_matches_original_vlm():
     """Explicit Qwen3.5 MRoPE state must still use the original VLM behavior."""
     model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
