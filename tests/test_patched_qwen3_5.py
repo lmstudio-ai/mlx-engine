@@ -739,6 +739,58 @@ def test_vlm_qwen3_5_text_mask_uses_original_vlm():
     )
 
 
+def test_vlm_qwen3_5_text_left_padded_decode_uses_original_vlm(monkeypatch):
+    """Batched left-padded decode needs upstream per-row position_ids handling."""
+    calls = []
+
+    class FakeInnerModel:
+        fa_idx = 0
+
+        def __call__(self, *args, **kwargs):
+            raise AssertionError("text fast path should not be used")
+
+    class FakeLanguageModel:
+        model = FakeInnerModel()
+        _position_ids = None
+        _rope_deltas = None
+
+    class FakeCache:
+        left_padding = mx.array([0, 2])
+        offset = mx.array([7, 5])
+
+    def fake_original_call(
+        self,
+        inputs,
+        inputs_embeds=None,
+        mask=None,
+        cache=None,
+        **kwargs,
+    ):
+        calls.append((self, inputs, inputs_embeds, mask, cache, kwargs))
+        return "original"
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5LanguageModelCall",
+        fake_original_call,
+    )
+
+    cache = [FakeCache()]
+    inputs = mx.array([[7], [8]])
+    result = qwen3_5_patches._patched_vlm_qwen3_5_language_model_call(
+        FakeLanguageModel(),
+        inputs,
+        cache=cache,
+    )
+
+    assert result == "original"
+    assert len(calls) == 1
+    assert calls[0][1] is inputs
+    assert calls[0][2:5] == (None, None, cache)
+    position_ids = calls[0][5]["position_ids"]
+    assert position_ids.tolist() == [[7], [5]]
+
+
 def test_vlm_qwen3_5_mrope_path_matches_original_vlm():
     """Explicit Qwen3.5 MRoPE state must still use the original VLM behavior."""
     model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")

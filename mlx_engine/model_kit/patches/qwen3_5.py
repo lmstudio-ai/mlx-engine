@@ -602,6 +602,33 @@ def _is_vlm_qwen3_5_text_only(
     )
 
 
+def _vlm_qwen3_5_batched_left_padding_position_ids(
+    cache,
+    fa_idx: int,
+    batch_size: int,
+    seq_length: int,
+    dtype,
+) -> mx.array | None:
+    if cache is None or fa_idx >= len(cache):
+        return None
+    fa_cache = cache[fa_idx]
+    left_padding = getattr(fa_cache, "left_padding", None)
+    offset = getattr(fa_cache, "offset", None)
+    if (
+        not isinstance(left_padding, mx.array)
+        or left_padding.ndim == 0
+        or int(left_padding.max().item()) <= 0
+        or not isinstance(offset, mx.array)
+        or offset.ndim == 0
+    ):
+        return None
+
+    offsets = mx.maximum(offset[:batch_size], 0).reshape(-1, 1)
+    position_ids = mx.arange(seq_length, dtype=dtype).reshape(1, -1)
+    position_ids = mx.broadcast_to(position_ids, (batch_size, seq_length))
+    return mx.add(position_ids, offsets)
+
+
 def _patched_vlm_qwen3_5_language_model_call(
     self,
     inputs: mx.array,
@@ -616,8 +643,7 @@ def _patched_vlm_qwen3_5_language_model_call(
     video_grid_thw = kwargs.get("video_grid_thw")
     capture_layer_ids = kwargs.get("capture_layer_ids")
     rope_deltas_kw = kwargs.get("rope_deltas")
-
-    if _is_vlm_qwen3_5_text_only(
+    text_only = _is_vlm_qwen3_5_text_only(
         mask=mask,
         position_ids=position_ids,
         pixel_values=pixel_values,
@@ -627,7 +653,20 @@ def _patched_vlm_qwen3_5_language_model_call(
         rope_deltas_kw=rope_deltas_kw,
         stored_position_ids=getattr(self, "_position_ids", None),
         stored_rope_deltas=getattr(self, "_rope_deltas", None),
-    ):
+    )
+
+    if text_only:
+        position_ids = _vlm_qwen3_5_batched_left_padding_position_ids(
+            cache,
+            self.model.fa_idx,
+            inputs.shape[0],
+            inputs.shape[1],
+            inputs.dtype,
+        )
+        if position_ids is not None:
+            kwargs["position_ids"] = position_ids
+
+    if text_only and position_ids is None:
         out = self.model(
             inputs,
             cache=cache,
