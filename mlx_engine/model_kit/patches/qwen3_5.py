@@ -525,7 +525,12 @@ def _patched_vlm_qwen3_5_attention_call(
     position_embeddings: Optional[tuple[mx.array, mx.array]] = None,
     target_verify: bool = False,
 ) -> mx.array:
-    if position_ids is not None or position_embeddings is not None or target_verify:
+    if (
+        position_ids is not None
+        or position_embeddings is not None
+        or target_verify
+        or (isinstance(mask, str) and mask == "left_padded_decode")
+    ):
         return OriginalVlmQwen3_5AttentionCall(
             self,
             x,

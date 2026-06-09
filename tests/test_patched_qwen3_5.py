@@ -207,6 +207,53 @@ def test_vlm_qwen3_5_attention_target_verify_uses_original_vlm(monkeypatch):
     ]
 
 
+def test_vlm_qwen3_5_attention_left_padded_decode_uses_original_vlm(monkeypatch):
+    calls = []
+
+    def fake_qwen3_next_call(*args, **kwargs):
+        raise AssertionError("Qwen3Next fast path should not be used")
+
+    def fake_original_call(
+        self,
+        x,
+        mask=None,
+        cache=None,
+        position_ids=None,
+        position_embeddings=None,
+        **kwargs,
+    ):
+        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
+        return "left-padded-decode"
+
+    self_obj = object()
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="left_padded_decode",
+        cache="cache",
+    )
+
+    assert result == "left-padded-decode"
+    assert calls == [
+        (
+            self_obj,
+            "x",
+            "left_padded_decode",
+            "cache",
+            None,
+            None,
+            {"target_verify": False},
+        )
+    ]
+
+
 def test_vlm_qwen3_5_attention_position_embeddings_uses_original_vlm(monkeypatch):
     calls = []
     position_embeddings = ("cos", "sin")
