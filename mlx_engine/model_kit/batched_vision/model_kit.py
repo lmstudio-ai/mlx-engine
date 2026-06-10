@@ -348,8 +348,11 @@ class BatchedVisionModelKit:
             err_string = f"Encountered fatal exception in the backend generation thread: {traceback.format_exc()}"
             logger.error(err_string)
             self._backend_exception = Exception(err_string)
-            self._fail_all_requests(self._backend_exception)
-            self._startup_complete.set()
+            try:
+                self._fail_all_requests(self._backend_exception)
+            finally:
+                self._generation_thread_state = None
+                self._startup_complete.set()
 
             # Sleep to allow error messages to be logged and propagated to clients.
             time.sleep(3)
@@ -591,6 +594,7 @@ class BatchedVisionModelKit:
             finish_response=self._finish_response,
         )
 
+        exited_with_exception = True
         try:
             while not self._shutdown.is_set():
                 timeout = None if state.active or state.ready else 0.1
@@ -598,10 +602,20 @@ class BatchedVisionModelKit:
                 controller.insert_ready_requests()
                 controller.admit_pending_requests()
                 controller.step_generation()
+            exited_with_exception = False
         finally:
-            controller.cancel_all_requests()
+            if exited_with_exception:
+                try:
+                    state.batch_generator.close()
+                except Exception:
+                    logger.debug(
+                        "Failed to close VLM batch generator after fatal error.",
+                        exc_info=True,
+                    )
+            else:
+                controller.cancel_all_requests()
+                self._generation_thread_state = None
             self._prompt_cache_coordinator.clear_hot_prompt_cache()
-            self._generation_thread_state = None
             mx.synchronize()
             self.model = None
             self._vision_feature_memoizer.clear()
