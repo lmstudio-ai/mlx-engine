@@ -11,9 +11,6 @@ from mlx_lm.models.qwen3_next import Qwen3NextAttention
 from transformers import AutoTokenizer
 
 from mlx_engine.model_kit.patches import qwen3_5 as qwen3_5_patches
-from mlx_engine.model_kit.batched_vision.qwen_mrope import (
-    build_qwen_image_mrope_state,
-)
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     PreparedPrompt,
     build_cached_prompt_kwargs,
@@ -488,7 +485,9 @@ def test_vlm_qwen3_5_single_row_batch_cache_ignores_non_batch_cache():
         pass
 
     cache = Cache()
-    assert qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache) is False
+    assert (
+        qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache) is False
+    )
 
 
 def _first_generate_step_logprobs(
