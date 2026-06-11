@@ -8,19 +8,13 @@ from pathlib import Path
 import mlx.nn as nn
 import mlx.core as mx
 import logging
-from mlx_engine.model_kit.vision_add_ons.base import BaseVisionAddOn
-from mlx_engine.model_kit.vision_add_ons.gemma3 import Gemma3VisionAddOn
-from mlx_engine.model_kit.vision_add_ons.gemma4 import Gemma4VisionAddOn
-from mlx_engine.model_kit.vision_add_ons.pixtral import PixtralVisionAddOn
-from mlx_engine.model_kit.vision_add_ons.gemma3n import Gemma3nVisionAddOn
-from mlx_engine.model_kit.vision_add_ons.mistral3 import Mistral3VisionAddOn
-from mlx_engine.model_kit.vision_add_ons.lfm2_vl import LFM2VisionAddOn
-from mlx_engine.model_kit.vision_add_ons.qwen3_5 import Qwen3_5VisionAddOn
-from mlx_engine.model_kit.vision_add_ons.qwen3_5_moe import Qwen3_5MoEVisionAddOn
 from mlx_engine.utils.prompt_processing import process_prompt_text_only
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
+from mlx_engine.utils.mlx_threading import (
+    install_mlx_compile_cache_cleanup_for_thread,
+)
 from mlx_engine.utils.set_seed import set_seed
 import threading
 
@@ -40,22 +34,6 @@ class ModelKit:
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled. Defaults to 0.
     """
 
-    VISION_ADD_ON_MAP = {
-        "gemma3": Gemma3VisionAddOn,
-        "gemma3n": Gemma3nVisionAddOn,
-        "gemma4": Gemma4VisionAddOn,
-        "lfm2-vl": LFM2VisionAddOn,
-        "mistral3": Mistral3VisionAddOn,
-        "pixtral": PixtralVisionAddOn,
-        "qwen3_5": Qwen3_5VisionAddOn,
-        "qwen3_5_moe": Qwen3_5MoEVisionAddOn,
-        # qwen vl ports are bugged: https://github.com/lmstudio-ai/mlx-engine/issues/237
-        # "qwen2_vl": Qwen2_VLVisionAddOn,
-        # "qwen2_5_vl": Qwen2_VLVisionAddOn,
-        # "qwen3_vl_moe": Qwen3_VL_MoEVisionAddOn,
-        # "qwen3_vl": Qwen3_VLVisionAddOn,
-    }
-
     # model state tracking
     model: nn.Module = None
     tokenizer: TokenizerWrapper = None
@@ -71,9 +49,6 @@ class ModelKit:
     generation_lock: threading.Lock
     pending_requests: dict[str, threading.Event]
     _shutdown: threading.Event
-
-    # multi-modal add-ons
-    vision_add_on: Optional[BaseVisionAddOn] = None
 
     def _vocab_only_init(self, model_path: Path):
         logger.info(f"Loading model (vocab-only) from {model_path}...")
@@ -115,12 +90,6 @@ class ModelKit:
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
         self.quantized_kv_start = quantized_kv_start
-        vision_add_on_class = self.VISION_ADD_ON_MAP.get(self.model_type)
-        should_load_vision_add_on = (
-            vision_add_on_class is not None and "vision_config" in config_json
-        )
-        if should_load_vision_add_on:
-            self.vision_add_on = vision_add_on_class(model_path)
         logger.info("Model loaded successfully")
 
     def __init__(
@@ -145,6 +114,7 @@ class ModelKit:
         self.prefill_step_size = prefill_step_size
 
         def initialize() -> None:
+            install_mlx_compile_cache_cleanup_for_thread()
             set_seed(seed)
             if vocab_only:
                 self._vocab_only_init(model_path)
@@ -186,36 +156,26 @@ class ModelKit:
         max_image_size: tuple[int, int] | None,
         speculative_decoding_toggle: Optional[bool] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
-        if self.vision_add_on is not None:
-            self.vision_add_on.clear_prediction_state(self.model)
-        ### TEXT-ONLY PROCESS_PROMPT ###
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
-        if is_text_only_processing:
-            self._cross_prompt_cache_active = True
-            if len(prompt_tokens) == 0:
-                logger.warning(
-                    "Received empty prompt. Generation quality will likely be poor"
-                )
-                # Models expect some sort of input, so add whitespace
-                prompt_tokens = self._tokenize(" ")
-            return process_prompt_text_only(
-                mx.array(prompt_tokens),
-                self.cache_wrapper,
-                generate_args,
-                self.draft_model,
-                speculative_decoding_toggle,
-                prompt_progress_reporter,
-            ), None
-        ### WITH IMAGES PROMPT PROCESSING ###
-        if self.vision_add_on is None:
+        if not is_text_only_processing:
             raise ValueError(
-                "Vision add-on is not loaded, but images were provided for processing"
+                "Images are only supported by the batched vision model path"
             )
-        self._cross_prompt_cache_active = False
-        input_ids, embeddings = self.vision_add_on.compute_embeddings(
-            self.model, prompt_tokens, images_b64, max_size=max_image_size
-        )
-        return input_ids, embeddings
+        self._cross_prompt_cache_active = True
+        if len(prompt_tokens) == 0:
+            logger.warning(
+                "Received empty prompt. Generation quality will likely be poor"
+            )
+            # Models expect some sort of input, so add whitespace
+            prompt_tokens = self._tokenize(" ")
+        return process_prompt_text_only(
+            mx.array(prompt_tokens),
+            self.cache_wrapper,
+            generate_args,
+            self.draft_model,
+            speculative_decoding_toggle,
+            prompt_progress_reporter,
+        ), None
 
     def is_cross_prompt_cache_active(self) -> bool:
         """
@@ -227,19 +187,6 @@ class ModelKit:
     def record_token_to_cache(self, token: int) -> None:
         self.cache_wrapper.record_generated_token(token)
 
-    @staticmethod
-    def is_supported_vision_arch(model_arch: str) -> bool:
-        """
-        Determines if the specified model architecture has vision support.
-
-        Args:
-            model_arch (str): The model architecture identifier to check
-
-        Returns:
-            bool: True if vision is supported, False otherwise
-        """
-        return model_arch in ModelKit.VISION_ADD_ON_MAP
-
     def is_draft_model_compatible(self, path: str | Path) -> bool:
         return self._executor.submit(self._is_draft_model_compatible, path).result()
 
@@ -249,9 +196,6 @@ class ModelKit:
             logger.warning(
                 "Draft model compatibility check requires at least a vocab-only loaded main model"
             )
-            return False
-        if self.vision_add_on is not None:
-            logger.warning("Draft models are currently unsupported for vision models")
             return False
         draft_tokenizer = mlx_lm.tokenizer_utils.load(path)
         if draft_tokenizer.vocab_size != self.tokenizer.vocab_size:

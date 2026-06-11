@@ -23,6 +23,10 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     drop_prompt_kwargs_prefix,
     slice_prompt_kwargs,
 )
+from mlx_engine.model_kit.patches.gemma4 import (
+    prepare_cached_suffix_prompt_kwargs as prepare_gemma4_cached_suffix_prompt_kwargs,
+    visual_prefill_prefix_len as gemma4_visual_prefill_prefix_len,
+)
 from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
     DEFAULT_MAX_TOKENS,
@@ -491,6 +495,7 @@ class GenerationBatch:
         """Append the one sequence that just finished prompt prefill."""
         count = len(self)
         prefilled_count = len(prefilled)
+
         self._rows.extend(prefilled._rows)
         self.prompt_cache = _extend_cache(self.prompt_cache, prefilled.prompt_cache)
         next_top_logprobs_k = max(
@@ -755,6 +760,12 @@ class _PromptPrefill:
         self._all_tokens = list(all_tokens) if all_tokens is not None else []
         self._processed_prefix_len = len(self._all_tokens)
         self._prefix_cache_save_state = prefix_cache_save_state
+        self._visual_prefill_prefix_len = gemma4_visual_prefill_prefix_len(
+            model,
+            prompt_kwargs,
+            prefix_cache_save_state.image_spans,
+            len(self._all_tokens),
+        )
         # Restored exact hot caches may carry an existing row. Trimmed/disk
         # restores pass None and let prompt prep recompute it.
         self._rope_deltas = _normalize_rope_deltas(rope_deltas)
@@ -815,6 +826,15 @@ class _PromptPrefill:
         if remaining_tokens <= 1:
             return 0
 
+        # Apply the Gemma4 visual-prefix rule before normal cache-boundary
+        # alignment. If a restore lands before a new image, token-type padding
+        # lets the image suffix build its mask against the restored KV prefix.
+        visual_prefix_remaining = self._visual_prefill_prefix_remaining()
+        if visual_prefix_remaining is not None:
+            if visual_prefix_remaining < remaining_tokens:
+                return visual_prefix_remaining
+            return 0
+
         saving_prompt_cache = self._prefix_cache_save_state.callback is not None
         processed_remainder = self._processed_prefix_len % self.prefill_step_size
         if saving_prompt_cache and processed_remainder:
@@ -839,13 +859,26 @@ class _PromptPrefill:
 
         return 0
 
+    def _visual_prefill_prefix_remaining(self) -> int | None:
+        if self._visual_prefill_prefix_len is None:
+            return None
+        processed_prompt_len = self._processed_prefix_len - len(self._all_tokens)
+        remaining = self._visual_prefill_prefix_len - processed_prompt_len
+        if remaining <= 0:
+            return None
+        return remaining
+
     def _prompt_kwargs_for_next(self, n: int) -> dict:
         # Slice locally instead of relying on model-specific n_to_process hacks.
-        return slice_prompt_kwargs(
+        prompt_kwargs = slice_prompt_kwargs(
             self._prompt_kwargs,
             0,
             n,
             mask_key_end=self._processed_prefix_len + n,
+        )
+        return self._prepare_cached_suffix_prompt_kwargs(
+            prompt_kwargs,
+            self._processed_prefix_len + n,
         )
 
     def _drop_processed_prompt_kwargs(self, n: int) -> None:
@@ -883,16 +916,17 @@ class _PromptPrefill:
 
     def generate(self, stop_criteria) -> tuple[GenerationBatch, list[Response]]:
         # This final prompt pass runs after active batched decode in the same tick.
-        _clear_qwen3_5_text_rope_state(self.model, self._prompt_kwargs)
+        prompt_kwargs = self._prompt_kwargs_for_final()
+        _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
         try:
             output = self.model(
                 self._input_ids,
                 cache=self.prompt_cache,
                 inputs_embeds=self._inputs_embeds,
-                **self._prompt_kwargs,
+                **prompt_kwargs,
             )
         finally:
-            _clear_qwen3_5_text_rope_state(self.model, self._prompt_kwargs)
+            _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
         self._processed_prefix_len = len(self._all_tokens) + len(self._prompt_token_ids)
         self._emit_cache_save_snapshots()
         prompt_responses = self.progress_responses()
@@ -936,6 +970,27 @@ class _PromptPrefill:
 
         self.prompt_cache = []
         return gen_batch, prompt_responses
+
+    def _prompt_kwargs_for_final(self) -> dict:
+        prompt_kwargs = slice_prompt_kwargs(
+            self._prompt_kwargs,
+            0,
+            self._inputs_embeds.shape[1],
+            mask_key_end=self._processed_prefix_len + self._inputs_embeds.shape[1],
+        )
+        return self._prepare_cached_suffix_prompt_kwargs(
+            prompt_kwargs,
+            self._processed_prefix_len + self._inputs_embeds.shape[1],
+        )
+
+    def _prepare_cached_suffix_prompt_kwargs(
+        self,
+        prompt_kwargs: dict,
+        key_len: int,
+    ) -> dict:
+        if self._visual_prefill_prefix_len is None:
+            return prompt_kwargs
+        return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
 
 
 class BatchGenerator:

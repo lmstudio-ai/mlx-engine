@@ -10,6 +10,9 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSp
 from mlx_engine.model_kit.batched_vision.qwen_mrope import (
     apply_qwen_image_mrope_state,
 )
+from mlx_engine.model_kit.batched_vision.vision_feature_memoizer import (
+    VisionFeatureMemoizer,
+)
 from mlx_engine.utils.image_utils import convert_to_pil
 
 
@@ -20,6 +23,7 @@ class PreparedPrompt:
     prompt_input_ids: list[int]
     raw_inputs: dict[str, Any] | None
     image_spans: list[PromptImageSpan]
+    vision_cache_key: str | None = None
 
 
 def prepare_prompt_inputs(
@@ -39,6 +43,7 @@ def prepare_prompt_inputs(
             prompt_input_ids=list(prompt_tokens),
             raw_inputs=None,
             image_spans=[],
+            vision_cache_key=None,
         )
 
     # Request prep runs on the cache I/O thread before generation insertion.
@@ -63,6 +68,7 @@ def prepare_prompt_inputs(
             image_hashes,
             image_token_index,
         ),
+        vision_cache_key=_build_vision_cache_key(image_hashes),
     )
 
 
@@ -73,7 +79,11 @@ def _eval_mlx_arrays(value: Any) -> None:
         mx.eval(arrays)
 
 
-def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
+def build_prompt_kwargs(
+    model,
+    prepared_prompt: PreparedPrompt,
+    vision_feature_memoizer: VisionFeatureMemoizer | None = None,
+) -> dict:
     """Build model kwargs for a full prompt prefill."""
     if prepared_prompt.raw_inputs is None:
         input_ids = mx.array(prepared_prompt.prompt_input_ids, dtype=mx.int32)[None, :]
@@ -95,11 +105,20 @@ def build_prompt_kwargs(model, prepared_prompt: PreparedPrompt) -> dict:
         for key, value in raw_inputs.items()
         if key not in {"input_ids", "pixel_values", "attention_mask"}
     }
+    embedding_kwargs = {
+        **data_kwargs,
+        **_build_vision_feature_cache_kwargs(
+            model,
+            prepared_prompt,
+            pixel_values,
+            vision_feature_memoizer,
+        ),
+    }
     embedding_output = model.get_input_embeddings(
         input_ids,
         pixel_values,
         mask=attention_mask,
-        **data_kwargs,
+        **embedding_kwargs,
     )
     apply_qwen_image_mrope_state(
         model,
@@ -124,11 +143,19 @@ def build_cached_prompt_kwargs(
     prepared_prompt: PreparedPrompt,
     cached_prefix_len: int,
     rope_deltas: Any | None,
+    vision_feature_memoizer: VisionFeatureMemoizer | None = None,
 ) -> dict:
     """Build model kwargs for the uncached suffix after a prefix restore."""
     prompt_input_ids = prepared_prompt.prompt_input_ids[cached_prefix_len:]
     if prepared_prompt.raw_inputs is not None:
-        prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+        if vision_feature_memoizer is None:
+            prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+        else:
+            prompt_kwargs = build_prompt_kwargs(
+                model,
+                prepared_prompt,
+                vision_feature_memoizer,
+            )
         return slice_prompt_kwargs(
             prompt_kwargs,
             cached_prefix_len,
@@ -182,6 +209,10 @@ def slice_prompt_kwargs(
         sliced["mask"] = sliced["mask"][:, :, start:end, :mask_key_end]
     if "per_layer_inputs" in sliced:
         sliced["per_layer_inputs"] = sliced["per_layer_inputs"][:, start:end]
+    if "mm_token_type_ids" in sliced:
+        sliced["mm_token_type_ids"] = sliced["mm_token_type_ids"][:, start:end]
+    if "token_type_ids" in sliced:
+        sliced["token_type_ids"] = sliced["token_type_ids"][:, start:end]
 
     visual_pos_masks = prompt_kwargs.get("visual_pos_masks")
     if visual_pos_masks is not None:
@@ -216,6 +247,24 @@ def _route_attention_mask_4d(model, prompt_kwargs: dict) -> None:
     attention_mask_4d = prompt_kwargs.pop("attention_mask_4d", None)
     if attention_mask_4d is not None:
         prompt_kwargs["mask"] = attention_mask_4d
+
+
+def _build_vision_feature_cache_kwargs(
+    model,
+    prepared_prompt: PreparedPrompt,
+    pixel_values: mx.array | None,
+    vision_feature_memoizer: VisionFeatureMemoizer | None,
+) -> dict:
+    cache_key = prepared_prompt.vision_cache_key
+    if vision_feature_memoizer is None or cache_key is None or pixel_values is None:
+        return {}
+
+    # Match mlx-vlm's batched server path: pass the image-key cache kwargs
+    # broadly, then keep them out of the language-model prefill kwargs.
+    return {
+        "vision_cache": vision_feature_memoizer.cache,
+        "_image_key": cache_key,
+    }
 
 
 def _add_language_model_rope_state(model, prompt_kwargs: dict) -> None:
@@ -311,6 +360,10 @@ def _prompt_kwargs_token_len(prompt_kwargs: dict) -> int | None:
         return prompt_kwargs["visual_pos_masks"].shape[1]
     if "per_layer_inputs" in prompt_kwargs:
         return prompt_kwargs["per_layer_inputs"].shape[1]
+    if "mm_token_type_ids" in prompt_kwargs:
+        return prompt_kwargs["mm_token_type_ids"].shape[1]
+    if "token_type_ids" in prompt_kwargs:
+        return prompt_kwargs["token_type_ids"].shape[1]
     if "inputs_embeds" in prompt_kwargs:
         return prompt_kwargs["inputs_embeds"].shape[1]
     if "mask" in prompt_kwargs:
@@ -343,6 +396,10 @@ def _hash_prompt_image(image) -> str:
     digest.update(f"{image.size[0]}x{image.size[1]}".encode())
     digest.update(image.tobytes())
     return digest.hexdigest()
+
+
+def _build_vision_cache_key(image_hashes: list[str]) -> str:
+    return f"prepared-images:{'|'.join(image_hashes)}"
 
 
 def _get_image_spans(

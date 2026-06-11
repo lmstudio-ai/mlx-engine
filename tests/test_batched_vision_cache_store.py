@@ -8,6 +8,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
     build_prefix_cache_chunks,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
+    PromptImageSpan,
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
     make_record_key,
@@ -215,6 +216,30 @@ def test_cache_store_skips_state_for_backfilled_chunks(cache_store):
     assert restore_plan is not None
     loaded = cache_store.load_restore_plan(restore_plan)
     _assert_two_chunk_restore(loaded)
+
+
+def test_cache_store_does_not_restore_to_prefix_inside_image_span(cache_store):
+    """Disk chunks inside images are internal records, not terminal restore points."""
+    prompt_input_ids = list(range(900))
+    image_spans = [PromptImageSpan(start=200, end=700, image_hash="image")]
+    chunks = build_prefix_cache_chunks(prompt_input_ids, image_spans)
+
+    _save_chunk(cache_store, chunks[0], chunks, _prompt_cache(chunks[0].end))
+    _save_chunk(cache_store, chunks[1], chunks, _prompt_cache(chunks[1].end))
+
+    assert (
+        cache_store.plan_longest_prefix_restore(prompt_input_ids, image_spans) is None
+    )
+
+    _save_chunk(cache_store, chunks[2], chunks, _prompt_cache(chunks[2].end))
+
+    restore_plan = cache_store.plan_longest_prefix_restore(
+        prompt_input_ids,
+        image_spans,
+    )
+
+    assert restore_plan is not None
+    assert restore_plan.cached_prefix_len == chunks[2].end
 
 
 def test_cache_store_rotating_restore_uses_target_window(cache_store):

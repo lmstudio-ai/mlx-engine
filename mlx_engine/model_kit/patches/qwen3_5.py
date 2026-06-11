@@ -37,9 +37,11 @@ from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.qwen3_next import Qwen3NextAttention
 from mlx_vlm.models.base import LanguageModelOutput
+from mlx_vlm.models.qwen3_5 import language as vlm_qwen3_5_language
 from mlx_vlm.models.qwen3_5.language import (
     LanguageModel as VlmQwen3_5LanguageModel,
     Qwen3_5Attention as VlmQwen3_5Attention,
+    Qwen3_5GatedDeltaNet as VlmQwen3_5GatedDeltaNet,
     Qwen3_5RotaryEmbedding,
     apply_multimodal_rotary_pos_emb,
 )
@@ -50,7 +52,122 @@ OriginalDecoderLayer = DecoderLayer
 OriginalQwen3_5TextModel = Qwen3_5TextModel
 OriginalVlmQwen3_5AttentionInit = VlmQwen3_5Attention.__init__
 OriginalVlmQwen3_5AttentionCall = VlmQwen3_5Attention.__call__
+OriginalVlmQwen3_5GatedDeltaNetCall = VlmQwen3_5GatedDeltaNet.__call__
 OriginalVlmQwen3_5LanguageModelCall = VlmQwen3_5LanguageModel.__call__
+OriginalVlmQwen3_5IsSingleRowBatchCache = (
+    vlm_qwen3_5_language._is_single_row_batch_cache
+)
+
+
+def _vlm_qwen3_5_gated_delta_net_fast_path(
+    linear,
+    inputs: mx.array,
+    mask: Optional[mx.array],
+    cache: Optional[Any],
+    use_kernel: bool | None = None,
+) -> mx.array:
+    """Pre-target-verify Qwen3.5 GDN path for ordinary decode.
+
+    Upstream mlx-vlm added target-verification and ragged-batch helpers to this
+    layer. Those are needed for MTP/ragged server decode, but the decode-only
+    conv/projection helpers are slower for mlx-engine's common batch-size-one
+    path. This preserves the older plain path when no target-verify state is in
+    play.
+    """
+    B, S, _ = inputs.shape
+
+    mixed_qkv = linear.in_proj_qkv(inputs)
+
+    z = linear.in_proj_z(inputs)
+    z = z.reshape(B, S, -1, linear.head_v_dim)
+
+    b = linear.in_proj_b(inputs)
+    a = linear.in_proj_a(inputs)
+
+    if cache is not None and cache[0] is not None:
+        conv_state = cache[0]
+        if conv_state.shape[0] != B:
+            conv_state = mx.zeros(
+                (B, linear.conv_kernel_size - 1, linear.conv_dim),
+                dtype=inputs.dtype,
+            )
+    else:
+        conv_state = mx.zeros(
+            (B, linear.conv_kernel_size - 1, linear.conv_dim),
+            dtype=inputs.dtype,
+        )
+
+    if mask is not None:
+        if mask.shape[0] != B:
+            mask = None
+        else:
+            mixed_qkv = mx.where(mask[..., None], mixed_qkv, 0)
+    conv_input = mx.concatenate([conv_state, mixed_qkv], axis=1)
+    if cache is not None:
+        cache[0] = conv_input[:, -(linear.conv_kernel_size - 1) :]
+    conv_out = nn.silu(linear.conv1d(conv_input))
+
+    q, k, v = [
+        t.reshape(B, S, h, d)
+        for t, h, d in zip(
+            mx.split(conv_out, [linear.key_dim, 2 * linear.key_dim], -1),
+            [linear.num_k_heads, linear.num_k_heads, linear.num_v_heads],
+            [linear.head_k_dim, linear.head_k_dim, linear.head_v_dim],
+        )
+    ]
+
+    state = cache[1] if cache else None
+    if state is not None and state.shape[0] != B:
+        state = None
+    inv_scale = k.shape[-1] ** -0.5
+    q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
+    k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+
+    out, state = gated_delta_update(
+        q,
+        k,
+        v,
+        a,
+        b,
+        linear.A_log,
+        linear.dt_bias,
+        state,
+        mask,
+        use_kernel=not getattr(linear, "training", False)
+        if use_kernel is None
+        else use_kernel,
+    )
+
+    if cache is not None:
+        cache[1] = state
+        if hasattr(cache, "advance"):
+            cache.advance(S)
+
+    out = linear.norm(out, z)
+    return linear.out_proj(out.reshape(B, S, -1))
+
+
+def _has_vlm_qwen3_5_ragged_cache_state(cache) -> bool:
+    return (
+        getattr(cache, "lengths", None) is not None
+        or getattr(cache, "left_padding", None) is not None
+    )
+
+
+def _patched_vlm_qwen3_5_is_single_row_batch_cache(cache_entry) -> bool:
+    left_padding = getattr(cache_entry, "left_padding", None)
+    if not (
+        isinstance(left_padding, mx.array)
+        and left_padding.ndim > 0
+        and left_padding.size == 1
+    ):
+        return False
+
+    cached = getattr(cache_entry, "_mlx_engine_qwen3_5_single_row_batch_cache", None)
+    if cached is None or cached[0] is not left_padding:
+        cached = (left_padding, bool(int(left_padding.item()) > 0))
+        cache_entry._mlx_engine_qwen3_5_single_row_batch_cache = cached
+    return cached[1]
 
 
 class PatchedDecoderLayer(DecoderLayer):
@@ -405,11 +522,59 @@ def _patched_vlm_qwen3_5_attention_call(
     mask: Optional[mx.array] = None,
     cache: Optional[Any] = None,
     position_ids: Optional[mx.array] = None,
+    position_embeddings: Optional[tuple[mx.array, mx.array]] = None,
+    target_verify: bool = False,
 ) -> mx.array:
-    if position_ids is not None:
-        return OriginalVlmQwen3_5AttentionCall(self, x, mask, cache, position_ids)
+    if (
+        position_ids is not None
+        or position_embeddings is not None
+        or target_verify
+        or (isinstance(mask, str) and mask == "left_padded_decode")
+    ):
+        return OriginalVlmQwen3_5AttentionCall(
+            self,
+            x,
+            mask=mask,
+            cache=cache,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            target_verify=target_verify,
+        )
 
     return Qwen3NextAttention.__call__(self, x, mask, cache)
+
+
+def _patched_vlm_qwen3_5_gated_delta_net_call(
+    self,
+    inputs: mx.array,
+    mask: Optional[mx.array] = None,
+    cache: Optional[Any] = None,
+    gdn_sink: Optional[list] = None,
+    target_verify: bool = False,
+) -> mx.array:
+    if (
+        target_verify
+        or gdn_sink is not None
+        or inputs.shape[1] != 1
+        or cache is None
+        or _has_vlm_qwen3_5_ragged_cache_state(cache)
+    ):
+        return OriginalVlmQwen3_5GatedDeltaNetCall(
+            self,
+            inputs,
+            mask=mask,
+            cache=cache,
+            gdn_sink=gdn_sink,
+            target_verify=target_verify,
+        )
+
+    return _vlm_qwen3_5_gated_delta_net_fast_path(
+        self,
+        inputs,
+        mask,
+        cache,
+        use_kernel=not self.training,
+    )
 
 
 def _is_vlm_qwen3_5_text_only(
@@ -437,6 +602,33 @@ def _is_vlm_qwen3_5_text_only(
     )
 
 
+def _vlm_qwen3_5_batched_left_padding_position_ids(
+    cache,
+    fa_idx: int,
+    batch_size: int,
+    seq_length: int,
+    dtype,
+) -> mx.array | None:
+    if cache is None or fa_idx >= len(cache) or seq_length != 1:
+        return None
+    fa_cache = cache[fa_idx]
+    left_padding = getattr(fa_cache, "left_padding", None)
+    offset = getattr(fa_cache, "offset", None)
+    if (
+        not isinstance(left_padding, mx.array)
+        or left_padding.ndim == 0
+        or int(left_padding.max().item()) <= 0
+        or not isinstance(offset, mx.array)
+        or offset.ndim == 0
+    ):
+        return None
+
+    offsets = mx.maximum(offset[:batch_size], 0).reshape(-1, 1)
+    position_ids = mx.arange(seq_length, dtype=dtype).reshape(1, -1)
+    position_ids = mx.broadcast_to(position_ids, (batch_size, seq_length))
+    return mx.add(position_ids, offsets)
+
+
 def _patched_vlm_qwen3_5_language_model_call(
     self,
     inputs: mx.array,
@@ -451,8 +643,7 @@ def _patched_vlm_qwen3_5_language_model_call(
     video_grid_thw = kwargs.get("video_grid_thw")
     capture_layer_ids = kwargs.get("capture_layer_ids")
     rope_deltas_kw = kwargs.get("rope_deltas")
-
-    if _is_vlm_qwen3_5_text_only(
+    text_only = _is_vlm_qwen3_5_text_only(
         mask=mask,
         position_ids=position_ids,
         pixel_values=pixel_values,
@@ -462,7 +653,20 @@ def _patched_vlm_qwen3_5_language_model_call(
         rope_deltas_kw=rope_deltas_kw,
         stored_position_ids=getattr(self, "_position_ids", None),
         stored_rope_deltas=getattr(self, "_rope_deltas", None),
-    ):
+    )
+
+    if text_only:
+        position_ids = _vlm_qwen3_5_batched_left_padding_position_ids(
+            cache,
+            self.model.fa_idx,
+            inputs.shape[0],
+            inputs.shape[1],
+            inputs.dtype,
+        )
+        if position_ids is not None:
+            kwargs["position_ids"] = position_ids
+
+    if text_only and position_ids is None:
         out = self.model(
             inputs,
             cache=cache,
@@ -504,4 +708,8 @@ def apply_patches():
 
     VlmQwen3_5Attention.__init__ = _patched_vlm_qwen3_5_attention_init
     VlmQwen3_5Attention.__call__ = _patched_vlm_qwen3_5_attention_call
+    VlmQwen3_5GatedDeltaNet.__call__ = _patched_vlm_qwen3_5_gated_delta_net_call
     VlmQwen3_5LanguageModel.__call__ = _patched_vlm_qwen3_5_language_model_call
+    vlm_qwen3_5_language._is_single_row_batch_cache = (
+        _patched_vlm_qwen3_5_is_single_row_batch_cache
+    )

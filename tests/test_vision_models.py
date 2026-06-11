@@ -836,7 +836,6 @@ Reply with exactly READY and nothing else.<end_of_turn>
         """Gemma 4 should reuse an image checkpoint after another request."""
         model_name = "lmstudio-community/gemma-4-E2B-it-MLX-4bit"
         model_path = model_getter(model_name)
-        processor = AutoProcessor.from_pretrained(model_path)
         model_kit = self.load_model(
             model_path=model_path,
             max_kv_size=MAX_KV_CACHE_SIZE,
@@ -849,13 +848,6 @@ Reply with exactly READY and nothing else.<end_of_turn>
             .read_text()
             .split()
         )
-
-        def render_prompt(conversation):
-            return processor.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
 
         def generate_text(prompt, *, max_tokens, images_b64=None):
             prompt_tokens = tokenize(model_kit, prompt)
@@ -880,32 +872,31 @@ Reply with exactly READY and nothing else.<end_of_turn>
             return prompt_tokens, generated_text, reporter
 
         background = " ".join(background_words[:384])
-        first_conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "base64": self.toucan_image_b64},
-                    {
-                        "type": "text",
-                        "text": dedent(f"""\
-                            Read the image and background carefully.
+        first_user_text = dedent(f"""\
+            Read the image and background carefully.
 
-                            Background:
-                            {background}
+            Background:
+            {background}
 
-                            Write two sections in order.
-                            First, write a long SCRATCHPAD section with at least 60 numbered lines.
-                            Keep each line short, but make sure the full scratchpad is detailed.
-                            Each line should briefly analyze or restate part of the background.
-                            Second, end with a single final line in the exact format:
-                            FINAL: {control_word}
-                            Do not write anything after that final line.
-                            """),
-                    },
-                ],
-            }
-        ]
-        first_prompt = render_prompt(first_conversation)
+            Write two sections in order.
+            First, write a long SCRATCHPAD section with at least 60 numbered lines.
+            Keep each line short, but make sure the full scratchpad is detailed.
+            Each line should briefly analyze or restate part of the background.
+            Second, end with a single final line in the exact format:
+            FINAL: {control_word}
+            Do not write anything after that final line.
+            """).strip()
+
+        # Own this prompt shape explicitly. mlx-vlm's Gemma4 processor renderer
+        # reinserts all images into the latest user turn, but this cache test is
+        # about a stable rendered prefix with the image in the original turn.
+        first_prompt = (
+            "<bos><|turn>user\n"
+            + "<|image|>"
+            + first_user_text
+            + "<turn|>\n"
+            + "<|turn>model\n"
+        )
 
         (
             _,
@@ -933,30 +924,25 @@ Reply with exactly READY and nothing else.<end_of_turn>
         assert scratchpad_token_count > sliding_window_size
 
         # Replace the one-entry hot cache so the follow-up must use disk cache.
-        unrelated_prompt = render_prompt(
-            [{"role": "user", "content": [{"type": "text", "text": "Reply OK."}]}]
-        )
+        unrelated_prompt = "<bos><|turn>user\nReply OK.<turn|>\n<|turn>model\n"
         _, unrelated_text, _ = generate_text(unrelated_prompt, max_tokens=8)
         assert len(unrelated_text.strip()) > 0
 
         assistant_text = control_word
+        follow_up_question = (
+            "What was the exact single-word final answer from your previous "
+            "message? Reply with only that word."
+        )
 
-        second_conversation = first_conversation + [
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "What was the exact single-word final answer from your previous message? Reply with only that word.",
-                    }
-                ],
-            },
-        ]
-        second_prompt = render_prompt(second_conversation)
+        second_prompt = (
+            first_prompt
+            + assistant_text
+            + "<turn|>\n"
+            + "<|turn>user\n"
+            + follow_up_question
+            + "<turn|>\n"
+            + "<|turn>model\n"
+        )
 
         _, follow_up_text, reporter = generate_text(
             second_prompt,

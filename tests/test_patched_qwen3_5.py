@@ -7,9 +7,10 @@ from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
 import mlx_lm.models.qwen3_5 as qwen3_5_module
+from mlx_lm.models.qwen3_next import Qwen3NextAttention
 from transformers import AutoTokenizer
 
-from mlx_engine.model_kit.vision_add_ons.qwen3_5 import _compute_image_mrope_state
+from mlx_engine.model_kit.patches import qwen3_5 as qwen3_5_patches
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     PreparedPrompt,
     build_cached_prompt_kwargs,
@@ -132,6 +133,361 @@ def qwen3_5_chat_prompt_tokens(model_path) -> mx.array:
         add_generation_prompt=True,
     )
     return mx.array(tokenizer.encode(prompt, add_special_tokens=False))[None, :]
+
+
+def test_vlm_qwen3_5_attention_text_fast_path_uses_qwen3_next(monkeypatch):
+    calls = []
+
+    def fake_qwen3_next_call(self, x, mask=None, cache=None):
+        calls.append(("qwen3_next", self, x, mask, cache))
+        return "fast"
+
+    def fake_original_call(*args, **kwargs):
+        raise AssertionError("original VLM attention should not be used")
+
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    self_obj = object()
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="mask",
+        cache="cache",
+    )
+
+    assert result == "fast"
+    assert calls == [("qwen3_next", self_obj, "x", "mask", "cache")]
+
+
+def test_vlm_qwen3_5_attention_target_verify_uses_original_vlm(monkeypatch):
+    calls = []
+
+    def fake_qwen3_next_call(*args, **kwargs):
+        raise AssertionError("Qwen3Next fast path should not be used")
+
+    def fake_original_call(
+        self,
+        x,
+        mask=None,
+        cache=None,
+        position_ids=None,
+        position_embeddings=None,
+        **kwargs,
+    ):
+        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
+        return "target-verify"
+
+    self_obj = object()
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="mask",
+        cache="cache",
+        target_verify=True,
+    )
+
+    assert result == "target-verify"
+    assert calls == [
+        (self_obj, "x", "mask", "cache", None, None, {"target_verify": True})
+    ]
+
+
+def test_vlm_qwen3_5_attention_left_padded_decode_uses_original_vlm(monkeypatch):
+    calls = []
+
+    def fake_qwen3_next_call(*args, **kwargs):
+        raise AssertionError("Qwen3Next fast path should not be used")
+
+    def fake_original_call(
+        self,
+        x,
+        mask=None,
+        cache=None,
+        position_ids=None,
+        position_embeddings=None,
+        **kwargs,
+    ):
+        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
+        return "left-padded-decode"
+
+    self_obj = object()
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="left_padded_decode",
+        cache="cache",
+    )
+
+    assert result == "left-padded-decode"
+    assert calls == [
+        (
+            self_obj,
+            "x",
+            "left_padded_decode",
+            "cache",
+            None,
+            None,
+            {"target_verify": False},
+        )
+    ]
+
+
+def test_vlm_qwen3_5_attention_position_embeddings_uses_original_vlm(monkeypatch):
+    calls = []
+    position_embeddings = ("cos", "sin")
+
+    def fake_qwen3_next_call(*args, **kwargs):
+        raise AssertionError("Qwen3Next fast path should not be used")
+
+    def fake_original_call(
+        self,
+        x,
+        mask=None,
+        cache=None,
+        position_ids=None,
+        position_embeddings=None,
+        **kwargs,
+    ):
+        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
+        return "position-embeddings"
+
+    self_obj = object()
+    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5AttentionCall",
+        fake_original_call,
+    )
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
+        self_obj,
+        "x",
+        mask="mask",
+        cache="cache",
+        position_embeddings=position_embeddings,
+    )
+
+    assert result == "position-embeddings"
+    assert calls == [
+        (
+            self_obj,
+            "x",
+            "mask",
+            "cache",
+            None,
+            position_embeddings,
+            {"target_verify": False},
+        )
+    ]
+
+
+class _FakeVlmGatedDeltaNet:
+    hidden_size = 4
+    num_v_heads = 1
+    num_k_heads = 1
+    head_k_dim = 1
+    head_v_dim = 1
+    key_dim = 1
+    value_dim = 1
+    conv_kernel_size = 2
+    conv_dim = 3
+    A_log = mx.array([0.0])
+    dt_bias = mx.array([0.0])
+    training = False
+
+    def __init__(self):
+        self.conv_calls = 0
+
+    def in_proj_qkv(self, inputs):
+        return mx.ones((*inputs.shape[:2], self.conv_dim))
+
+    def in_proj_z(self, inputs):
+        return mx.ones((*inputs.shape[:2], self.value_dim))
+
+    def in_proj_b(self, inputs):
+        return mx.zeros((*inputs.shape[:2], self.num_v_heads))
+
+    def in_proj_a(self, inputs):
+        return mx.zeros((*inputs.shape[:2], self.num_v_heads))
+
+    def conv1d(self, conv_input):
+        self.conv_calls += 1
+        return conv_input[:, -1:, :]
+
+    def _causal_conv1d_decode(self, conv_input):
+        raise AssertionError("upstream decode-only conv fast path should not be used")
+
+    def norm(self, out, z):
+        return out
+
+    def out_proj(self, out):
+        return out
+
+
+def test_vlm_qwen3_5_gated_delta_fast_path_skips_upstream_decode_conv(monkeypatch):
+    calls = []
+
+    def fake_gated_delta_update(*args, **kwargs):
+        calls.append((args, kwargs))
+        q = args[0]
+        state = args[7]
+        return mx.ones_like(q), state
+
+    monkeypatch.setattr(qwen3_5_patches, "gated_delta_update", fake_gated_delta_update)
+
+    layer = _FakeVlmGatedDeltaNet()
+    inputs = mx.ones((1, 1, layer.hidden_size))
+
+    output = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
+        layer,
+        inputs,
+        cache=[None, None],
+    )
+
+    assert layer.conv_calls == 1
+    assert output.shape == (1, 1, layer.value_dim)
+    assert len(calls) == 1
+    assert calls[0][1]["use_kernel"] is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"target_verify": True},
+        {"gdn_sink": []},
+    ],
+)
+def test_vlm_qwen3_5_gated_delta_special_cases_use_original_vlm(
+    monkeypatch,
+    kwargs,
+):
+    calls = []
+
+    def fake_original_call(self, inputs, **call_kwargs):
+        calls.append((self, inputs, call_kwargs))
+        return "original"
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5GatedDeltaNetCall",
+        fake_original_call,
+    )
+
+    layer = _FakeVlmGatedDeltaNet()
+    inputs = mx.ones((1, 1, layer.hidden_size))
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
+        layer,
+        inputs,
+        **kwargs,
+    )
+
+    assert result == "original"
+    assert calls == [
+        (
+            layer,
+            inputs,
+            {
+                "mask": None,
+                "cache": None,
+                "gdn_sink": kwargs.get("gdn_sink"),
+                "target_verify": kwargs.get("target_verify", False),
+            },
+        )
+    ]
+
+
+def test_vlm_qwen3_5_gated_delta_ragged_cache_uses_original_vlm(monkeypatch):
+    calls = []
+
+    class CacheWithLengths(list):
+        lengths = mx.array([1])
+
+    def fake_original_call(self, inputs, **call_kwargs):
+        calls.append((self, inputs, call_kwargs))
+        return "ragged"
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5GatedDeltaNetCall",
+        fake_original_call,
+    )
+
+    layer = _FakeVlmGatedDeltaNet()
+    inputs = mx.ones((1, 1, layer.hidden_size))
+    cache = CacheWithLengths([None, None])
+
+    result = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
+        layer,
+        inputs,
+        cache=cache,
+    )
+
+    assert result == "ragged"
+    assert calls == [
+        (
+            layer,
+            inputs,
+            {
+                "mask": None,
+                "cache": cache,
+                "gdn_sink": None,
+                "target_verify": False,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("left_padding", "expected"),
+    [
+        ([0], False),
+        ([3], True),
+    ],
+)
+def test_vlm_qwen3_5_single_row_batch_cache_requires_real_left_padding(
+    left_padding,
+    expected,
+):
+    class Cache:
+        pass
+
+    cache = Cache()
+    cache.left_padding = mx.array(left_padding)
+
+    assert (
+        qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache)
+        is expected
+    )
+
+
+def test_vlm_qwen3_5_single_row_batch_cache_ignores_non_batch_cache():
+    class Cache:
+        pass
+
+    cache = Cache()
+    assert (
+        qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache) is False
+    )
 
 
 def _first_generate_step_logprobs(
@@ -314,73 +670,6 @@ def test_qwen3_5_text_only_patched_matches_unpatched(model_name):
     )
 
 
-@pytest.mark.parametrize("model_name", REAL_MODEL_CASES)
-def test_qwen3_5_image_prompt_patched_matches_vlm(model_name):
-    """The patched Qwen3.5 image path must match native mlx-vlm."""
-    model_path = get_real_model_path(model_name)
-    vlm_model = load_vlm(model_path)
-    config = vlm_model.config
-
-    image_grid_thw = mx.array([[1, 4, 4]])
-    tokens_list = [
-        0,
-        1,
-        config.vision_start_token_id,
-        config.image_token_id,
-        config.image_token_id,
-        config.image_token_id,
-        config.image_token_id,
-        2,
-        3,
-    ]
-    tokens = mx.array([tokens_list])
-
-    vlm_position_ids, vlm_rope_deltas = vlm_model.language_model.get_rope_index(
-        tokens, image_grid_thw=image_grid_thw
-    )
-    mx.eval(vlm_position_ids, vlm_rope_deltas)
-
-    addon_position_ids, addon_rope_deltas = _compute_image_mrope_state(
-        mx.array(tokens_list), image_grid_thw, config
-    )
-    mx.eval(addon_position_ids, addon_rope_deltas)
-
-    assert mx.array_equal(addon_position_ids, vlm_position_ids).item(), (
-        f"{model_name}: position IDs mismatch: addon={addon_position_ids.tolist()}, "
-        f"vlm={vlm_position_ids.tolist()}"
-    )
-    assert mx.array_equal(addon_rope_deltas, vlm_rope_deltas).item(), (
-        f"{model_name}: rope deltas mismatch: addon={addon_rope_deltas.item()}, "
-        f"vlm={vlm_rope_deltas.item()}"
-    )
-
-    vlm_model.language_model._position_ids = vlm_position_ids
-    vlm_model.language_model._rope_deltas = vlm_rope_deltas
-    vlm_logits = vlm_model.language_model(
-        tokens, cache=None, position_ids=vlm_position_ids
-    ).logits
-    mx.eval(vlm_logits)
-    vlm_logits = mx.array(vlm_logits)
-    del vlm_model
-    mx.clear_cache()
-
-    patched_model, _ = load_patched_mlx_lm(model_path)
-    patched_text_model = patched_model.language_model.model
-    patched_text_model.position_ids = addon_position_ids
-    patched_text_model.rope_deltas = addon_rope_deltas
-    patched_logits = patched_model(tokens)
-    mx.eval(patched_logits)
-    patched_logits = mx.array(patched_logits)
-    del patched_model
-    mx.clear_cache()
-
-    diff = max_abs_diff(patched_logits, vlm_logits)
-    assert diff == 0.0, (
-        f"{model_name}: image prompt logits mismatch against mlx-vlm "
-        f"(max diff {diff:.6f})."
-    )
-
-
 def test_vlm_qwen3_5_text_prefill_fast_path_matches_original_vlm():
     """The VLM Qwen3.5 text fast path must match original mlx-vlm logits."""
     model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
@@ -447,6 +736,111 @@ def test_vlm_qwen3_5_text_mask_uses_original_vlm():
     assert diff == 0.0, (
         f"VLM Qwen3.5 masked text changed original VLM logits (max diff {diff:.6f})."
     )
+
+
+def test_vlm_qwen3_5_text_left_padded_decode_uses_original_vlm(monkeypatch):
+    """Batched left-padded decode needs upstream per-row position_ids handling."""
+    calls = []
+
+    class FakeInnerModel:
+        fa_idx = 0
+
+        def __call__(self, *args, **kwargs):
+            raise AssertionError("text fast path should not be used")
+
+    class FakeLanguageModel:
+        model = FakeInnerModel()
+        _position_ids = None
+        _rope_deltas = None
+
+    class FakeCache:
+        left_padding = mx.array([0, 2])
+        offset = mx.array([7, 5])
+
+    def fake_original_call(
+        self,
+        inputs,
+        inputs_embeds=None,
+        mask=None,
+        cache=None,
+        **kwargs,
+    ):
+        calls.append((self, inputs, inputs_embeds, mask, cache, kwargs))
+        return "original"
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5LanguageModelCall",
+        fake_original_call,
+    )
+
+    cache = [FakeCache()]
+    inputs = mx.array([[7], [8]])
+    result = qwen3_5_patches._patched_vlm_qwen3_5_language_model_call(
+        FakeLanguageModel(),
+        inputs,
+        cache=cache,
+    )
+
+    assert result == "original"
+    assert len(calls) == 1
+    assert calls[0][1] is inputs
+    assert calls[0][2:5] == (None, None, cache)
+    position_ids = calls[0][5]["position_ids"]
+    assert position_ids.tolist() == [[7], [5]]
+
+
+def test_vlm_qwen3_5_text_left_padded_prefill_uses_fast_path(monkeypatch):
+    """Multi-token prefill must not build positions over padded query columns."""
+    calls = []
+
+    class FakeInnerModel:
+        fa_idx = 0
+
+        def __call__(self, inputs, cache=None, inputs_embeds=None, position_ids=None):
+            calls.append((inputs, cache, inputs_embeds, position_ids))
+            return "hidden"
+
+        class embed_tokens:
+            @staticmethod
+            def as_linear(hidden):
+                return f"logits:{hidden}"
+
+    class FakeLanguageModel:
+        model = FakeInnerModel()
+        _position_ids = None
+        _rope_deltas = None
+
+        class args:
+            tie_word_embeddings = True
+
+    class FakeCache:
+        left_padding = mx.array([0, 2])
+        offset = mx.array([4, 2])
+
+    def fake_original_call(*args, **kwargs):
+        raise AssertionError("original VLM path should not be used")
+
+    monkeypatch.setattr(
+        qwen3_5_patches,
+        "OriginalVlmQwen3_5LanguageModelCall",
+        fake_original_call,
+    )
+
+    cache = [FakeCache()]
+    inputs = mx.array([[1, 2, 3, 4], [0, 0, 5, 6]])
+    result = qwen3_5_patches._patched_vlm_qwen3_5_language_model_call(
+        FakeLanguageModel(),
+        inputs,
+        cache=cache,
+    )
+
+    assert result.logits == "logits:hidden"
+    assert len(calls) == 1
+    assert calls[0][0] is inputs
+    assert calls[0][1] is cache
+    assert calls[0][2] is None
+    assert calls[0][3] is None
 
 
 def test_vlm_qwen3_5_mrope_path_matches_original_vlm():

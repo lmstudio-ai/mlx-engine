@@ -25,6 +25,9 @@ from mlx_engine.model_kit.batched_model_kit_types import (
     GenerationRequest,
     CancelGenerationRequest,
 )
+from mlx_engine.utils.mlx_threading import (
+    install_mlx_compile_cache_cleanup_for_thread,
+)
 from mlx_engine.utils.set_seed import set_seed
 
 logger = logging.getLogger(__name__)
@@ -291,6 +294,7 @@ class BatchedModelKit:
         requests receive a RequestCancelled exception.
         """
 
+        install_mlx_compile_cache_cleanup_for_thread()
         set_seed(self._seed)
 
         if self.model is None:

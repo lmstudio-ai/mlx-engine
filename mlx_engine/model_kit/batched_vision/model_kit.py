@@ -54,13 +54,43 @@ from mlx_engine.utils.prompt_progress_events import (
 )
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 from mlx_engine.utils.fix_mistral_pre_tokenizer import fix_mistral_pre_tokenizer
-from mlx_engine.vision_model_kit._transformers_compatibility import (
+from mlx_engine.utils.mlx_threading import (
+    install_mlx_compile_cache_cleanup_for_thread,
+)
+from mlx_engine.model_kit.batched_vision.transformers_compatibility import (
     fix_qwen2_5_vl_image_processor,
     fix_qwen2_vl_preprocessor,
+)
+from mlx_engine.model_kit.batched_vision.vision_feature_memoizer import (
+    VisionFeatureMemoizer,
+)
+from mlx_engine.model_kit.patches.gemma4 import (
+    is_unified_model_type as is_gemma4_unified_model_type,
+    patch_loaded_model as patch_loaded_gemma4_model,
 )
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_SEQ_NUMS = 4
+
+
+def _requires_global_no_chunked_prefill(model, model_type: str | None) -> bool:
+    if not getattr(model, "no_chunked_prefill", False):
+        return False
+    # Gemma4 unified visual prompts need a request-local policy because only
+    # visual token blocks require the bidirectional-mask prefill constraint.
+    return not is_gemma4_unified_model_type(model_type)
+
+
+def _restore_splits_gemma4_image_span(
+    *,
+    model_type: str | None,
+    cached_prefix_len: int,
+    image_spans,
+) -> bool:
+    """Return true when a Gemma4 restore would split an image token span."""
+    if not is_gemma4_unified_model_type(model_type) or cached_prefix_len <= 0:
+        return False
+    return any(span.start < cached_prefix_len < span.end for span in image_spans)
 
 
 class BatchedVisionModelKit:
@@ -122,16 +152,17 @@ class BatchedVisionModelKit:
             self._prompt_cache_store,
             self._cache_io_thread.enqueue_save,
         )
+        self._vision_feature_memoizer = VisionFeatureMemoizer()
 
         self._init_tokenizer_only()
+        image_processor = mlx_vlm.utils.load_image_processor(
+            self._model_path,
+            trust_remote_code=self._trust_remote_code,
+        )
         self.processor = mlx_vlm.utils.load_processor(
             self._model_path,
             True,
             eos_token_ids=self._get_eos_token_ids(),
-            trust_remote_code=self._trust_remote_code,
-        )
-        image_processor = mlx_vlm.utils.load_image_processor(
-            self._model_path,
             trust_remote_code=self._trust_remote_code,
         )
         if image_processor is not None:
@@ -176,11 +207,12 @@ class BatchedVisionModelKit:
             image_processor.input_data_format = ChannelDimension.FIRST
 
     def _load_model(self) -> None:
-        self.model, _ = mlx_vlm.utils.load_model(
+        self.model = mlx_vlm.utils.load_model(
             self._model_path,
             lazy=False,
-            trust_remote_code=self._trust_remote_code,
+            trust_remote_code=False,
         )
+        patch_loaded_gemma4_model(self.model)
         mx.synchronize()
         mx.clear_cache()
 
@@ -285,14 +317,10 @@ class BatchedVisionModelKit:
             if self._generation_thread:
                 self._generation_thread.join()
             self._cache_io_thread.close()
-            if self._generation_thread_state is not None:
-                self._generation_thread_state.batch_generator.close()
-                self._generation_thread_state = None
-            self._prompt_cache_coordinator.clear_hot_prompt_cache()
-            self.model = None
             self.processor = None
             self.tokenizer = None
             self.detokenizer = None
+            self._vision_feature_memoizer.clear()
             self._generation_thread = None
             gc.collect()
             mx.clear_cache()
@@ -320,8 +348,11 @@ class BatchedVisionModelKit:
             err_string = f"Encountered fatal exception in the backend generation thread: {traceback.format_exc()}"
             logger.error(err_string)
             self._backend_exception = Exception(err_string)
-            self._fail_all_requests(self._backend_exception)
-            self._startup_complete.set()
+            try:
+                self._fail_all_requests(self._backend_exception)
+            finally:
+                self._generation_thread_state = None
+                self._startup_complete.set()
 
             # Sleep to allow error messages to be logged and propagated to clients.
             time.sleep(3)
@@ -343,7 +374,7 @@ class BatchedVisionModelKit:
             completion_batch_size=self._max_seq_nums,
             prefill_step_size=(
                 None
-                if getattr(self.model, "no_chunked_prefill", False)
+                if _requires_global_no_chunked_prefill(self.model, self.model_type)
                 else self.prefill_step_size
             ),
         )
@@ -377,6 +408,12 @@ class BatchedVisionModelKit:
         restored = prepared_insert.restored
         full_prompt_input_ids = prepared_prompt.prompt_input_ids
         prompt_token_count = len(full_prompt_input_ids)
+        if restored is not None and _restore_splits_gemma4_image_span(
+            model_type=self.model_type,
+            cached_prefix_len=restored.cached_prefix_len,
+            image_spans=prepared_prompt.image_spans,
+        ):
+            restored = None
 
         prompt_input_ids = full_prompt_input_ids
         prompt_kwargs = None
@@ -392,6 +429,7 @@ class BatchedVisionModelKit:
                 prepared_prompt,
                 restored.cached_prefix_len,
                 restored.rope_deltas,
+                self._vision_feature_memoizer,
             )
             inputs_embeds = prompt_kwargs.pop("inputs_embeds")
             cached_prefix_len = restored.cached_prefix_len
@@ -399,10 +437,14 @@ class BatchedVisionModelKit:
             all_tokens = full_prompt_input_ids[: restored.cached_prefix_len]
             rope_deltas = restored.rope_deltas
         else:
-            prompt_kwargs = build_prompt_kwargs(self.model, prepared_prompt)
+            prompt_kwargs = build_prompt_kwargs(
+                self.model,
+                prepared_prompt,
+                self._vision_feature_memoizer,
+            )
             inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
-        if getattr(self.model, "no_chunked_prefill", False):
+        if _requires_global_no_chunked_prefill(self.model, self.model_type):
             # One-shot prefill skips exact intermediate prompt boundaries.
             prompt_progress_for_cache_chunks = prompt_token_count
         else:
@@ -533,6 +575,7 @@ class BatchedVisionModelKit:
             request.rqueue.put(error)
 
     def _generate(self):
+        install_mlx_compile_cache_cleanup_for_thread()
         set_seed(self._seed)
 
         if self.model is None:
@@ -551,14 +594,33 @@ class BatchedVisionModelKit:
             finish_response=self._finish_response,
         )
 
-        while not self._shutdown.is_set():
-            timeout = None if state.active or state.ready else 0.1
-            controller.drain_generation_events(timeout)
-            controller.insert_ready_requests()
-            controller.admit_pending_requests()
-            controller.step_generation()
-
-        controller.cancel_all_requests()
+        exited_with_exception = True
+        try:
+            while not self._shutdown.is_set():
+                timeout = None if state.active or state.ready else 0.1
+                controller.drain_generation_events(timeout)
+                controller.insert_ready_requests()
+                controller.admit_pending_requests()
+                controller.step_generation()
+            exited_with_exception = False
+        finally:
+            if exited_with_exception:
+                try:
+                    state.batch_generator.close()
+                except Exception:
+                    logger.debug(
+                        "Failed to close VLM batch generator after fatal error.",
+                        exc_info=True,
+                    )
+            else:
+                controller.cancel_all_requests()
+                self._generation_thread_state = None
+            self._prompt_cache_coordinator.clear_hot_prompt_cache()
+            mx.synchronize()
+            self.model = None
+            self._vision_feature_memoizer.clear()
+            gc.collect()
+            mx.clear_cache()
 
     def __del__(self):
         self.shutdown()

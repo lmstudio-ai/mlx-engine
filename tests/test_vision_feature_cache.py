@@ -1,119 +1,158 @@
-from types import SimpleNamespace
-from unittest.mock import patch
-
 import mlx.core as mx
 
-from mlx_engine.model_kit.vision_add_ons.base import (
-    BaseVisionAddOn,
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
+from mlx_engine.model_kit.batched_vision.prompt_inputs import (
+    PreparedPrompt,
+    build_prompt_kwargs,
 )
-from mlx_engine.model_kit.vision_add_ons.vision_feature_memoizer import (
+from mlx_engine.model_kit.batched_vision.vision_feature_memoizer import (
     VisionFeatureMemoizer,
 )
-from mlx_engine.model_kit.vision_add_ons.gemma4 import Gemma4VisionAddOn
 
 
-class _CountingModule:
-    def __init__(self, result):
-        self.result = result
-        self.calls = 0
+class _EmbeddingOutput:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
 
-    def __call__(self, *_args, **_kwargs):
-        self.calls += 1
-        return self.result
+    def to_dict(self):
+        return dict(self.kwargs)
 
 
-def test_feature_memoizer_computes_once_and_reuses_cached_features():
+class _InternalVisionCacheModel:
+    def __init__(self):
+        self.embedding_calls = []
+        self.vision_calls = 0
+
+    def get_input_embeddings(self, input_ids, pixel_values, mask=None, **kwargs):
+        self.embedding_calls.append(kwargs)
+        vision_cache = kwargs.get("vision_cache")
+        image_key = kwargs.get("_image_key")
+
+        features = None
+        if vision_cache is not None and image_key is not None:
+            features = vision_cache.get(image_key)
+
+        if features is None:
+            self.vision_calls += 1
+            features = mx.array([[[20.0, 21.0]]], dtype=mx.float32)
+            mx.eval(features)
+            if vision_cache is not None and image_key is not None:
+                vision_cache.put(image_key, features)
+
+        return _EmbeddingOutput(inputs_embeds=features)
+
+
+class _NestedInternalVisionCacheModel:
+    def __init__(self):
+        self.embedding_calls = []
+        self.vision_calls = 0
+
+    def get_input_embeddings(self, input_ids, pixel_values, mask=None, **kwargs):
+        self.embedding_calls.append(kwargs)
+
+        def cached_features():
+            vision_cache = kwargs.get("vision_cache")
+            image_key = kwargs.get("_image_key")
+            if vision_cache is None or image_key is None:
+                return None
+            return vision_cache.get(image_key)
+
+        features = cached_features()
+        if features is None:
+            self.vision_calls += 1
+            features = mx.array([[[20.0, 21.0]]], dtype=mx.float32)
+            mx.eval(features)
+            vision_cache = kwargs.get("vision_cache")
+            image_key = kwargs.get("_image_key")
+            if vision_cache is not None and image_key is not None:
+                vision_cache.put(image_key, features)
+
+        return _EmbeddingOutput(inputs_embeds=features)
+
+
+class _CachedFeaturesOnlyModel:
+    def __init__(self):
+        self.embedding_calls = []
+        self.vision_calls = 0
+
+    def get_input_embeddings(self, input_ids, pixel_values, mask=None, **kwargs):
+        self.embedding_calls.append(kwargs)
+        features = kwargs.get("cached_image_features")
+        if features is None:
+            self.vision_calls += 1
+            features = mx.array([[[20.0, 21.0]]], dtype=mx.float32)
+        return _EmbeddingOutput(inputs_embeds=features)
+
+
+def test_feature_memoizer_owns_upstream_cache():
+    memoizer = VisionFeatureMemoizer(max_size=1)
+    first = mx.array([[1.0, 2.0]], dtype=mx.float32)
+    second = mx.array([[3.0, 4.0]], dtype=mx.float32)
+
+    memoizer.cache.put("image-a", first)
+    memoizer.cache.put("image-b", second)
+
+    assert memoizer.cache.get("image-a") is None
+    assert mx.array_equal(memoizer.cache.get("image-b"), second)
+
+    memoizer.clear()
+
+    assert len(memoizer.cache) == 0
+
+
+def test_batched_prompt_kwargs_passes_internal_vision_cache_when_model_uses_image_key():
     memoizer = VisionFeatureMemoizer()
-    compute = _CountingModule(mx.array([[1.0, 2.0]], dtype=mx.float32))
+    model = _InternalVisionCacheModel()
+    prepared_prompt = _prepared_prompt()
 
-    first = memoizer.get_or_compute(["img-a"], (512, 512), compute)
-    second = memoizer.get_or_compute(["img-a"], (512, 512), compute)
+    first = build_prompt_kwargs(model, prepared_prompt, memoizer)
+    second = build_prompt_kwargs(model, prepared_prompt, memoizer)
 
-    assert compute.calls == 1
-    assert mx.array_equal(first, second)
+    assert model.vision_calls == 1
+    assert mx.array_equal(first["inputs_embeds"], second["inputs_embeds"])
+    assert all("vision_cache" in call for call in model.embedding_calls)
+    assert all("_image_key" in call for call in model.embedding_calls)
+    assert "vision_cache" not in first
+    assert "_image_key" not in first
 
 
-def test_feature_memoizer_keys_image_order():
+def test_batched_prompt_kwargs_detects_nested_image_key_cache_helpers():
     memoizer = VisionFeatureMemoizer()
-    first_compute = _CountingModule(mx.array([[1.0, 2.0]], dtype=mx.float32))
-    second_compute = _CountingModule(mx.array([[3.0, 4.0]], dtype=mx.float32))
+    model = _NestedInternalVisionCacheModel()
+    prepared_prompt = _prepared_prompt()
 
-    first = memoizer.get_or_compute(["img-a", "img-b"], (512, 512), first_compute)
-    second = memoizer.get_or_compute(["img-b", "img-a"], (512, 512), second_compute)
+    first = build_prompt_kwargs(model, prepared_prompt, memoizer)
+    second = build_prompt_kwargs(model, prepared_prompt, memoizer)
 
-    assert first_compute.calls == 1
-    assert second_compute.calls == 1
-    assert mx.array_equal(first, mx.array([[1.0, 2.0]], dtype=mx.float32))
-    assert mx.array_equal(second, mx.array([[3.0, 4.0]], dtype=mx.float32))
+    assert model.vision_calls == 1
+    assert mx.array_equal(first["inputs_embeds"], second["inputs_embeds"])
+    assert all("vision_cache" in call for call in model.embedding_calls)
+    assert all("_image_key" in call for call in model.embedding_calls)
 
 
-def test_feature_memoizer_keys_max_size():
+def test_batched_prompt_kwargs_passes_cache_kwargs_even_when_model_ignores_them():
     memoizer = VisionFeatureMemoizer()
-    resized_compute = _CountingModule(mx.array([[1.0, 2.0]], dtype=mx.float32))
-    larger_compute = _CountingModule(mx.array([[3.0, 4.0]], dtype=mx.float32))
-    original_compute = _CountingModule(mx.array([[5.0, 6.0]], dtype=mx.float32))
+    model = _CachedFeaturesOnlyModel()
+    prepared_prompt = _prepared_prompt()
 
-    resized = memoizer.get_or_compute(["img-a"], (512, 512), resized_compute)
-    larger = memoizer.get_or_compute(["img-a"], (1024, 1024), larger_compute)
-    original = memoizer.get_or_compute(["img-a"], None, original_compute)
+    first = build_prompt_kwargs(model, prepared_prompt, memoizer)
+    second = build_prompt_kwargs(model, prepared_prompt, memoizer)
 
-    assert resized_compute.calls == 1
-    assert larger_compute.calls == 1
-    assert original_compute.calls == 1
-    assert mx.array_equal(resized, mx.array([[1.0, 2.0]], dtype=mx.float32))
-    assert mx.array_equal(larger, mx.array([[3.0, 4.0]], dtype=mx.float32))
-    assert mx.array_equal(original, mx.array([[5.0, 6.0]], dtype=mx.float32))
+    assert model.vision_calls == 2
+    assert mx.array_equal(first["inputs_embeds"], second["inputs_embeds"])
+    assert all("vision_cache" in call for call in model.embedding_calls)
+    assert all("_image_key" in call for call in model.embedding_calls)
+    assert "vision_cache" not in first
+    assert "_image_key" not in first
 
 
-def test_gemma4_add_on_reuses_cached_image_features():
-    add_on = Gemma4VisionAddOn.__new__(Gemma4VisionAddOn)
-    BaseVisionAddOn.__init__(add_on)
-    add_on.config = SimpleNamespace(image_token_id=7, audio_token_id=8)
-    add_on.processor = object()
-    add_on.vision_tower = _CountingModule(
-        mx.array([[[10.0, 11.0], [12.0, 13.0]]], dtype=mx.float32)
+def _prepared_prompt() -> PreparedPrompt:
+    return PreparedPrompt(
+        prompt_input_ids=[1, 7, 2],
+        raw_inputs={
+            "input_ids": mx.array([[1, 7, 2]], dtype=mx.int32),
+            "pixel_values": mx.ones((1, 3, 2, 2), dtype=mx.float32),
+        },
+        image_spans=[PromptImageSpan(1, 2, "image-a")],
+        vision_cache_key="prepared-images:image-a",
     )
-    add_on.embed_vision = _CountingModule(
-        mx.array([[[10.0, 11.0], [12.0, 13.0]]], dtype=mx.float32)
-    )
-
-    text_model = SimpleNamespace(
-        language_model=SimpleNamespace(
-            model=SimpleNamespace(
-                embed_scale=1.0,
-                hidden_size_per_layer_input=False,
-                embed_tokens=lambda input_ids: mx.stack(
-                    [
-                        input_ids.astype(mx.float32),
-                        input_ids.astype(mx.float32) + 0.5,
-                    ],
-                    axis=-1,
-                ),
-            )
-        )
-    )
-    input_ids = mx.array([[1, 7, 7, 2]], dtype=mx.int32)
-    pixel_values = mx.ones((1, 3, 2, 2), dtype=mx.float32)
-
-    with patch(
-        "mlx_engine.model_kit.vision_add_ons.gemma4.common_process_prompt_with_images",
-        return_value=(input_ids, pixel_values, None, None),
-    ):
-        first_input_ids, first_embeddings = add_on.compute_embeddings(
-            text_model,
-            prompt_tokens=mx.array([1, 2], dtype=mx.int32),
-            images_b64=["img-a"],
-            max_size=(512, 512),
-        )
-        second_input_ids, second_embeddings = add_on.compute_embeddings(
-            text_model,
-            prompt_tokens=mx.array([3, 4], dtype=mx.int32),
-            images_b64=["img-a"],
-            max_size=(512, 512),
-        )
-
-    assert add_on.vision_tower.calls == 1
-    assert add_on.embed_vision.calls == 1
-    assert mx.array_equal(first_input_ids, input_ids.squeeze(0))
-    assert mx.array_equal(second_input_ids, input_ids.squeeze(0))
-    assert mx.array_equal(first_embeddings, second_embeddings)
