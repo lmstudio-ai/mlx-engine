@@ -57,6 +57,13 @@ OriginalVlmQwen3_5LanguageModelCall = VlmQwen3_5LanguageModel.__call__
 OriginalVlmQwen3_5IsSingleRowBatchCache = (
     vlm_qwen3_5_language._is_single_row_batch_cache
 )
+OriginalVlmQwen3_5RaggedDecodeAttention = (
+    vlm_qwen3_5_language._qwen3_5_ragged_decode_attention
+)
+
+
+def _patched_vlm_qwen3_5_ragged_decode_attention(*args, **kwargs):
+    return None
 
 
 def _vlm_qwen3_5_gated_delta_net_fast_path(
@@ -712,4 +719,7 @@ def apply_patches():
     VlmQwen3_5LanguageModel.__call__ = _patched_vlm_qwen3_5_language_model_call
     vlm_qwen3_5_language._is_single_row_batch_cache = (
         _patched_vlm_qwen3_5_is_single_row_batch_cache
+    )
+    vlm_qwen3_5_language._qwen3_5_ragged_decode_attention = (
+        _patched_vlm_qwen3_5_ragged_decode_attention
     )

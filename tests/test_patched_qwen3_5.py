@@ -8,6 +8,7 @@ from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
 import mlx_lm.models.qwen3_5 as qwen3_5_module
 from mlx_lm.models.qwen3_next import Qwen3NextAttention
+from mlx_vlm.models.qwen3_5 import language as vlm_qwen3_5_language
 from transformers import AutoTokenizer
 
 from mlx_engine.model_kit.patches import qwen3_5 as qwen3_5_patches
@@ -133,6 +134,19 @@ def qwen3_5_chat_prompt_tokens(model_path) -> mx.array:
         add_generation_prompt=True,
     )
     return mx.array(tokenizer.encode(prompt, add_special_tokens=False))[None, :]
+
+
+def test_vlm_qwen3_5_ragged_decode_attention_kernel_is_disabled():
+    assert (
+        vlm_qwen3_5_language._qwen3_5_ragged_decode_attention
+        is qwen3_5_patches._patched_vlm_qwen3_5_ragged_decode_attention
+    )
+    assert (
+        vlm_qwen3_5_language._qwen3_5_ragged_decode_attention(
+            "queries", "keys", "values", "pads", "scale"
+        )
+        is None
+    )
 
 
 def test_vlm_qwen3_5_attention_text_fast_path_uses_qwen3_next(monkeypatch):
