@@ -1,4 +1,4 @@
-"""Gemma 4 unified compatibility helpers for batched vision generation."""
+"""Gemma 4 bidirectional-vision compatibility helpers for batched generation."""
 
 from types import MethodType
 from typing import Any
@@ -10,9 +10,43 @@ def is_unified_model_type(model_type: str | None) -> bool:
     return str(model_type or "").startswith("gemma4_unified")
 
 
+def is_gemma4_model_type(model_type: str | None) -> bool:
+    return str(model_type or "").startswith("gemma4")
+
+
+def _language_model(model: Any) -> Any:
+    return getattr(model, "language_model", model)
+
+
+def _model_type(model: Any) -> str | None:
+    return getattr(_language_model(model), "model_type", None)
+
+
 def is_unified_model(model: Any) -> bool:
-    language_model = getattr(model, "language_model", model)
-    return is_unified_model_type(getattr(language_model, "model_type", None))
+    return is_unified_model_type(_model_type(model))
+
+
+def uses_bidirectional_visual_attention(model: Any) -> bool:
+    """Return true for Gemma4-family language models with visual bidir masks."""
+    language_model = _language_model(model)
+    if not is_gemma4_model_type(getattr(language_model, "model_type", None)):
+        return False
+    config = getattr(language_model, "config", None)
+    return _get_config_value(config, "use_bidirectional_attention") == "vision"
+
+
+def _get_config_value(config: dict | Any, key: str) -> Any:
+    if isinstance(config, dict):
+        return config.get(key)
+    return getattr(config, key, None)
+
+
+def config_uses_bidirectional_visual_attention(config: dict | Any) -> bool:
+    """Config-level version used before the loaded model exists."""
+    model_type = _get_config_value(config, "model_type")
+    text_config = _get_config_value(config, "text_config") or config
+    attention_mode = _get_config_value(text_config, "use_bidirectional_attention")
+    return is_gemma4_model_type(model_type) and attention_mode == "vision"
 
 
 def visual_prefill_prefix_len(
@@ -21,14 +55,14 @@ def visual_prefill_prefix_len(
     image_spans: list[Any],
     cached_prefix_len: int,
 ) -> int | None:
-    """Return the remaining visual prefix Gemma4 unified must prefill together.
+    """Return the visual prefix Gemma4 bidir masks need in one model call.
 
-    Gemma4 unified derives its bidirectional visual attention overlay from the
-    token-type ids visible to one language-model call. Keep the first prefill
-    anchored at the current suffix start through the last visual token; text
-    after that point can go back to ordinary chunked prefill.
+    Gemma4 derives its bidirectional visual attention overlay from token-type ids
+    visible to the current language-model call. Keep the first prefill anchored
+    at the current suffix start through the last visual token; trailing text can
+    go back to ordinary chunked prefill.
     """
-    if not is_unified_model(model):
+    if not uses_bidirectional_visual_attention(model):
         return None
 
     token_types = prompt_kwargs.get("mm_token_type_ids")
@@ -64,9 +98,9 @@ def prepare_cached_suffix_prompt_kwargs(prompt_kwargs: dict, key_len: int) -> di
 
 
 def patch_loaded_model(model: Any) -> None:
-    """Patch a loaded mlx-vlm Gemma4 unified model for cached visual suffix masks."""
-    language_model = getattr(model, "language_model", model)
-    if not is_unified_model_type(getattr(language_model, "model_type", None)):
+    """Patch loaded Gemma4 bidir models for cached visual suffix masks."""
+    language_model = _language_model(model)
+    if not uses_bidirectional_visual_attention(language_model):
         return
     text_model = getattr(language_model, "model", language_model)
     if getattr(text_model, "_mlx_engine_suffix_visual_mask_patch", False):

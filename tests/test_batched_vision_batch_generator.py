@@ -145,6 +145,13 @@ def _gemma4_model():
     return model
 
 
+def _gemma4_non_bidir_model():
+    model = _FakeModel()
+    model.model_type = "gemma4"
+    model.config = SimpleNamespace(use_bidirectional_attention=None)
+    return model
+
+
 def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
     """Processors are per-row, and sampled token metadata follows decode-ahead."""
     model = _FakeModel()
@@ -492,7 +499,7 @@ def test_batch_generator_uses_image_spans_without_gemma4_token_types(monkeypatch
 def test_batch_generator_pads_gemma4_token_types_after_restore(monkeypatch):
     """A new-image suffix can build masks against restored cached prefix keys."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
-    model = _gemma4_unified_model()
+    model = _gemma4_model()
     generator = BatchGenerator(
         model=model,
         stop_criteria=lambda _token: False,
@@ -560,8 +567,8 @@ def test_batch_generator_pads_gemma4_token_types_for_final_prefill(monkeypatch):
     assert model.calls[0]["mm_token_type_ids"] == [[0, 0, 0, 0, 0, 0, 1, 1]]
 
 
-def test_batch_generator_does_not_apply_unified_visual_policy_to_gemma4(monkeypatch):
-    """Non-unified Gemma4 models keep their existing chunking behavior."""
+def test_batch_generator_applies_visual_policy_to_bidir_gemma4(monkeypatch):
+    """Non-unified Gemma4 bidirectional-vision models use visual-prefix prefill."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
@@ -569,6 +576,47 @@ def test_batch_generator_does_not_apply_unified_visual_policy_to_gemma4(monkeypa
         lambda _model: [_FakeBatchCache()],
     )
     model = _gemma4_model()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=4,
+    )
+    prompt = list(range(10))
+    mm_token_type_ids = mx.array(
+        [[0, 0, 0, 0, 0, 1, 1, 1, 0, 0]],
+        dtype=mx.int32,
+    )
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={"mm_token_type_ids": mm_token_type_ids},
+            prefix_cache_chunks=[],
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+        )
+
+        generator.next()
+        generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [8, 2]
+
+
+def test_batch_generator_chunks_non_bidir_gemma4_normally(monkeypatch):
+    """Gemma4 without bidirectional visual attention keeps normal chunking."""
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _gemma4_non_bidir_model()
     generator = BatchGenerator(
         model=model,
         stop_criteria=lambda _token: False,
