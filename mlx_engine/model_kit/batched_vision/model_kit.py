@@ -65,6 +65,7 @@ from mlx_engine.model_kit.batched_vision.vision_feature_memoizer import (
     VisionFeatureMemoizer,
 )
 from mlx_engine.model_kit.patches.gemma4 import (
+    config_uses_bidirectional_visual_attention,
     is_unified_model_type as is_gemma4_unified_model_type,
     patch_loaded_model as patch_loaded_gemma4_model,
 )
@@ -73,12 +74,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_SEQ_NUMS = 4
 
 
-def _requires_global_no_chunked_prefill(model, model_type: str | None) -> bool:
+def _requires_global_no_chunked_prefill(
+    model,
+    model_type: str | None,
+    uses_bidirectional_visual_attention: bool = False,
+) -> bool:
     if not getattr(model, "no_chunked_prefill", False):
         return False
-    # Gemma4 unified visual prompts need a request-local policy because only
-    # visual token blocks require the bidirectional-mask prefill constraint.
-    return not is_gemma4_unified_model_type(model_type)
+    # Gemma4 bidirectional visual prompts need a request-local policy because
+    # only visual token blocks require the bidirectional-mask prefill constraint.
+    return not (
+        uses_bidirectional_visual_attention or is_gemma4_unified_model_type(model_type)
+    )
 
 
 def _restore_splits_gemma4_image_span(
@@ -86,9 +93,13 @@ def _restore_splits_gemma4_image_span(
     model_type: str | None,
     cached_prefix_len: int,
     image_spans,
+    uses_bidirectional_visual_attention: bool = False,
 ) -> bool:
     """Return true when a Gemma4 restore would split an image token span."""
-    if not is_gemma4_unified_model_type(model_type) or cached_prefix_len <= 0:
+    uses_visual_prefill_policy = uses_bidirectional_visual_attention or (
+        is_gemma4_unified_model_type(model_type)
+    )
+    if not uses_visual_prefill_policy or cached_prefix_len <= 0:
         return False
     return any(span.start < cached_prefix_len < span.end for span in image_spans)
 
@@ -142,6 +153,9 @@ class BatchedVisionModelKit:
             model_path, trust_remote_code=trust_remote_code
         )
         self.model_type = self.config.get("model_type")
+        self._uses_gemma4_bidirectional_visual_attention = (
+            config_uses_bidirectional_visual_attention(self.config)
+        )
         self._prompt_cache_store = VlmPromptCacheStore(max_kv_size=max_kv_size)
         self._cache_io_thread = PromptCacheIOThread(
             cache_store=self._prompt_cache_store,
@@ -374,7 +388,11 @@ class BatchedVisionModelKit:
             completion_batch_size=self._max_seq_nums,
             prefill_step_size=(
                 None
-                if _requires_global_no_chunked_prefill(self.model, self.model_type)
+                if _requires_global_no_chunked_prefill(
+                    self.model,
+                    self.model_type,
+                    self._uses_gemma4_bidirectional_visual_attention,
+                )
                 else self.prefill_step_size
             ),
         )
@@ -412,6 +430,9 @@ class BatchedVisionModelKit:
             model_type=self.model_type,
             cached_prefix_len=restored.cached_prefix_len,
             image_spans=prepared_prompt.image_spans,
+            uses_bidirectional_visual_attention=(
+                self._uses_gemma4_bidirectional_visual_attention
+            ),
         ):
             restored = None
 
@@ -444,7 +465,11 @@ class BatchedVisionModelKit:
             )
             inputs_embeds = prompt_kwargs.pop("inputs_embeds")
 
-        if _requires_global_no_chunked_prefill(self.model, self.model_type):
+        if _requires_global_no_chunked_prefill(
+            self.model,
+            self.model_type,
+            self._uses_gemma4_bidirectional_visual_attention,
+        ):
             # One-shot prefill skips exact intermediate prompt boundaries.
             prompt_progress_for_cache_chunks = prompt_token_count
         else:
