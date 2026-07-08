@@ -3,6 +3,11 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+import llguidance
+import llguidance.hf
+import llguidance.mlx
+import llguidance.numpy
+
 import mlx.core as mx
 
 from mlx_engine.tool_protocols import (
@@ -71,14 +76,10 @@ class _Gemma4LLGuidanceToolGrammar:
     def _ensure_ready(self) -> None:
         if self._llg_tokenizer is not None:
             return
-        import llguidance.numpy
-
         self._llg_tokenizer = _get_llguidance_tokenizer(self._tokenizer)
         self._bitmask = llguidance.numpy.allocate_token_bitmask(1, self._vocab_size)
 
     def start_matcher(self) -> Any:
-        import llguidance
-
         self._ensure_ready()
         return llguidance.LLMatcher(self._llg_tokenizer, self._grammar)
 
@@ -89,9 +90,6 @@ class _Gemma4LLGuidanceToolGrammar:
         return matcher.is_stopped()
 
     def mask_logits(self, matcher: Any, logits: mx.array) -> mx.array:
-        import llguidance.mlx
-        import llguidance.numpy
-
         llguidance.numpy.fill_next_token_bitmask(matcher, self._bitmask, 0)
         return llguidance.mlx.apply_token_bitmask(logits, self._bitmask)
 
@@ -321,8 +319,6 @@ WS: /[ \t\n\r]*/
 
 
 def _get_llguidance_tokenizer(tokenizer: Any) -> Any:
-    import llguidance.hf
-
     hf_tokenizer = tokenizer._tokenizer
     cache_key = id(hf_tokenizer)
     llg_tokenizer = _LLG_TOKENIZER_CACHE.get(cache_key)
