@@ -733,11 +733,6 @@ def _batched_generation(
                     tokenizer=model_kit.tokenizer,
                     context=gemma4_tool_context,
                 )
-                logger.info(
-                    "[mlx-engine] tool runtime: protocol=gemma4 tools=%d "
-                    "mode=reasoning_guard+structure",
-                    len(gemma4_tool_context.tool_names),
-                )
                 logits_processors.append(gemma4_reasoning_guard)
 
         stream = model_kit.generate(

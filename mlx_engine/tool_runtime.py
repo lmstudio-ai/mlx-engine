@@ -176,8 +176,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
     def _process_last_token_mx(self, token_id: mx.array, logits: mx.array) -> mx.array:
         # Keep normal decode token handling in MLX: last_token.tolist() calls
         # eval()/wait and can create a per-token graph break. We only sync the
-        # sampled token while an llguidance tool grammar is active, where slower
-        # decoding is acceptable.
+        # sampled token while an llguidance tool grammar is active.
         reasoning_start = (
             self._previous_token_mx == self._reasoning_start_first_token_id
         ) & (token_id == self._reasoning_start_second_token_id)
@@ -197,10 +196,8 @@ class Gemma4ReasoningGuardLogitsProcessor:
 
     def _mask_if_needed_mx(self, logits: mx.array, token_id: mx.array) -> mx.array:
         logits = self._mask_tool_structure_mx(logits, token_id)
-        # vLLM treats <|tool_call> as an implicit Gemma4 reasoning end, but
-        # Electron currently suppresses tool parsing for reasoning fragments.
-        # This stricter mask forces the model to sample the real <channel|>
-        # close first, avoiding synthetic markers or an Electron parser change.
+        # Keep <|tool_call> blocked while visible reasoning is open. This forces
+        # the model to sample the real <channel|> close before starting a tool call.
         logits[:, self._tool_call_start_token_id] = mx.where(
             self._reasoning_open_mx,
             -float("inf"),
@@ -213,11 +210,9 @@ class Gemma4ReasoningGuardLogitsProcessor:
         logits: mx.array,
         token_id: mx.array,
     ) -> mx.array:
-        # KISS structural scope: once <|tool_call> is emitted, llguidance
-        # enforces one native Gemma4 call:
+        # Once <|tool_call> is emitted, llguidance enforces one native Gemma4 call:
         #   call:KNOWN_TOOL{...}<tool_call|>
-        # We still keep the cheap Python wrapper for lazy activation and the
-        # post-tool state that allows only EOS/whitespace/another adjacent call.
+        # The post-tool state allows only EOS/whitespace/another adjacent call.
         if self._tool_state == self._STATE_NORMAL:
             return _force_token_ids_mx(
                 logits,
@@ -254,10 +249,8 @@ class Gemma4ReasoningGuardLogitsProcessor:
 
     def _mask_if_needed(self, logits: Any) -> Any:
         if self._reasoning_open:
-            # vLLM treats <|tool_call> as an implicit Gemma4 reasoning end, but
-            # Electron currently suppresses tool parsing for reasoning fragments.
-            # This stricter mask forces the model to sample the real <channel|>
-            # close first, avoiding synthetic markers or an Electron parser change.
+            # Keep <|tool_call> blocked while visible reasoning is open. This forces
+            # the model to sample the real <channel|> close before starting a tool call.
             logits[:, self._tool_call_start_token_id] = -float("inf")
         return logits
 
