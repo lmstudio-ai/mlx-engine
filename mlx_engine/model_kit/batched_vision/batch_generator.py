@@ -235,8 +235,10 @@ def _apply_logits_processors(
             elif last_tokens is not None and isinstance(
                 processor, Gemma4ReasoningGuardLogitsProcessor
             ):
-                sample_logits = processor.process_last_token(
-                    last_tokens[i : i + 1], sample_logits
+                # Pass materialized history separately so Gemma4 structure
+                # tracking avoids last_tokens.tolist() on the decode path.
+                sample_logits = processor.process_last_token_with_context(
+                    tokens[i], last_tokens[i : i + 1], sample_logits
                 )
             else:
                 if last_tokens is not None and not appended_last_token:

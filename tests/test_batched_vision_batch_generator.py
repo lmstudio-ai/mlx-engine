@@ -204,12 +204,21 @@ def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
         reasoning_start_token_ids=(1, 2),
         reasoning_end_token_ids=(3,),
         tool_call_start_token_id=5,
+        tool_call_end_token_id=6,
+        call_prefix_token_ids=(7, 8),
+        tool_name_token_ids=((9,),),
+        open_brace_token_id=10,
+        close_brace_token_id=11,
+        string_delimiter_token_id=12,
+        eos_token_ids=(0,),
+        whitespace_token_ids=(13,),
+        vocab_size=16,
     )
-    processor([1], mx.zeros((1, 8), dtype=mx.float32))
+    processor([1], mx.zeros((1, 16), dtype=mx.float32))
     token_context = [[100]]
 
     logits = batcher._apply_logits_processors(
-        mx.zeros((1, 8), dtype=mx.float32),
+        mx.zeros((1, 16), dtype=mx.float32),
         token_context,
         [[processor]],
         last_tokens=mx.array([2], dtype=mx.int32),

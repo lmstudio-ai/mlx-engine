@@ -738,7 +738,7 @@ def _batched_generation(
                 if gemma4_reasoning_guard is not None:
                     logger.info(
                         "[mlx-engine] tool runtime: protocol=gemma4 tools=%d "
-                        "mode=reasoning_guard",
+                        "mode=reasoning_guard+structure",
                         len(gemma4_tool_context.tool_names),
                     )
                     logits_processors.append(gemma4_reasoning_guard)
