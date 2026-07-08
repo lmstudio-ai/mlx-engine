@@ -10,12 +10,12 @@ from mlx_engine.tool_runtime import create_gemma4_reasoning_guard_logits_process
 class _Tokenizer:
     def __init__(self, tool_call_start_tokens=(4,)):
         self.decode_count = 0
-        self.think_start_tokens = (1,)
+        self.think_start_tokens = (1, 2)
         self.think_end_tokens = (3,)
         self.tool_call_start_tokens = tool_call_start_tokens
         self.text_by_token_id = {
-            1: GEMMA4_REASONING_START,
-            2: "\nNeed data.",
+            1: "<|channel>",
+            2: "thought",
             3: GEMMA4_CHANNEL_END,
             4: GEMMA4_TOOL_CALL_START,
             5: "ignored",
@@ -77,6 +77,7 @@ def test_gemma4_reasoning_guard_tracks_generated_reasoning_markers():
     assert processor is not None
     processor([5], logits)
     processor.process_last_token([1], logits)
+    processor.process_last_token([2], logits)
 
     assert logits.values[0][4] == -float("inf")
 
@@ -109,6 +110,7 @@ def test_gemma4_reasoning_guard_does_not_decode_during_generation():
     processor([1, 2], logits)
     processor.process_last_token([3], logits)
     processor.process_last_token([1], logits)
+    processor.process_last_token([2], logits)
 
     assert tokenizer.decode_count == decode_count_after_setup
 

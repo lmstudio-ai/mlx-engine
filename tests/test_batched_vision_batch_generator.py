@@ -201,10 +201,11 @@ def test_int_last_token_processor_uses_full_context_call():
 def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
     processor = Gemma4ReasoningGuardLogitsProcessor(
         reasoning_open=False,
-        reasoning_start_token_ids=(2,),
+        reasoning_start_token_ids=(1, 2),
         reasoning_end_token_ids=(3,),
         tool_call_start_token_id=5,
     )
+    processor([1], mx.zeros((1, 8), dtype=mx.float32))
     token_context = [[100]]
 
     logits = batcher._apply_logits_processors(

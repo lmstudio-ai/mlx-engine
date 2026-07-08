@@ -57,16 +57,11 @@ class Gemma4ReasoningGuardLogitsProcessor:
         self._reasoning_open = reasoning_open
         self._reasoning_open_mx = mx.array(reasoning_open)
         self._reasoning_start_token_ids = reasoning_start_token_ids
-        self._reasoning_start_prefix_token_id = (
-            reasoning_start_token_ids[0]
-            if len(reasoning_start_token_ids) == 2
-            else None
-        )
-        self._reasoning_start_token_id = reasoning_start_token_ids[-1]
+        self._reasoning_start_first_token_id = reasoning_start_token_ids[0]
+        self._reasoning_start_second_token_id = reasoning_start_token_ids[1]
         self._reasoning_end_token_ids = reasoning_end_token_ids
         self._reasoning_end_token_id = reasoning_end_token_ids[0]
         self._tool_call_start_token_id = tool_call_start_token_id
-        self._tail_token_count = max(len(reasoning_start_token_ids), 1) - 1
         self._tail_tokens: list[int] = []
         self._previous_token_mx: mx.array | None = None
 
@@ -74,7 +69,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
         # VLM calls this once on prompt prefill. Prompt reasoning state already
         # came from decoded prompt text, so keep only enough tail for markers
         # that may finish immediately after prefill.
-        self._tail_tokens = _tail(_token_ids_to_list(tokens), self._tail_token_count)
+        self._tail_tokens = _tail(_token_ids_to_list(tokens), 1)
         self._previous_token_mx = (
             mx.array(self._tail_tokens[-1]) if len(self._tail_tokens) > 0 else None
         )
@@ -91,18 +86,18 @@ class Gemma4ReasoningGuardLogitsProcessor:
                 self._reasoning_open = True
             if _ends_with(token_window, self._reasoning_end_token_ids):
                 self._reasoning_open = False
-            self._tail_tokens = _tail(token_window, self._tail_token_count)
+            self._tail_tokens = _tail(token_window, 1)
         return self._mask_if_needed(logits)
 
     def _process_last_token_mx(self, token_id: mx.array, logits: mx.array) -> mx.array:
-        reasoning_start = token_id == self._reasoning_start_token_id
-        if self._reasoning_start_prefix_token_id is not None:
-            if self._previous_token_mx is None:
-                reasoning_start = mx.array(False)
-            else:
-                reasoning_start = reasoning_start & (
-                    self._previous_token_mx == self._reasoning_start_prefix_token_id
-                )
+        # Keep decode token handling in MLX: last_token.tolist() calls eval()/wait
+        # and can create a per-token graph break.
+        if self._previous_token_mx is None:
+            reasoning_start = mx.array(False)
+        else:
+            reasoning_start = (
+                self._previous_token_mx == self._reasoning_start_first_token_id
+            ) & (token_id == self._reasoning_start_second_token_id)
         reasoning_end = token_id == self._reasoning_end_token_id
         self._reasoning_open_mx = mx.where(
             reasoning_start,
@@ -154,7 +149,7 @@ def create_gemma4_reasoning_guard_logits_processor(
         tool_call_start_token_ids is None
         or len(tool_call_start_token_ids) != 1
         or reasoning_start_token_ids is None
-        or not 1 <= len(reasoning_start_token_ids) <= 2
+        or len(reasoning_start_token_ids) != 2
         or reasoning_end_token_ids is None
         or len(reasoning_end_token_ids) != 1
     ):
