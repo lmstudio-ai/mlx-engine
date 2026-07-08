@@ -87,6 +87,10 @@ class Gemma4ReasoningGuardLogitsProcessor:
 
     def _mask_if_needed(self, logits: Any) -> Any:
         if self._reasoning_open:
+            # vLLM treats <|tool_call> as an implicit Gemma4 reasoning end, but
+            # Electron currently suppresses tool parsing for reasoning fragments.
+            # This stricter mask forces the model to sample the real <channel|>
+            # close first, avoiding synthetic markers or an Electron parser change.
             logits[:, self._tool_call_start_token_id] = -float("inf")
         return logits
 
