@@ -214,7 +214,6 @@ def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
         tool_grammar=_NoopToolGrammar(),
         eos_token_ids=(0,),
         whitespace_token_ids=(13,),
-        vocab_size=16,
     )
     processor([1], mx.zeros((1, 16), dtype=mx.float32))
     token_context = [[100]]

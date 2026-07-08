@@ -42,6 +42,8 @@ class _Tokenizer:
             16: "search",
             17: "\n",
             18: "}}",
+            19: "\t",
+            20: "\r",
         }
         self.token_id_by_text = {
             text: token_id for token_id, text in self.text_by_token_id.items()
@@ -170,7 +172,6 @@ def _processor(tool_names=("get_weather",), reasoning_open=False):
         tool_grammar=_FakeToolGrammar(tool_names),
         eos_token_ids=(0,),
         whitespace_token_ids=(15, 17),
-        vocab_size=24,
     )
     processor([14], mx.zeros((1, 24), dtype=mx.float32))
     return processor
@@ -187,36 +188,36 @@ def test_gemma4_reasoning_guard_masks_tool_call_start_when_prompt_reasoning_open
 
 def test_gemma4_reasoning_guard_tracks_generated_reasoning_markers():
     processor = _processor()
-    logits = _FakeLogits(vocab_size=8)
+    context = _mx_context()
 
-    processor([5], logits)
-    processor.process_last_token([1], logits)
-    processor.process_last_token([2], logits)
+    _process_token(processor, context, 1)
+    logits = _process_token(processor, context, 2)
 
-    assert logits.values[0][4] == -float("inf")
+    assert logits[:, 4].tolist() == [-float("inf")]
 
 
 def test_gemma4_reasoning_guard_allows_tool_call_start_after_channel_end():
     processor = _processor(reasoning_open=True)
-    logits = _FakeLogits(vocab_size=8)
+    context = _mx_context()
 
-    processor([1, 2], logits)
-    logits_after_channel_end = _FakeLogits(vocab_size=8)
-    processor.process_last_token([3], logits_after_channel_end)
+    logits = _process_token(processor, context, 3)
 
-    assert logits_after_channel_end.values[0][4] == 0.0
+    assert logits[:, 4].tolist() == [0.0]
 
 
 def test_gemma4_reasoning_guard_does_not_decode_during_generation():
     tokenizer = _Tokenizer()
-    processor = _processor(reasoning_open=True)
-    logits = _FakeLogits(vocab_size=8)
-
+    processor = create_gemma4_reasoning_guard_logits_processor(
+        tokenizer=tokenizer,
+        context=_context(reasoning_open=True),
+    )
+    assert processor is not None
     decode_count_after_setup = tokenizer.decode_count
-    processor([1, 2], logits)
-    processor.process_last_token([3], logits)
-    processor.process_last_token([1], logits)
-    processor.process_last_token([2], logits)
+    processor([1, 2], mx.zeros((1, 24), dtype=mx.float32))
+    context = [1, 2]
+    _process_token(processor, context, 3)
+    _process_token(processor, context, 1)
+    _process_token(processor, context, 2)
 
     assert tokenizer.decode_count == decode_count_after_setup
 
@@ -225,15 +226,6 @@ def test_gemma4_reasoning_guard_requires_declared_tools():
     processor = create_gemma4_reasoning_guard_logits_processor(
         tokenizer=_Tokenizer(),
         context=_context(tool_names=()),
-    )
-
-    assert processor is None
-
-
-def test_gemma4_reasoning_guard_requires_single_token_tool_call_start():
-    processor = create_gemma4_reasoning_guard_logits_processor(
-        tokenizer=_Tokenizer(tool_call_start_tokens=(4, 5)),
-        context=_context(),
     )
 
     assert processor is None
