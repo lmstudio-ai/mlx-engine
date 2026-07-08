@@ -60,6 +60,14 @@ class _IntLastTokenProcessor:
         return _bump(logits, self.token)
 
 
+class _OptInLastTokenProcessor(_IntLastTokenProcessor):
+    uses_last_token_fast_path = True
+
+    def process_last_token(self, last_token, logits):
+        self.last_token_calls.append(last_token.tolist())
+        return _bump(logits, self.token)
+
+
 class _FakeBatchCache:
     keys = True
 
@@ -194,6 +202,23 @@ def test_int_last_token_processor_uses_full_context_call():
 
     assert processor.calls == [[100, 2]]
     assert processor.last_token_calls == []
+    assert mx.argmax(logits, axis=-1).tolist() == [5]
+
+
+def test_opt_in_last_token_processor_uses_fast_path_without_mutating_context():
+    processor = _OptInLastTokenProcessor(token=5)
+    token_context = [[100]]
+
+    logits = batcher._apply_logits_processors(
+        mx.zeros((1, 8), dtype=mx.float32),
+        token_context,
+        [[processor]],
+        last_tokens=mx.array([2], dtype=mx.int32),
+    )
+
+    assert processor.calls == []
+    assert processor.last_token_calls == [[2]]
+    assert token_context == [[100]]
     assert mx.argmax(logits, axis=-1).tolist() == [5]
 
 

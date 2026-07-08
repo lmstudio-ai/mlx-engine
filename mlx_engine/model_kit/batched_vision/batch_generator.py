@@ -225,8 +225,9 @@ def _apply_logits_processors(
         sample_logits = logits[i : i + 1]
         appended_last_token = False
         for processor in logits_processors[i]:
-            if last_tokens is not None and isinstance(
-                processor, RepetitionPenaltyProcessor
+            if last_tokens is not None and (
+                isinstance(processor, RepetitionPenaltyProcessor)
+                or getattr(processor, "uses_last_token_fast_path", False)
             ):
                 sample_logits = processor.process_last_token(
                     last_tokens[i : i + 1], sample_logits
