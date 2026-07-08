@@ -13,6 +13,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
     build_prefix_cache_chunks,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
+from mlx_engine.tool_runtime import Gemma4ReasoningGuardLogitsProcessor
 
 
 def _argmax_sampler(logprobs):
@@ -58,26 +59,6 @@ class _IntLastTokenProcessor:
     def __call__(self, tokens, logits):
         self.calls.append(tokens.tolist())
         return _bump(logits, self.token)
-
-
-class _OptInLastTokenProcessor(_IntLastTokenProcessor):
-    uses_last_token_fast_path = True
-
-    def process_last_token(self, last_token, logits):
-        self.last_token_calls.append(last_token)
-        return _bump(logits, self.token)
-
-
-class _UnchangedFastPathProcessor:
-    uses_last_token_fast_path = True
-    last_call_changed_logits = False
-
-    def __init__(self):
-        self.calls = []
-
-    def process_last_token(self, last_token, logits):
-        self.calls.append(last_token)
-        return logits
 
 
 class _FakeBatchCache:
@@ -217,8 +198,13 @@ def test_int_last_token_processor_uses_full_context_call():
     assert mx.argmax(logits, axis=-1).tolist() == [5]
 
 
-def test_opt_in_last_token_processor_uses_fast_path_without_mutating_context():
-    processor = _OptInLastTokenProcessor(token=5)
+def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
+    processor = Gemma4ReasoningGuardLogitsProcessor(
+        reasoning_open=False,
+        reasoning_start_token_ids=(2,),
+        reasoning_end_token_ids=(3,),
+        tool_call_start_token_id=5,
+    )
     token_context = [[100]]
 
     logits = batcher._apply_logits_processors(
@@ -228,27 +214,8 @@ def test_opt_in_last_token_processor_uses_fast_path_without_mutating_context():
         last_tokens=mx.array([2], dtype=mx.int32),
     )
 
-    assert processor.calls == []
-    assert processor.last_token_calls == [2]
     assert token_context == [[100]]
-    assert mx.argmax(logits, axis=-1).tolist() == [5]
-
-
-def test_unchanged_fast_path_processor_returns_original_logits():
-    processor = _UnchangedFastPathProcessor()
-    token_context = [[100]]
-    logits = mx.zeros((1, 8), dtype=mx.float32)
-
-    result = batcher._apply_logits_processors(
-        logits,
-        token_context,
-        [[processor]],
-        last_tokens=mx.array([2], dtype=mx.int32),
-    )
-
-    assert processor.calls == [2]
-    assert token_context == [[100]]
-    assert result is logits
+    assert logits[:, 5].tolist() == [-float("inf")]
 
 
 def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():

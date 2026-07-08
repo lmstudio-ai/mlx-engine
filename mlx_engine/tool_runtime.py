@@ -2,6 +2,8 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+import mlx.core as mx
+
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_DECLARATION_END,
     GEMMA4_TOOL_DECLARATION_START,
@@ -44,8 +46,6 @@ def create_gemma4_tool_context_from_prompt(
 class Gemma4ReasoningGuardLogitsProcessor:
     """Block Gemma4 tool-call starts while visible reasoning is still open."""
 
-    uses_last_token_fast_path = True
-
     def __init__(
         self,
         *,
@@ -55,26 +55,36 @@ class Gemma4ReasoningGuardLogitsProcessor:
         tool_call_start_token_id: int,
     ):
         self._reasoning_open = reasoning_open
+        self._reasoning_open_mx = mx.array(reasoning_open)
         self._reasoning_start_token_ids = reasoning_start_token_ids
+        self._reasoning_start_prefix_token_id = (
+            reasoning_start_token_ids[0]
+            if len(reasoning_start_token_ids) == 2
+            else None
+        )
+        self._reasoning_start_token_id = reasoning_start_token_ids[-1]
         self._reasoning_end_token_ids = reasoning_end_token_ids
+        self._reasoning_end_token_id = reasoning_end_token_ids[0]
         self._tool_call_start_token_id = tool_call_start_token_id
-        # Lets the VLM batcher skip logits work while the guard only observes state.
-        self.last_call_changed_logits = False
-        self._tail_token_count = max(
-            len(reasoning_start_token_ids),
-            len(reasoning_end_token_ids),
-            1,
-        ) - 1
+        self._tail_token_count = max(len(reasoning_start_token_ids), 1) - 1
         self._tail_tokens: list[int] = []
+        self._previous_token_mx: mx.array | None = None
 
     def __call__(self, tokens: Any, logits: Any) -> Any:
         # VLM calls this once on prompt prefill. Prompt reasoning state already
         # came from decoded prompt text, so keep only enough tail for markers
         # that may finish immediately after prefill.
         self._tail_tokens = _tail(_token_ids_to_list(tokens), self._tail_token_count)
+        self._previous_token_mx = (
+            mx.array(self._tail_tokens[-1]) if len(self._tail_tokens) > 0 else None
+        )
+        self._reasoning_open_mx = mx.array(self._reasoning_open)
         return self._mask_if_needed(logits)
 
     def process_last_token(self, last_token: Any, logits: Any) -> Any:
+        if isinstance(last_token, mx.array):
+            return self._process_last_token_mx(last_token.reshape(-1)[0], logits)
+
         for token_id in _token_ids_to_list(last_token):
             token_window = self._tail_tokens + [token_id]
             if _ends_with(token_window, self._reasoning_start_token_ids):
@@ -84,8 +94,42 @@ class Gemma4ReasoningGuardLogitsProcessor:
             self._tail_tokens = _tail(token_window, self._tail_token_count)
         return self._mask_if_needed(logits)
 
+    def _process_last_token_mx(self, token_id: mx.array, logits: mx.array) -> mx.array:
+        reasoning_start = token_id == self._reasoning_start_token_id
+        if self._reasoning_start_prefix_token_id is not None:
+            if self._previous_token_mx is None:
+                reasoning_start = mx.array(False)
+            else:
+                reasoning_start = reasoning_start & (
+                    self._previous_token_mx == self._reasoning_start_prefix_token_id
+                )
+        reasoning_end = token_id == self._reasoning_end_token_id
+        self._reasoning_open_mx = mx.where(
+            reasoning_start,
+            mx.array(True),
+            self._reasoning_open_mx,
+        )
+        self._reasoning_open_mx = mx.where(
+            reasoning_end,
+            mx.array(False),
+            self._reasoning_open_mx,
+        )
+        self._previous_token_mx = token_id
+        return self._mask_if_needed_mx(logits)
+
+    def _mask_if_needed_mx(self, logits: mx.array) -> mx.array:
+        # vLLM treats <|tool_call> as an implicit Gemma4 reasoning end, but
+        # Electron currently suppresses tool parsing for reasoning fragments.
+        # This stricter mask forces the model to sample the real <channel|>
+        # close first, avoiding synthetic markers or an Electron parser change.
+        logits[:, self._tool_call_start_token_id] = mx.where(
+            self._reasoning_open_mx,
+            -float("inf"),
+            logits[:, self._tool_call_start_token_id],
+        )
+        return logits
+
     def _mask_if_needed(self, logits: Any) -> Any:
-        self.last_call_changed_logits = self._reasoning_open
         if self._reasoning_open:
             # vLLM treats <|tool_call> as an implicit Gemma4 reasoning end, but
             # Electron currently suppresses tool parsing for reasoning fragments.
@@ -110,7 +154,9 @@ def create_gemma4_reasoning_guard_logits_processor(
         tool_call_start_token_ids is None
         or len(tool_call_start_token_ids) != 1
         or reasoning_start_token_ids is None
+        or not 1 <= len(reasoning_start_token_ids) <= 2
         or reasoning_end_token_ids is None
+        or len(reasoning_end_token_ids) != 1
     ):
         return None
 

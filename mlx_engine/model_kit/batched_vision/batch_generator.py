@@ -38,6 +38,7 @@ from mlx_lm.models.cache import make_prompt_cache
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )
+from mlx_engine.tool_runtime import Gemma4ReasoningGuardLogitsProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -221,9 +222,6 @@ def _apply_logits_processors(
     last_tokens: mx.array | None = None,
 ) -> mx.array:
     processed_logits = []
-    changed_logits = False
-    # Lazily materialize once; per-row MLX slice.tolist() is measurable.
-    last_token_ids = None
     for i in range(logits.shape[0]):
         sample_logits = logits[i : i + 1]
         appended_last_token = False
@@ -234,26 +232,18 @@ def _apply_logits_processors(
                 sample_logits = processor.process_last_token(
                     last_tokens[i : i + 1], sample_logits
                 )
-            elif last_tokens is not None and getattr(
-                processor, "uses_last_token_fast_path", False
+            elif last_tokens is not None and isinstance(
+                processor, Gemma4ReasoningGuardLogitsProcessor
             ):
-                if last_token_ids is None:
-                    last_token_ids = last_tokens.tolist()
                 sample_logits = processor.process_last_token(
-                    last_token_ids[i], sample_logits
+                    last_tokens[i : i + 1], sample_logits
                 )
             else:
                 if last_tokens is not None and not appended_last_token:
                     tokens[i].append(last_tokens[i : i + 1].tolist()[0])
                     appended_last_token = True
                 sample_logits = processor(mx.array(tokens[i]), sample_logits)
-            changed_logits = changed_logits or getattr(
-                processor, "last_call_changed_logits", True
-            )
         processed_logits.append(sample_logits)
-    # State-only processors can watch tokens without forcing a logits rebuild.
-    if not changed_logits:
-        return logits
     return mx.concatenate(processed_logits, axis=0)
 
 
