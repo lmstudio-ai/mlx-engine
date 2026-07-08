@@ -64,8 +64,20 @@ class _OptInLastTokenProcessor(_IntLastTokenProcessor):
     uses_last_token_fast_path = True
 
     def process_last_token(self, last_token, logits):
-        self.last_token_calls.append(last_token.tolist())
+        self.last_token_calls.append(last_token)
         return _bump(logits, self.token)
+
+
+class _UnchangedFastPathProcessor:
+    uses_last_token_fast_path = True
+    last_call_changed_logits = False
+
+    def __init__(self):
+        self.calls = []
+
+    def process_last_token(self, last_token, logits):
+        self.calls.append(last_token)
+        return logits
 
 
 class _FakeBatchCache:
@@ -217,9 +229,26 @@ def test_opt_in_last_token_processor_uses_fast_path_without_mutating_context():
     )
 
     assert processor.calls == []
-    assert processor.last_token_calls == [[2]]
+    assert processor.last_token_calls == [2]
     assert token_context == [[100]]
     assert mx.argmax(logits, axis=-1).tolist() == [5]
+
+
+def test_unchanged_fast_path_processor_returns_original_logits():
+    processor = _UnchangedFastPathProcessor()
+    token_context = [[100]]
+    logits = mx.zeros((1, 8), dtype=mx.float32)
+
+    result = batcher._apply_logits_processors(
+        logits,
+        token_context,
+        [[processor]],
+        last_tokens=mx.array([2], dtype=mx.int32),
+    )
+
+    assert processor.calls == [2]
+    assert token_context == [[100]]
+    assert result is logits
 
 
 def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():

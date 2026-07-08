@@ -58,6 +58,8 @@ class Gemma4ReasoningGuardLogitsProcessor:
         self._reasoning_start_token_ids = reasoning_start_token_ids
         self._reasoning_end_token_ids = reasoning_end_token_ids
         self._tool_call_start_token_id = tool_call_start_token_id
+        # Lets the VLM batcher skip logits work while the guard only observes state.
+        self.last_call_changed_logits = False
         self._tail_token_count = max(
             len(reasoning_start_token_ids),
             len(reasoning_end_token_ids),
@@ -83,6 +85,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
         return self._mask_if_needed(logits)
 
     def _mask_if_needed(self, logits: Any) -> Any:
+        self.last_call_changed_logits = self._reasoning_open
         if self._reasoning_open:
             # vLLM treats <|tool_call> as an implicit Gemma4 reasoning end, but
             # Electron currently suppresses tool parsing for reasoning fragments.
@@ -122,6 +125,8 @@ def create_gemma4_reasoning_guard_logits_processor(
 def _token_ids_to_list(tokens: Any) -> list[int]:
     if hasattr(tokens, "tolist"):
         tokens = tokens.tolist()
+    if isinstance(tokens, int):
+        return [tokens]
     return [int(token_id) for token_id in tokens]
 
 
