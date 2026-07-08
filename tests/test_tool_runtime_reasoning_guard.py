@@ -326,7 +326,7 @@ def test_gemma4_llguidance_grammar_uses_native_special_tokens():
     assert '<|"|>' in grammar
 
 
-def test_gemma4_llguidance_grammar_accepts_electron_parser_edge_cases():
+def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
     import llguidance
     import llguidance.hf
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
