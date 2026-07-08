@@ -76,7 +76,7 @@ def test_gemma4_reasoning_guard_tracks_generated_reasoning_markers():
 
     assert processor is not None
     processor([5], logits)
-    processor.process_last_token(1, logits)
+    processor.process_last_token([1], logits)
 
     assert logits.values[0][4] == -float("inf")
 
@@ -91,7 +91,7 @@ def test_gemma4_reasoning_guard_allows_tool_call_start_after_channel_end():
     assert processor is not None
     processor([1, 2], logits)
     logits_after_channel_end = _FakeLogits(vocab_size=8)
-    processor.process_last_token(3, logits_after_channel_end)
+    processor.process_last_token([3], logits_after_channel_end)
 
     assert logits_after_channel_end.values[0][4] == 0.0
 
@@ -107,8 +107,8 @@ def test_gemma4_reasoning_guard_does_not_decode_during_generation():
     assert processor is not None
     decode_count_after_setup = tokenizer.decode_count
     processor([1, 2], logits)
-    processor.process_last_token(3, logits)
-    processor.process_last_token(1, logits)
+    processor.process_last_token([3], logits)
+    processor.process_last_token([1], logits)
 
     assert tokenizer.decode_count == decode_count_after_setup
 

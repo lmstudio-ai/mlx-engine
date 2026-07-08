@@ -3,9 +3,6 @@ from collections.abc import Iterable
 from typing import Any
 
 from mlx_engine.tool_protocols import (
-    GEMMA4_CHANNEL_END,
-    GEMMA4_REASONING_START,
-    GEMMA4_TOOL_CALL_START,
     GEMMA4_TOOL_DECLARATION_END,
     GEMMA4_TOOL_DECLARATION_START,
     Gemma4ToolContext,
@@ -103,21 +100,9 @@ def create_gemma4_reasoning_guard_logits_processor(
     if len(context.tool_names) == 0:
         return None
 
-    tool_call_start_token_ids = _token_sequence(
-        tokenizer,
-        attr_name="tool_call_start_tokens",
-        text=GEMMA4_TOOL_CALL_START,
-    )
-    reasoning_start_token_ids = _token_sequence(
-        tokenizer,
-        attr_name="think_start_tokens",
-        text=GEMMA4_REASONING_START,
-    )
-    reasoning_end_token_ids = _token_sequence(
-        tokenizer,
-        attr_name="think_end_tokens",
-        text=GEMMA4_CHANNEL_END,
-    )
+    tool_call_start_token_ids = tokenizer.tool_call_start_tokens
+    reasoning_start_token_ids = tokenizer.think_start_tokens
+    reasoning_end_token_ids = tokenizer.think_end_tokens
     if (
         tool_call_start_token_ids is None
         or len(tool_call_start_token_ids) != 1
@@ -134,30 +119,10 @@ def create_gemma4_reasoning_guard_logits_processor(
     )
 
 
-def _token_sequence(
-    tokenizer: Any,
-    *,
-    attr_name: str,
-    text: str,
-) -> tuple[int, ...] | None:
-    token_ids = getattr(tokenizer, attr_name, None)
-    if token_ids is None and hasattr(tokenizer, "encode"):
-        token_ids = tokenizer.encode(text, add_special_tokens=False)
-    if isinstance(token_ids, int):
-        return (token_ids,)
-    if isinstance(token_ids, (list, tuple)) and len(token_ids) > 0:
-        return tuple(int(token_id) for token_id in token_ids)
-    return None
-
-
 def _token_ids_to_list(tokens: Any) -> list[int]:
     if hasattr(tokens, "tolist"):
         tokens = tokens.tolist()
-    if isinstance(tokens, int):
-        return [tokens]
-    if isinstance(tokens, (list, tuple)):
-        return [int(token_id) for token_id in tokens]
-    return [int(tokens)]
+    return [int(token_id) for token_id in tokens]
 
 
 def _tail(token_ids: list[int], count: int) -> list[int]:
@@ -167,4 +132,4 @@ def _tail(token_ids: list[int], count: int) -> list[int]:
 
 
 def _ends_with(token_ids: list[int], suffix: tuple[int, ...]) -> bool:
-    return len(token_ids) >= len(suffix) and tuple(token_ids[-len(suffix) :]) == suffix
+    return token_ids[-len(suffix) :] == list(suffix)
