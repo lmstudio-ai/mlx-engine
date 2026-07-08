@@ -61,6 +61,13 @@ class _IntLastTokenProcessor:
         return _bump(logits, self.token)
 
 
+class _NoopToolGrammar:
+    initial_token_ids = (7,)
+
+    def start_matcher(self):
+        raise AssertionError("tool grammar should not activate in this test")
+
+
 class _FakeBatchCache:
     keys = True
 
@@ -204,12 +211,7 @@ def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
         reasoning_start_token_ids=(1, 2),
         reasoning_end_token_ids=(3,),
         tool_call_start_token_id=5,
-        tool_call_end_token_id=6,
-        call_prefix_token_ids=(7, 8),
-        tool_name_token_ids=((9,),),
-        open_brace_token_id=10,
-        close_brace_token_id=11,
-        string_delimiter_token_id=12,
+        tool_grammar=_NoopToolGrammar(),
         eos_token_ids=(0,),
         whitespace_token_ids=(13,),
         vocab_size=16,

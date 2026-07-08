@@ -6,7 +6,11 @@ from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_CALL_START,
     Gemma4ToolContext,
 )
-from mlx_engine.tool_runtime import create_gemma4_reasoning_guard_logits_processor
+from mlx_engine.tool_runtime import (
+    Gemma4ReasoningGuardLogitsProcessor,
+    _gemma4_llguidance_grammar,
+    create_gemma4_reasoning_guard_logits_processor,
+)
 
 
 class _Tokenizer:
@@ -85,31 +89,106 @@ class _FakeLogits:
             row[token_id] = value
 
 
+class _FakeToolGrammar:
+    initial_token_ids = (6,)
+
+    def __init__(self, tool_names=("get_weather",)):
+        name_tokens = {
+            "get_weather": (8, 9, 10),
+            "search": (16,),
+        }
+        self._headers = [
+            (6, 7, *name_tokens[tool_name], 11) for tool_name in tool_names
+        ]
+
+    def start_matcher(self):
+        return {
+            "state": "header",
+            "pos": 0,
+            "headers": self._headers,
+            "depth": 0,
+            "in_string": False,
+        }
+
+    def consume_token(self, matcher, token_id: int) -> bool:
+        if matcher["state"] == "header":
+            pos = matcher["pos"]
+            headers = [header for header in matcher["headers"] if header[pos] == token_id]
+            if not headers:
+                raise ValueError(f"unexpected header token {token_id}")
+            matcher["headers"] = headers
+            matcher["pos"] = pos + 1
+            if any(matcher["pos"] == len(header) for header in headers):
+                matcher["state"] = "args"
+                matcher["depth"] = 1
+            return False
+
+        if matcher["state"] == "args":
+            if token_id == 13:
+                matcher["in_string"] = not matcher["in_string"]
+                return False
+            if matcher["in_string"]:
+                return False
+            if token_id == 11:
+                matcher["depth"] += 1
+            elif token_id == 12:
+                matcher["depth"] -= 1
+                if matcher["depth"] == 0:
+                    matcher["state"] = "need_end"
+            return False
+
+        if matcher["state"] == "need_end":
+            if token_id != 5:
+                raise ValueError(f"expected tool-call end, got {token_id}")
+            matcher["state"] = "post"
+            return True
+
+        raise ValueError(f"unexpected token after complete tool call {token_id}")
+
+    def mask_logits(self, matcher, logits):
+        if matcher["state"] == "header":
+            pos = matcher["pos"]
+            allowed = sorted({header[pos] for header in matcher["headers"]})
+            logits[:, allowed] = 1e9
+        elif matcher["state"] == "args":
+            logits[:, [0, 4, 5]] = -float("inf")
+        elif matcher["state"] == "need_end":
+            logits[:, [5]] = 1e9
+        return logits
+
+
 def _context(tool_names=("get_weather",), reasoning_open=False):
     return Gemma4ToolContext(tool_names=tool_names, reasoning_open=reasoning_open)
 
 
-def test_gemma4_reasoning_guard_masks_tool_call_start_when_prompt_reasoning_open():
-    processor = create_gemma4_reasoning_guard_logits_processor(
-        tokenizer=_Tokenizer(),
-        context=_context(reasoning_open=True),
+def _processor(tool_names=("get_weather",), reasoning_open=False):
+    processor = Gemma4ReasoningGuardLogitsProcessor(
+        reasoning_open=reasoning_open,
+        reasoning_start_token_ids=(1, 2),
+        reasoning_end_token_ids=(3,),
+        tool_call_start_token_id=4,
+        tool_grammar=_FakeToolGrammar(tool_names),
+        eos_token_ids=(0,),
+        whitespace_token_ids=(15, 17),
+        vocab_size=24,
     )
+    processor([14], mx.zeros((1, 24), dtype=mx.float32))
+    return processor
+
+
+def test_gemma4_reasoning_guard_masks_tool_call_start_when_prompt_reasoning_open():
+    processor = _processor(reasoning_open=True)
     logits = _FakeLogits(vocab_size=8)
 
-    assert processor is not None
     assert processor([1, 2], logits) is logits
 
     assert logits.values[0][4] == -float("inf")
 
 
 def test_gemma4_reasoning_guard_tracks_generated_reasoning_markers():
-    processor = create_gemma4_reasoning_guard_logits_processor(
-        tokenizer=_Tokenizer(),
-        context=_context(),
-    )
+    processor = _processor()
     logits = _FakeLogits(vocab_size=8)
 
-    assert processor is not None
     processor([5], logits)
     processor.process_last_token([1], logits)
     processor.process_last_token([2], logits)
@@ -118,13 +197,9 @@ def test_gemma4_reasoning_guard_tracks_generated_reasoning_markers():
 
 
 def test_gemma4_reasoning_guard_allows_tool_call_start_after_channel_end():
-    processor = create_gemma4_reasoning_guard_logits_processor(
-        tokenizer=_Tokenizer(),
-        context=_context(reasoning_open=True),
-    )
+    processor = _processor(reasoning_open=True)
     logits = _FakeLogits(vocab_size=8)
 
-    assert processor is not None
     processor([1, 2], logits)
     logits_after_channel_end = _FakeLogits(vocab_size=8)
     processor.process_last_token([3], logits_after_channel_end)
@@ -134,13 +209,9 @@ def test_gemma4_reasoning_guard_allows_tool_call_start_after_channel_end():
 
 def test_gemma4_reasoning_guard_does_not_decode_during_generation():
     tokenizer = _Tokenizer()
-    processor = create_gemma4_reasoning_guard_logits_processor(
-        tokenizer=tokenizer,
-        context=_context(reasoning_open=True),
-    )
+    processor = _processor(reasoning_open=True)
     logits = _FakeLogits(vocab_size=8)
 
-    assert processor is not None
     decode_count_after_setup = tokenizer.decode_count
     processor([1, 2], logits)
     processor.process_last_token([3], logits)
@@ -166,17 +237,6 @@ def test_gemma4_reasoning_guard_requires_single_token_tool_call_start():
     )
 
     assert processor is None
-
-
-
-def _mx_processor(tool_names=("get_weather",)):
-    processor = create_gemma4_reasoning_guard_logits_processor(
-        tokenizer=_Tokenizer(),
-        context=_context(tool_names=tool_names),
-    )
-    assert processor is not None
-    processor([14], mx.zeros((1, 24), dtype=mx.float32))
-    return processor
 
 
 def _mx_context():
@@ -206,8 +266,7 @@ def _forced_token_ids(logits):
 
 
 def test_gemma4_structure_constrains_header_after_tool_call_start():
-    processor = _mx_processor()
-
+    processor = _processor()
     context = _mx_context()
 
     logits = _process_token(processor, context, 4)
@@ -230,7 +289,7 @@ def test_gemma4_structure_constrains_header_after_tool_call_start():
 
 
 def test_gemma4_structure_allows_only_known_tool_name_prefixes():
-    processor = _mx_processor(tool_names=("get_weather", "search"))
+    processor = _processor(tool_names=("get_weather", "search"))
     context = _mx_context()
     _process_token(processor, context, 4)
     _process_token(processor, context, 6)
@@ -241,7 +300,7 @@ def test_gemma4_structure_allows_only_known_tool_name_prefixes():
 
 
 def test_gemma4_structure_balances_args_and_requires_tool_end_marker():
-    processor = _mx_processor()
+    processor = _processor()
     context = _mx_context()
     for token_id in [4, 6, 7, 8, 9, 10]:
         _process_token(processor, context, token_id)
@@ -261,7 +320,7 @@ def test_gemma4_structure_balances_args_and_requires_tool_end_marker():
 
 
 def test_gemma4_structure_ignores_braces_inside_gemma_strings():
-    processor = _mx_processor()
+    processor = _processor()
     context = _mx_context()
     for token_id in [4, 6, 7, 8, 9, 10, 11]:
         _process_token(processor, context, token_id)
@@ -274,3 +333,12 @@ def test_gemma4_structure_ignores_braces_inside_gemma_strings():
     _process_token(processor, context, 13)
     logits = _process_token(processor, context, 12)
     assert _forced_token_ids(logits) == [5]
+
+
+def test_gemma4_llguidance_grammar_uses_native_special_tokens():
+    grammar = _gemma4_llguidance_grammar(("get_weather", "search-tool"))
+
+    assert '"get_weather"' in grammar
+    assert '"search-tool"' in grammar
+    assert "<tool_call|>" in grammar
+    assert '<|"|>' in grammar
