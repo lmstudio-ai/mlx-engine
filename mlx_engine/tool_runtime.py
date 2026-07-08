@@ -1,6 +1,5 @@
 import json
 import re
-from collections.abc import Iterable
 from typing import Any
 
 import llguidance
@@ -28,8 +27,8 @@ _GEMMA4_TOOL_NAME_RE = re.compile(
 )
 _GEMMA4_CALL_PREFIX = "call:"
 _GEMMA4_WHITESPACE = (" ", "\n", "\t", "\r")
-# Keep normal generation cheap: for small structural states, boost allowed
-# tokens instead of applying a full-vocabulary mask every decode step.
+# For tiny forced-token states, update only the allowed token ids instead of
+# adding an unnecessary full-vocabulary mask.
 _FORCED_TOOL_LOGIT = 1e9
 _LLG_TOKENIZER_CACHE: dict[int, Any] = {}
 
@@ -37,14 +36,14 @@ _LLG_TOKENIZER_CACHE: dict[int, Any] = {}
 def create_gemma4_tool_context_from_prompt(
     *,
     tokenizer: Any,
-    prompt_tokens: Iterable[int],
+    prompt_tokens: list[int],
     model_type: str | None,
 ) -> Gemma4ToolContext | None:
     """Return Gemma4 tool context only when the rendered prompt declares tools."""
     if not str(model_type or "").startswith("gemma4"):
         return None
 
-    prompt_text = tokenizer.decode(list(prompt_tokens))
+    prompt_text = tokenizer.decode(prompt_tokens)
     tool_names = tuple(dict.fromkeys(_GEMMA4_TOOL_NAME_RE.findall(prompt_text)))
     if len(tool_names) == 0:
         return None
@@ -133,7 +132,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
         # VLM calls this once on prompt prefill. Prompt reasoning state already
         # came from decoded prompt text. Historical prompt tool calls are
         # ignored; the structural grammar starts on generated <|tool_call> only.
-        token_ids = _token_ids_to_list(tokens)
+        token_ids = tokens.tolist()
         self._previous_token_mx = mx.array(token_ids[-1])
         self._reasoning_open_mx = mx.array(self._reasoning_open)
         self._context_token_count = len(token_ids)
@@ -159,17 +158,14 @@ class Gemma4ReasoningGuardLogitsProcessor:
 
     def _process_tool_context_tokens(self, token_context: list[int]) -> None:
         for token_id in token_context[self._context_token_count :]:
-            self._process_tool_context_token(int(token_id))
+            self._process_tool_context_token(token_id)
         self._context_token_count = len(token_context)
 
     def _process_tool_context_token(self, token_id: int) -> None:
-        if self._tool_state in (self._STATE_NORMAL, self._STATE_POST_TOOL):
-            if token_id == self._tool_call_start_token_id:
-                self._start_tool_call()
-            return
-
         if self._tool_state == self._STATE_TOOL:
             self._consume_tool_token(token_id)
+        elif token_id == self._tool_call_start_token_id:
+            self._start_tool_call()
 
     def _consume_tool_token(self, token_id: int) -> None:
         complete = self._tool_grammar.consume_token(self._tool_matcher, token_id)
@@ -230,7 +226,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
             )
 
         if self._tool_state == self._STATE_TOOL:
-            self._consume_tool_token(_mx_scalar_to_int(token_id))
+            self._consume_tool_token(int(token_id.item()))
             # The consumed sampled token will be appended to token_context after
             # this step. Skip it there so llguidance does not see it twice.
             self._context_token_count += 1
@@ -270,26 +266,19 @@ def create_gemma4_reasoning_guard_logits_processor(
     *,
     tokenizer: Any,
     context: Gemma4ToolContext,
-) -> Gemma4ReasoningGuardLogitsProcessor | None:
-    if len(context.tool_names) == 0:
-        return None
-
+) -> Gemma4ReasoningGuardLogitsProcessor:
     tool_call_start_token_id = tokenizer.tool_call_start_tokens[0]
-    reasoning_start_token_ids = tokenizer.think_start_tokens
-    reasoning_end_token_ids = tokenizer.think_end_tokens
-    call_prefix_token_ids = _encode_token_ids(tokenizer, _GEMMA4_CALL_PREFIX)
-    vocab_size = int(tokenizer.vocab_size)
     tool_grammar = _Gemma4LLGuidanceToolGrammar(
         tokenizer=tokenizer,
         tool_names=context.tool_names,
-        call_prefix_token_ids=call_prefix_token_ids,
-        vocab_size=vocab_size,
+        call_prefix_token_ids=_encode_token_ids(tokenizer, _GEMMA4_CALL_PREFIX),
+        vocab_size=int(tokenizer.vocab_size),
     )
 
     return Gemma4ReasoningGuardLogitsProcessor(
         reasoning_open=context.reasoning_open,
-        reasoning_start_token_ids=reasoning_start_token_ids,
-        reasoning_end_token_ids=reasoning_end_token_ids,
+        reasoning_start_token_ids=tokenizer.think_start_tokens,
+        reasoning_end_token_ids=tokenizer.think_end_tokens,
         tool_call_start_token_id=tool_call_start_token_id,
         tool_grammar=tool_grammar,
         eos_token_ids=tuple(int(token_id) for token_id in tokenizer.eos_token_ids),
@@ -309,7 +298,7 @@ object: "{{" WS (member (WS "," WS member)*)? WS "}}"
 member: key WS ":" WS value
 key: IDENT | gemma_string
 IDENT: /[A-Za-z_]/ /[A-Za-z0-9_.$\/-]*/
-value: gemma_string | object | array | NUMBER | "true" | "false" | "null" | "None" | "none"
+value: gemma_string | object | array | NUMBER | "true" | "false" | "null"
 array: "[" WS (value (WS "," WS value)*)? WS "]"
 gemma_string: <|"|> STRING_CHAR* <|"|>
 STRING_CHAR: /[^<]/ | "<" /[^|]/
@@ -335,14 +324,13 @@ def _get_llguidance_tokenizer(tokenizer: Any) -> Any:
 def _force_token_ids_mx(
     logits: mx.array,
     condition: mx.array,
-    token_ids: tuple[int, ...] | list[int],
+    token_ids: tuple[int, ...],
 ) -> mx.array:
-    if len(token_ids) == 0:
-        return logits
-    logits[:, list(token_ids)] = mx.where(
+    token_id_list = list(token_ids)
+    logits[:, token_id_list] = mx.where(
         condition,
         _FORCED_TOOL_LOGIT,
-        logits[:, list(token_ids)],
+        logits[:, token_id_list],
     )
     return logits
 
@@ -352,13 +340,3 @@ def _encode_token_ids(tokenizer: Any, text: str) -> tuple[int, ...]:
         int(token_id)
         for token_id in tokenizer.encode(text, add_special_tokens=False)
     )
-
-
-def _mx_scalar_to_int(token_id: mx.array) -> int:
-    return int(token_id.item())
-
-
-def _token_ids_to_list(tokens: Any) -> list[int]:
-    if hasattr(tokens, "tolist"):
-        return [int(token_id) for token_id in tokens.tolist()]
-    return [int(token_id) for token_id in tokens]

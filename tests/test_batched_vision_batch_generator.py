@@ -215,7 +215,7 @@ def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
         eos_token_ids=(0,),
         whitespace_token_ids=(13,),
     )
-    processor([1], mx.zeros((1, 16), dtype=mx.float32))
+    processor(mx.array([1], dtype=mx.int32), mx.zeros((1, 16), dtype=mx.float32))
     token_context = [[100]]
 
     logits = batcher._apply_logits_processors(

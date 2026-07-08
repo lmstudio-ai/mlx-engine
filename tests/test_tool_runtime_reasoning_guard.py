@@ -173,7 +173,7 @@ def _processor(tool_names=("get_weather",), reasoning_open=False):
         eos_token_ids=(0,),
         whitespace_token_ids=(15, 17),
     )
-    processor([14], mx.zeros((1, 24), dtype=mx.float32))
+    processor(mx.array([14], dtype=mx.int32), mx.zeros((1, 24), dtype=mx.float32))
     return processor
 
 
@@ -181,7 +181,7 @@ def test_gemma4_reasoning_guard_masks_tool_call_start_when_prompt_reasoning_open
     processor = _processor(reasoning_open=True)
     logits = _FakeLogits(vocab_size=8)
 
-    assert processor([1, 2], logits) is logits
+    assert processor(mx.array([1, 2], dtype=mx.int32), logits) is logits
 
     assert logits.values[0][4] == -float("inf")
 
@@ -211,24 +211,14 @@ def test_gemma4_reasoning_guard_does_not_decode_during_generation():
         tokenizer=tokenizer,
         context=_context(reasoning_open=True),
     )
-    assert processor is not None
     decode_count_after_setup = tokenizer.decode_count
-    processor([1, 2], mx.zeros((1, 24), dtype=mx.float32))
+    processor(mx.array([1, 2], dtype=mx.int32), mx.zeros((1, 24), dtype=mx.float32))
     context = [1, 2]
     _process_token(processor, context, 3)
     _process_token(processor, context, 1)
     _process_token(processor, context, 2)
 
     assert tokenizer.decode_count == decode_count_after_setup
-
-
-def test_gemma4_reasoning_guard_requires_declared_tools():
-    processor = create_gemma4_reasoning_guard_logits_processor(
-        tokenizer=_Tokenizer(),
-        context=_context(tool_names=()),
-    )
-
-    assert processor is None
 
 
 def _mx_context():

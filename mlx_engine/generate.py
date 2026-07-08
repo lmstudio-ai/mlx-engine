@@ -729,19 +729,16 @@ def _batched_generation(
                 model_type=model_kit.model_type,
             )
             if gemma4_tool_context is not None:
-                gemma4_reasoning_guard = (
-                    create_gemma4_reasoning_guard_logits_processor(
-                        tokenizer=model_kit.tokenizer,
-                        context=gemma4_tool_context,
-                    )
+                gemma4_reasoning_guard = create_gemma4_reasoning_guard_logits_processor(
+                    tokenizer=model_kit.tokenizer,
+                    context=gemma4_tool_context,
                 )
-                if gemma4_reasoning_guard is not None:
-                    logger.info(
-                        "[mlx-engine] tool runtime: protocol=gemma4 tools=%d "
-                        "mode=reasoning_guard+structure",
-                        len(gemma4_tool_context.tool_names),
-                    )
-                    logits_processors.append(gemma4_reasoning_guard)
+                logger.info(
+                    "[mlx-engine] tool runtime: protocol=gemma4 tools=%d "
+                    "mode=reasoning_guard+structure",
+                    len(gemma4_tool_context.tool_names),
+                )
+                logits_processors.append(gemma4_reasoning_guard)
 
         stream = model_kit.generate(
             prompt_tokens=input_tokens,
