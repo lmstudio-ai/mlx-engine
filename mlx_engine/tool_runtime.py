@@ -61,67 +61,32 @@ class Gemma4ReasoningGuardLogitsProcessor:
         self._reasoning_start_token_ids = reasoning_start_token_ids
         self._reasoning_end_token_ids = reasoning_end_token_ids
         self._tool_call_start_token_id = tool_call_start_token_id
-        self._processed_token_count = 0
-        self._tail_tokens: list[int] = []
         self._tail_token_count = max(
             len(reasoning_start_token_ids),
             len(reasoning_end_token_ids),
             1,
         ) - 1
+        self._tail_tokens: list[int] = []
 
     def __call__(self, tokens: Any, logits: Any) -> Any:
-        self._sync_from_full_history(_token_ids_to_list(tokens))
+        # VLM calls this once on prompt prefill. Prompt reasoning state already
+        # came from decoded prompt text, so keep only enough tail for markers
+        # that may finish immediately after prefill.
+        self._tail_tokens = _tail(_token_ids_to_list(tokens), self._tail_token_count)
         return self._mask_if_needed(logits)
 
     def process_last_token(self, last_token: Any, logits: Any) -> Any:
-        new_token_ids = _token_ids_to_list(last_token)
-        self._process_new_tokens(new_token_ids)
-        self._processed_token_count += len(new_token_ids)
+        for token_id in _token_ids_to_list(last_token):
+            token_window = self._tail_tokens + [token_id]
+            if _ends_with(token_window, self._reasoning_start_token_ids):
+                self._reasoning_open = True
+            if _ends_with(token_window, self._reasoning_end_token_ids):
+                self._reasoning_open = False
+            self._tail_tokens = _tail(token_window, self._tail_token_count)
         return self._mask_if_needed(logits)
 
-    def _sync_from_full_history(self, token_ids: list[int]) -> None:
-        if self._processed_token_count == 0:
-            # First call is the prompt prefill. We already decoded the prompt once
-            # to establish this state, so do not decode or rescan it per token.
-            self._processed_token_count = len(token_ids)
-            self._tail_tokens = self._tail(token_ids)
-            return
-
-        if len(token_ids) < self._processed_token_count:
-            self._reasoning_open = _gemma4_reasoning_is_open_from_token_ids(
-                token_ids,
-                self._reasoning_start_token_ids,
-                self._reasoning_end_token_ids,
-            )
-            self._processed_token_count = len(token_ids)
-            self._tail_tokens = self._tail(token_ids)
-            return
-
-        self._process_new_tokens(token_ids[self._processed_token_count :])
-        self._processed_token_count = len(token_ids)
-
-    def _process_new_tokens(self, new_token_ids: list[int]) -> None:
-        if len(new_token_ids) == 0:
-            return
-        scan_token_ids = self._tail_tokens + new_token_ids
-        self._reasoning_open = _update_gemma4_reasoning_state_from_token_ids(
-            self._reasoning_open,
-            scan_token_ids,
-            self._reasoning_start_token_ids,
-            self._reasoning_end_token_ids,
-        )
-        self._tail_tokens = self._tail(scan_token_ids)
-
-    def _tail(self, token_ids: list[int]) -> list[int]:
-        if self._tail_token_count == 0:
-            return []
-        return token_ids[-self._tail_token_count :]
-
     def _mask_if_needed(self, logits: Any) -> Any:
-        if not self._reasoning_open:
-            return logits
-
-        if 0 <= self._tool_call_start_token_id < logits.shape[-1]:
+        if self._reasoning_open:
             logits[:, self._tool_call_start_token_id] = -float("inf")
         return logits
 
@@ -134,7 +99,11 @@ def create_gemma4_reasoning_guard_logits_processor(
     if len(context.tool_names) == 0:
         return None
 
-    tool_call_start_token_id = _gemma4_tool_call_start_token_id(tokenizer)
+    tool_call_start_token_ids = _token_sequence(
+        tokenizer,
+        attr_name="tool_call_start_tokens",
+        text=GEMMA4_TOOL_CALL_START,
+    )
     reasoning_start_token_ids = _token_sequence(
         tokenizer,
         attr_name="think_start_tokens",
@@ -146,7 +115,8 @@ def create_gemma4_reasoning_guard_logits_processor(
         text=GEMMA4_CHANNEL_END,
     )
     if (
-        tool_call_start_token_id is None
+        tool_call_start_token_ids is None
+        or len(tool_call_start_token_ids) != 1
         or reasoning_start_token_ids is None
         or reasoning_end_token_ids is None
     ):
@@ -156,41 +126,8 @@ def create_gemma4_reasoning_guard_logits_processor(
         reasoning_open=context.reasoning_open,
         reasoning_start_token_ids=reasoning_start_token_ids,
         reasoning_end_token_ids=reasoning_end_token_ids,
-        tool_call_start_token_id=tool_call_start_token_id,
+        tool_call_start_token_id=tool_call_start_token_ids[0],
     )
-
-
-def _token_ids_to_list(tokens: Any) -> list[int]:
-    if hasattr(tokens, "tolist"):
-        tokens = tokens.tolist()
-    if isinstance(tokens, int):
-        return [tokens]
-
-    token_ids = []
-    for token_id in tokens:
-        if isinstance(token_id, (list, tuple)):
-            token_ids.extend(_token_ids_to_list(token_id))
-        else:
-            token_ids.append(int(token_id))
-    return token_ids
-
-
-def _gemma4_tool_call_start_token_id(tokenizer: Any) -> int | None:
-    token_ids = _token_sequence(
-        tokenizer,
-        attr_name="tool_call_start_tokens",
-        text=GEMMA4_TOOL_CALL_START,
-    )
-    if token_ids is None or len(token_ids) != 1:
-        return None
-
-    token_id = token_ids[0]
-    try:
-        if tokenizer.decode([token_id]) != GEMMA4_TOOL_CALL_START:
-            return None
-    except Exception:
-        return None
-    return token_id
 
 
 def _token_sequence(
@@ -202,7 +139,6 @@ def _token_sequence(
     token_ids = getattr(tokenizer, attr_name, None)
     if token_ids is None and hasattr(tokenizer, "encode"):
         token_ids = tokenizer.encode(text, add_special_tokens=False)
-
     if isinstance(token_ids, int):
         return (token_ids,)
     if isinstance(token_ids, (list, tuple)) and len(token_ids) > 0:
@@ -210,37 +146,21 @@ def _token_sequence(
     return None
 
 
-def _gemma4_reasoning_is_open_from_token_ids(
-    token_ids: list[int],
-    reasoning_start_token_ids: tuple[int, ...],
-    reasoning_end_token_ids: tuple[int, ...],
-) -> bool:
-    return _update_gemma4_reasoning_state_from_token_ids(
-        False,
-        token_ids,
-        reasoning_start_token_ids,
-        reasoning_end_token_ids,
-    )
+def _token_ids_to_list(tokens: Any) -> list[int]:
+    if hasattr(tokens, "tolist"):
+        tokens = tokens.tolist()
+    if isinstance(tokens, int):
+        return [tokens]
+    if isinstance(tokens, (list, tuple)):
+        return [int(token_id) for token_id in tokens]
+    return [int(tokens)]
 
 
-def _update_gemma4_reasoning_state_from_token_ids(
-    reasoning_open: bool,
-    token_ids: list[int],
-    reasoning_start_token_ids: tuple[int, ...],
-    reasoning_end_token_ids: tuple[int, ...],
-) -> bool:
-    for token_index in range(len(token_ids)):
-        if _token_sequence_matches(token_ids, token_index, reasoning_start_token_ids):
-            reasoning_open = True
-        if _token_sequence_matches(token_ids, token_index, reasoning_end_token_ids):
-            reasoning_open = False
-    return reasoning_open
+def _tail(token_ids: list[int], count: int) -> list[int]:
+    if count == 0:
+        return []
+    return token_ids[-count:]
 
 
-def _token_sequence_matches(
-    token_ids: list[int],
-    start_index: int,
-    expected: tuple[int, ...],
-) -> bool:
-    end_index = start_index + len(expected)
-    return end_index <= len(token_ids) and tuple(token_ids[start_index:end_index]) == expected
+def _ends_with(token_ids: list[int], suffix: tuple[int, ...]) -> bool:
+    return len(token_ids) >= len(suffix) and tuple(token_ids[-len(suffix) :]) == suffix
