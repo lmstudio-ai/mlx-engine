@@ -291,17 +291,22 @@ def create_gemma4_reasoning_guard_logits_processor(
 
 def _gemma4_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
+    # Regex chars handle normal text; explicit special-token alternatives keep
+    # marker-looking text legal inside Gemma strings until the exact <|"|> delimiter.
     return rf'''%llguidance {{}}
 start: "call:" tool object <tool_call|>
 tool: {tool_choice}
 object: "{{" WS (member (WS "," WS member)*)? WS "}}"
 member: key WS ":" WS value
-key: IDENT | gemma_string
-IDENT: /[A-Za-z_]/ /[A-Za-z0-9_.$\/-]*/
-value: gemma_string | object | array | NUMBER | "true" | "false" | "null"
+key: BARE_KEY | gemma_string
+BARE_KEY: /[A-Za-z0-9_.$\/-]/+
+value: gemma_string | object | array | NUMBER | LITERAL
+LITERAL: "true" | "false" | "null" | "None" | "none"
 array: "[" WS (value (WS "," WS value)*)? WS "]"
-gemma_string: <|"|> STRING_CHAR* <|"|>
-STRING_CHAR: /[^<]/ | "<" /[^|]/
+gemma_string: <|"|> gemma_string_char* <|"|>
+gemma_string_char: STRING_CHAR | gemma_string_special
+STRING_CHAR: /[^<]/ | "<" /[^|]/ | "<|" /[^"]/ | "<|\"" /[^|]/ | "<|\"|" /[^>]/
+gemma_string_special: <|tool> | <tool|> | <|tool_call> | <tool_call|> | <|tool_response> | <tool_response|> | <|channel> | <channel|> | <|turn> | <turn|> | <|think|> | <|image> | <image|> | <|image|> | <|audio> | <audio|> | <|audio|> | <|video|>
 NUMBER: "-"? (/[0-9]/ | /[1-9]/ /[0-9]*/) ("." /[0-9]/+)? (/[eE]/ /[+-]/? /[0-9]/+)?
 WS: /[ \t\n\r]*/
 '''

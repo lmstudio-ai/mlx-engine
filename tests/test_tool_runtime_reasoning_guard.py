@@ -324,3 +324,71 @@ def test_gemma4_llguidance_grammar_uses_native_special_tokens():
     assert '"search-tool"' in grammar
     assert "<tool_call|>" in grammar
     assert '<|"|>' in grammar
+
+
+def test_gemma4_llguidance_grammar_accepts_electron_parser_edge_cases():
+    import llguidance
+    import llguidance.hf
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+    from transformers import PreTrainedTokenizerFast
+
+    special_tokens = [
+        "<eos>",
+        '<|"|>',
+        "<|tool>",
+        "<tool|>",
+        "<|tool_call>",
+        "<tool_call|>",
+        "<|tool_response>",
+        "<tool_response|>",
+        "<|channel>",
+        "<channel|>",
+        "<|turn>",
+        "<turn|>",
+        "<|think|>",
+        "<|image>",
+        "<image|>",
+        "<|image|>",
+        "<|audio>",
+        "<audio|>",
+        "<|audio|>",
+        "<|video|>",
+    ]
+    tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = decoders.ByteLevel()
+    tokenizer.train_from_iterator(
+        [
+            'call:lookup{2fa_code:<|"|>what is <|tool_call>?<|"|>}<tool_call|>',
+            "call:lookup{optional:None}<tool_call|>",
+            "call:lookup{optional:none}<tool_call|>",
+        ],
+        trainers.BpeTrainer(
+            vocab_size=300,
+            special_tokens=["<unk>", *special_tokens],
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        ),
+    )
+    hf_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        unk_token="<unk>",
+        eos_token="<eos>",
+        additional_special_tokens=special_tokens[1:],
+    )
+    llg_tokenizer = llguidance.hf.from_tokenizer(
+        hf_tokenizer,
+        n_vocab=len(hf_tokenizer.get_vocab()),
+        eos_token=[hf_tokenizer.eos_token_id],
+    )
+    grammar = _gemma4_llguidance_grammar(("lookup",))
+
+    for text in [
+        'call:lookup{2fa_code:<|"|>what is <|tool_call>?<|"|>}<tool_call|>',
+        "call:lookup{optional:None}<tool_call|>",
+        "call:lookup{optional:none}<tool_call|>",
+    ]:
+        matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+        for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
+            matcher.consume_token(token_id)
+            assert not matcher.get_error()
+        assert matcher.is_stopped()
