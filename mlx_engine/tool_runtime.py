@@ -212,8 +212,10 @@ class Gemma4ReasoningGuardLogitsProcessor:
         self._previous_token_mx = token_id
 
         if self._tool_state == self._STATE_NORMAL:
-            # If the sampled token was <|tool_call>, force the next token to
-            # start the native `call:` prefix. Otherwise leave logits alone.
+            # Bridge the first token after <|tool_call> without syncing token_id
+            # to Python. Starting llguidance here would require token_id.item()
+            # on every normal decode step; instead, use an MLX condition to force
+            # the native `call:` prefix only when <|tool_call> was sampled.
             logits = _boost_token_ids_mx(
                 logits,
                 token_id == self._tool_call_start_token_id,
