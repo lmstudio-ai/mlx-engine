@@ -64,7 +64,7 @@ class _IntLastTokenProcessor:
 class _NoopToolGrammar:
     initial_token_ids = (7,)
 
-    def start_matcher(self):
+    def start_matcher(self, *_args):
         raise AssertionError("tool grammar should not activate in this test")
 
 

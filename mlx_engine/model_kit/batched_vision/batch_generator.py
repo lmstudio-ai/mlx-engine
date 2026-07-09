@@ -38,7 +38,7 @@ from mlx_lm.models.cache import make_prompt_cache
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )
-from mlx_engine.tool_runtime import Gemma4ReasoningGuardLogitsProcessor
+from mlx_engine.tool_runtime import NativeToolReasoningGuardLogitsProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -233,9 +233,9 @@ def _apply_logits_processors(
                     last_tokens[i : i + 1], sample_logits
                 )
             elif last_tokens is not None and isinstance(
-                processor, Gemma4ReasoningGuardLogitsProcessor
+                processor, NativeToolReasoningGuardLogitsProcessor
             ):
-                # Pass materialized history separately so Gemma4 structure
+                # Pass materialized history separately so native tool-call
                 # tracking avoids last_tokens.tolist() on the decode path.
                 sample_logits = processor.process_last_token_with_context(
                     tokens[i], last_tokens[i : i + 1], sample_logits
