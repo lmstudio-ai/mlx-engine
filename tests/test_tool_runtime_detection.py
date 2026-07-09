@@ -71,6 +71,22 @@ def test_gemma4_context_extracts_colon_namespaced_tool_name():
     assert context.tool_names == ("mcp:search",)
 
 
+def test_gemma4_context_ignores_tool_names_outside_native_grammar():
+    prompt = GEMMA4_TOOL_PROMPT.replace(
+        "declaration:get_weather",
+        "declaration:2fa_lookup",
+    )
+
+    context = create_gemma4_tool_context_from_prompt(
+        tokenizer=_Tokenizer(prompt),
+        prompt_tokens=[1, 2, 3],
+        model_type="gemma4",
+    )
+
+    assert context is not None
+    assert context.tool_names == ("search",)
+
+
 def test_gemma4_context_requires_gemma4_model_type():
     context = create_gemma4_tool_context_from_prompt(
         tokenizer=_Tokenizer(GEMMA4_TOOL_PROMPT),

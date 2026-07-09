@@ -364,10 +364,12 @@ def create_gemma4_reasoning_guard_logits_processor(
         tokenizer=tokenizer,
         grammar=_gemma4_llguidance_grammar(
             context.tool_names,
-            string_special_token_ids=_added_marker_token_ids(
+            string_special_token_ids=_argument_marker_token_ids(
                 tokenizer,
-                excluded_texts=(GEMMA4_STRING_DELIMITER,),
-                excluded_token_ids=tuple(tokenizer.eos_token_ids),
+                excluded_token_ids=(
+                    *tokenizer.eos_token_ids,
+                    *_encode_token_ids(tokenizer, GEMMA4_STRING_DELIMITER),
+                ),
             ),
         ),
         initial_token_ids=(_encode_token_ids(tokenizer, _GEMMA4_CALL_PREFIX)[0],),
@@ -398,12 +400,12 @@ def create_qwen35_reasoning_guard_logits_processor(
         grammar=_qwen35_llguidance_grammar(
             context.tool_names,
             tool_call_end_token_id=tokenizer.tool_call_end_tokens[0],
-            value_special_token_ids=_added_marker_token_ids(
+            value_special_token_ids=_argument_marker_token_ids(
                 tokenizer,
-                excluded_texts=(QWEN35_PARAMETER_END,),
                 excluded_token_ids=(
                     *tokenizer.eos_token_ids,
                     *tokenizer.tool_call_end_tokens,
+                    *_encode_token_ids(tokenizer, QWEN35_PARAMETER_END),
                 ),
             ),
         ),
@@ -434,14 +436,14 @@ def _gemma4_llguidance_grammar(
     # Regex chars handle normal text; explicit special-token alternatives keep
     # marker-looking text legal inside Gemma strings until the exact <|"|> delimiter.
     return rf"""%llguidance {{}}
-start: "call:" tool object <tool_call|>
+start: "call:" tool WS object WS <tool_call|>
 tool: {tool_choice}
 object: "{{" WS (member (WS "," WS member)*)? WS "}}"
 member: key WS ":" WS value
 key: BARE_KEY | gemma_string
-BARE_KEY: /[^:}}]/+
+BARE_KEY: /[A-Za-z0-9_.$\/-]/+
 value: gemma_string | object | array | NUMBER | LITERAL
-LITERAL: "true" | "false" | "null" | "None" | "none" | "nil" | "NULL" | "NIL"
+LITERAL: "true" | "false" | "null" | "None" | "none"
 array: "[" WS (value (WS "," WS value)*)? WS "]"
 gemma_string: <|"|> gemma_string_char* <|"|>
 gemma_string_char: STRING_CHAR | added_marker
@@ -462,7 +464,7 @@ def _qwen35_llguidance_grammar(
     markers = " | ".join(f"<[{token_id}]>" for token_id in value_special_token_ids)
 
     return rf"""%llguidance {{}}
-start: WS "<function=" tool ">" WS parameter* "</function>" WS <[{int(tool_call_end_token_id)}]>
+start: WS "<function=" WS tool ">" WS parameter* "</function>" WS <[{int(tool_call_end_token_id)}]>
 tool: {tool_choice}
 parameter: "<parameter=" PARAM_NAME ">" param_value "</parameter>" WS
 PARAM_NAME: /[^>]/+
@@ -503,20 +505,17 @@ def _qwen35_initial_token_ids(tokenizer: Any) -> tuple[int, ...]:
     return tuple(dict.fromkeys(initial_token_ids))
 
 
-def _added_marker_token_ids(
+def _argument_marker_token_ids(
     tokenizer: Any,
     *,
-    excluded_texts: tuple[str, ...],
     excluded_token_ids: tuple[int, ...],
 ) -> tuple[int, ...]:
-    """Return added marker ids that are safe inside opaque argument text."""
+    """Return added marker ids allowed inside opaque argument text."""
     return tuple(
         sorted(
             int(token_id)
             for token_text, token_id in tokenizer.get_added_vocab().items()
-            if "<" in token_text
-            and token_text not in excluded_texts
-            and int(token_id) not in excluded_token_ids
+            if "<" in token_text and int(token_id) not in excluded_token_ids
         )
     )
 

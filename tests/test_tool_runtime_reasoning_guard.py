@@ -13,7 +13,7 @@ from mlx_engine.tool_runtime import (
     Gemma4ReasoningGuardLogitsProcessor,
     Qwen35ReasoningGuardLogitsProcessor,
     _LLGuidanceToolGrammar,
-    _added_marker_token_ids,
+    _argument_marker_token_ids,
     _gemma4_llguidance_grammar,
     _qwen35_llguidance_grammar,
     _tokenizer_vocab_size,
@@ -488,7 +488,7 @@ def test_gemma4_llguidance_grammar_uses_native_special_tokens():
     assert "<[48]>" in grammar
 
 
-def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
+def test_gemma4_llguidance_grammar_accepts_parser_syntax():
     import llguidance
     import llguidance.hf
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
@@ -522,7 +522,6 @@ def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
     tokenizer.train_from_iterator(
         [
             'call:lookup{2fa_code:<|"|>what is <|tool_call>?<|"|>}<tool_call|>',
-            'call:lookup{user name:<|"|>Alice<|"|>}<tool_call|>',
             "call:lookup{optional:None}<tool_call|>",
         ],
         trainers.BpeTrainer(
@@ -549,18 +548,28 @@ def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
     )
     grammar = _gemma4_llguidance_grammar(
         ("lookup",),
-        string_special_token_ids=_added_marker_token_ids(
+        string_special_token_ids=_argument_marker_token_ids(
             SimpleNamespace(get_added_vocab=hf_tokenizer.get_added_vocab),
-            excluded_texts=('<|"|>',),
-            excluded_token_ids=eos_token_ids,
+            excluded_token_ids=(
+                *eos_token_ids,
+                hf_tokenizer.convert_tokens_to_ids('<|"|>'),
+            ),
         ),
     )
 
     for text in [
-        'call:lookup{2fa_code:<|"|>what is <|tool_call>?<tool_call|><|"|>}<tool_call|>',
-        'call:lookup{user name:<|"|>Alice<|"|>}<tool_call|>',
+        'call:lookup {2fa_code:<|"|>what is <|tool_call>?<tool_call|><|"|>} <tool_call|>',
         "call:lookup{optional:None}<tool_call|>",
         "call:lookup{optional:none}<tool_call|>",
+    ]:
+        matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+        for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
+            matcher.consume_token(token_id)
+            assert not matcher.get_error()
+        assert matcher.is_stopped()
+
+    for text in [
+        'call:lookup{user name:<|"|>Alice<|"|>}<tool_call|>',
         "call:lookup{optional:nil}<tool_call|>",
         "call:lookup{optional:NULL}<tool_call|>",
         "call:lookup{optional:NIL}<tool_call|>",
@@ -568,8 +577,9 @@ def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
         matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
         for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
             matcher.consume_token(token_id)
-            assert not matcher.get_error()
-        assert matcher.is_stopped()
+            if matcher.get_error():
+                break
+        assert matcher.get_error()
 
     for stop_marker in ["<eos>", "<|tool_response>", "<turn|>"]:
         matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
@@ -618,9 +628,8 @@ def _qwen35_hf_tokenizer():
 
 
 def _qwen35_value_special_token_ids(hf_tokenizer):
-    return _added_marker_token_ids(
+    return _argument_marker_token_ids(
         SimpleNamespace(get_added_vocab=hf_tokenizer.get_added_vocab),
-        excluded_texts=("</parameter>",),
         excluded_token_ids=(
             hf_tokenizer.eos_token_id,
             hf_tokenizer.convert_tokens_to_ids("</tool_call>"),
@@ -647,7 +656,7 @@ def test_qwen35_llguidance_grammar_accepts_parser_edge_cases():
 
     for text in [
         "\n<function=lookup>\n<parameter=2fa_code>\n123\n</parameter>\n</function>\n</tool_call>",
-        "<function=lookup></function></tool_call>",
+        "<function=  lookup></function></tool_call>",
         "<function=lookup><parameter=user:id>123</parameter></function></tool_call>",
         "<function=lookup><parameter=display name>Alice</parameter></function></tool_call>",
         "<function=lookup><parameter=query>what is <tool_call>?</parameter></function></tool_call>",
