@@ -390,7 +390,7 @@ def create_qwen35_reasoning_guard_logits_processor(
             context.tool_names,
             tool_call_end_token_id=tokenizer.tool_call_end_tokens[0],
         ),
-        initial_token_ids=_qwen35_initial_token_ids(tokenizer),
+        initial_token_ids=(_encode_token_ids(tokenizer, "\n")[0],),
     )
 
     return Qwen35ReasoningGuardLogitsProcessor(
@@ -464,14 +464,6 @@ def _tokenizer_vocab_size(tokenizer: Any) -> int:
     return max(
         int(tokenizer.vocab_size), max(int(token_id) for token_id in vocab.values()) + 1
     )
-
-
-def _qwen35_initial_token_ids(tokenizer: Any) -> tuple[int, ...]:
-    initial_token_ids = [_encode_token_ids(tokenizer, QWEN35_FUNCTION_START)[0]]
-    initial_token_ids.extend(
-        _encode_token_ids(tokenizer, whitespace)[0] for whitespace in _TOOL_WHITESPACE
-    )
-    return tuple(dict.fromkeys(initial_token_ids))
 
 
 def _boost_token_ids_mx(
