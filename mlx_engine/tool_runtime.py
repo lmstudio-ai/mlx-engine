@@ -242,7 +242,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
         #   call:KNOWN_TOOL{...}<tool_call|>
         # The post-tool state allows only EOS/whitespace/another adjacent call.
         if self._tool_state == self._STATE_NORMAL:
-            return _force_token_ids_mx(
+            return _boost_token_ids_mx(
                 logits,
                 token_id == self._tool_call_start_token_id,
                 self._initial_tool_token_ids,
@@ -254,7 +254,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
             # this step. Skip it there so llguidance does not see it twice.
             self._context_token_count += 1
             if self._tool_state == self._STATE_POST_TOOL:
-                return _force_token_ids_mx(
+                return _boost_token_ids_mx(
                     logits,
                     mx.array(True),
                     self._post_tool_token_ids,
@@ -262,12 +262,12 @@ class Gemma4ReasoningGuardLogitsProcessor:
             return self._tool_grammar.mask_logits(self._tool_matcher, logits)
 
         if self._tool_state == self._STATE_POST_TOOL:
-            logits = _force_token_ids_mx(
+            logits = _boost_token_ids_mx(
                 logits,
                 token_id == self._tool_call_start_token_id,
                 self._initial_tool_token_ids,
             )
-            return _force_token_ids_mx(
+            return _boost_token_ids_mx(
                 logits,
                 token_id != self._tool_call_start_token_id,
                 self._post_tool_token_ids,
@@ -348,7 +348,7 @@ def _get_llguidance_tokenizer(tokenizer: Any) -> Any:
     return llg_tokenizer
 
 
-def _force_token_ids_mx(
+def _boost_token_ids_mx(
     logits: mx.array,
     condition: mx.array,
     token_ids: tuple[int, ...],
