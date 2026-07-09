@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import mlx.core as mx
 
 from mlx_engine.tool_protocols import (
@@ -11,6 +13,7 @@ from mlx_engine.tool_runtime import (
     Gemma4ReasoningGuardLogitsProcessor,
     Qwen35ReasoningGuardLogitsProcessor,
     _LLGuidanceToolGrammar,
+    _added_marker_token_ids,
     _gemma4_llguidance_grammar,
     _qwen35_llguidance_grammar,
     _tokenizer_vocab_size,
@@ -80,6 +83,13 @@ class _Tokenizer:
         if isinstance(token_ids, int):
             token_ids = [token_ids]
         return "".join(self.text_by_token_id[int(token_id)] for token_id in token_ids)
+
+    def get_added_vocab(self):
+        return {
+            text: token_id
+            for text, token_id in self.token_id_by_text.items()
+            if "<" in text
+        }
 
     def get_vocab(self):
         return dict(self.token_id_by_text)
@@ -466,12 +476,16 @@ def test_gemma4_structure_ignores_braces_inside_gemma_strings():
 
 
 def test_gemma4_llguidance_grammar_uses_native_special_tokens():
-    grammar = _gemma4_llguidance_grammar(("get_weather", "search-tool"))
+    grammar = _gemma4_llguidance_grammar(
+        ("get_weather", "search-tool"),
+        string_special_token_ids=(48, 49),
+    )
 
     assert '"get_weather"' in grammar
     assert '"search-tool"' in grammar
     assert "<tool_call|>" in grammar
     assert '<|"|>' in grammar
+    assert "<[48]>" in grammar
 
 
 def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
@@ -508,8 +522,8 @@ def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
     tokenizer.train_from_iterator(
         [
             'call:lookup{2fa_code:<|"|>what is <|tool_call>?<|"|>}<tool_call|>',
+            'call:lookup{user name:<|"|>Alice<|"|>}<tool_call|>',
             "call:lookup{optional:None}<tool_call|>",
-            "call:lookup{optional:none}<tool_call|>",
         ],
         trainers.BpeTrainer(
             vocab_size=300,
@@ -523,23 +537,48 @@ def test_gemma4_llguidance_grammar_accepts_parser_edge_cases():
         eos_token="<eos>",
         additional_special_tokens=special_tokens[1:],
     )
+    eos_token_ids = (
+        hf_tokenizer.eos_token_id,
+        hf_tokenizer.convert_tokens_to_ids("<|tool_response>"),
+        hf_tokenizer.convert_tokens_to_ids("<turn|>"),
+    )
     llg_tokenizer = llguidance.hf.from_tokenizer(
         hf_tokenizer,
         n_vocab=len(hf_tokenizer.get_vocab()),
-        eos_token=[hf_tokenizer.eos_token_id],
+        eos_token=list(eos_token_ids),
     )
-    grammar = _gemma4_llguidance_grammar(("lookup",))
+    grammar = _gemma4_llguidance_grammar(
+        ("lookup",),
+        string_special_token_ids=_added_marker_token_ids(
+            SimpleNamespace(get_added_vocab=hf_tokenizer.get_added_vocab),
+            excluded_texts=('<|"|>',),
+            excluded_token_ids=eos_token_ids,
+        ),
+    )
 
     for text in [
-        'call:lookup{2fa_code:<|"|>what is <|tool_call>?<|"|>}<tool_call|>',
+        'call:lookup{2fa_code:<|"|>what is <|tool_call>?<tool_call|><|"|>}<tool_call|>',
+        'call:lookup{user name:<|"|>Alice<|"|>}<tool_call|>',
         "call:lookup{optional:None}<tool_call|>",
         "call:lookup{optional:none}<tool_call|>",
+        "call:lookup{optional:nil}<tool_call|>",
+        "call:lookup{optional:NULL}<tool_call|>",
+        "call:lookup{optional:NIL}<tool_call|>",
     ]:
         matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
         for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
             matcher.consume_token(token_id)
             assert not matcher.get_error()
         assert matcher.is_stopped()
+
+    for stop_marker in ["<eos>", "<|tool_response>", "<turn|>"]:
+        matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+        text = f'call:lookup{{query:<|"|>before{stop_marker}'
+        for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
+            matcher.consume_token(token_id)
+            if matcher.get_error():
+                break
+        assert matcher.get_error()
 
 
 def _qwen35_hf_tokenizer():
@@ -552,7 +591,7 @@ def _qwen35_hf_tokenizer():
     tokenizer.train_from_iterator(
         [
             "<function=lookup><parameter=query>weather</parameter></function>",
-            "<function=lookup><parameter=html><div>{\"a\":[1,2]}</div></parameter></function>",
+            '<function=lookup><parameter=html><div>{"a":[1,2]}</div></parameter></function>',
         ],
         trainers.BpeTrainer(
             vocab_size=300,
@@ -578,19 +617,23 @@ def _qwen35_hf_tokenizer():
     return hf_tokenizer
 
 
+def _qwen35_value_special_token_ids(hf_tokenizer):
+    return _added_marker_token_ids(
+        SimpleNamespace(get_added_vocab=hf_tokenizer.get_added_vocab),
+        excluded_texts=("</parameter>",),
+        excluded_token_ids=(
+            hf_tokenizer.eos_token_id,
+            hf_tokenizer.convert_tokens_to_ids("</tool_call>"),
+        ),
+    )
+
+
 def test_qwen35_llguidance_grammar_accepts_parser_edge_cases():
     import llguidance
     import llguidance.hf
 
     hf_tokenizer = _qwen35_hf_tokenizer()
     tool_call_end_token_id = hf_tokenizer.convert_tokens_to_ids("</tool_call>")
-    value_special_token_ids = tuple(
-        sorted(
-            int(token_id)
-            for token_text, token_id in hf_tokenizer.get_added_vocab().items()
-            if "<" in token_text
-        )
-    )
     llg_tokenizer = llguidance.hf.from_tokenizer(
         hf_tokenizer,
         n_vocab=max(hf_tokenizer.get_vocab().values()) + 1,
@@ -599,20 +642,48 @@ def test_qwen35_llguidance_grammar_accepts_parser_edge_cases():
     grammar = _qwen35_llguidance_grammar(
         ("lookup", "search-tool"),
         tool_call_end_token_id=tool_call_end_token_id,
-        value_special_token_ids=value_special_token_ids,
+        value_special_token_ids=_qwen35_value_special_token_ids(hf_tokenizer),
     )
 
     for text in [
         "\n<function=lookup>\n<parameter=2fa_code>\n123\n</parameter>\n</function>\n</tool_call>",
         "<function=lookup></function></tool_call>",
+        "<function=lookup><parameter=user:id>123</parameter></function></tool_call>",
+        "<function=lookup><parameter=display name>Alice</parameter></function></tool_call>",
         "<function=lookup><parameter=query>what is <tool_call>?</parameter></function></tool_call>",
-        "<function=lookup><parameter=html><div>{\"a\":[1,2]}</div>\n</parameter></function></tool_call>",
+        '<function=lookup><parameter=html><div>{"a":[1,2]}</div>\n</parameter></function></tool_call>',
     ]:
         matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
         for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
             matcher.consume_token(token_id)
             assert not matcher.get_error()
         assert matcher.is_stopped()
+
+
+def test_qwen35_llguidance_grammar_rejects_stop_markers_in_parameter_values():
+    import llguidance
+    import llguidance.hf
+
+    hf_tokenizer = _qwen35_hf_tokenizer()
+    llg_tokenizer = llguidance.hf.from_tokenizer(
+        hf_tokenizer,
+        n_vocab=max(hf_tokenizer.get_vocab().values()) + 1,
+        eos_token=[hf_tokenizer.eos_token_id],
+    )
+    grammar = _qwen35_llguidance_grammar(
+        ("lookup",),
+        tool_call_end_token_id=hf_tokenizer.convert_tokens_to_ids("</tool_call>"),
+        value_special_token_ids=_qwen35_value_special_token_ids(hf_tokenizer),
+    )
+
+    for stop_marker in ["<eos>", "</tool_call>"]:
+        matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+        text = f"<function=lookup><parameter=query>before{stop_marker}"
+        for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
+            matcher.consume_token(token_id)
+            if matcher.get_error():
+                break
+        assert matcher.get_error()
 
 
 def test_qwen35_llguidance_grammar_rejects_unknown_tool_names():
@@ -628,7 +699,7 @@ def test_qwen35_llguidance_grammar_rejects_unknown_tool_names():
     grammar = _qwen35_llguidance_grammar(
         ("lookup",),
         tool_call_end_token_id=hf_tokenizer.convert_tokens_to_ids("</tool_call>"),
-        value_special_token_ids=(),
+        value_special_token_ids=_qwen35_value_special_token_ids(hf_tokenizer),
     )
     matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
 
@@ -644,7 +715,6 @@ def test_qwen35_llguidance_grammar_rejects_unknown_tool_names():
 
 def test_llguidance_vocab_size_includes_added_tokens():
     import llguidance.hf
-    from types import SimpleNamespace
 
     hf_tokenizer = _qwen35_hf_tokenizer()
     wrapper = SimpleNamespace(
@@ -662,8 +732,6 @@ def test_llguidance_vocab_size_includes_added_tokens():
 
 
 def test_llguidance_tool_grammar_sizes_bitmask_from_logits_vocab():
-    from types import SimpleNamespace
-
     hf_tokenizer = _qwen35_hf_tokenizer()
     tokenizer = SimpleNamespace(
         _tokenizer=hf_tokenizer,
