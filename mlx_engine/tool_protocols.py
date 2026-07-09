@@ -6,14 +6,12 @@ GEMMA4_TOOL_DECLARATION_START = "<|tool>"
 GEMMA4_TOOL_DECLARATION_END = "<tool|>"
 GEMMA4_TOOL_CALL_START = "<|tool_call>"
 GEMMA4_TOOL_CALL_END = "<tool_call|>"
-GEMMA4_STRING_DELIMITER = '<|"|>'
 
 QWEN35_TOOLS_START = "<tools>"
 QWEN35_TOOLS_END = "</tools>"
 QWEN35_TOOL_CALL_START = "<tool_call>"
 QWEN35_TOOL_CALL_END = "</tool_call>"
 QWEN35_FUNCTION_START = "<function="
-QWEN35_PARAMETER_END = "</parameter>"
 QWEN35_REASONING_START = "<think>"
 QWEN35_REASONING_END = "</think>"
 

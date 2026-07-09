@@ -10,11 +10,9 @@ import llguidance.numpy
 import mlx.core as mx
 
 from mlx_engine.tool_protocols import (
-    GEMMA4_STRING_DELIMITER,
     GEMMA4_TOOL_DECLARATION_END,
     GEMMA4_TOOL_DECLARATION_START,
     QWEN35_FUNCTION_START,
-    QWEN35_PARAMETER_END,
     QWEN35_TOOL_CALL_END,
     QWEN35_TOOL_CALL_START,
     QWEN35_TOOLS_END,
@@ -362,16 +360,7 @@ def create_gemma4_reasoning_guard_logits_processor(
     tool_call_start_token_id = tokenizer.tool_call_start_tokens[0]
     tool_grammar = _LLGuidanceToolGrammar(
         tokenizer=tokenizer,
-        grammar=_gemma4_llguidance_grammar(
-            context.tool_names,
-            string_special_token_ids=_argument_marker_token_ids(
-                tokenizer,
-                excluded_token_ids=(
-                    *tokenizer.eos_token_ids,
-                    *_encode_token_ids(tokenizer, GEMMA4_STRING_DELIMITER),
-                ),
-            ),
-        ),
+        grammar=_gemma4_llguidance_grammar(context.tool_names),
         initial_token_ids=(_encode_token_ids(tokenizer, _GEMMA4_CALL_PREFIX)[0],),
     )
 
@@ -400,14 +389,6 @@ def create_qwen35_reasoning_guard_logits_processor(
         grammar=_qwen35_llguidance_grammar(
             context.tool_names,
             tool_call_end_token_id=tokenizer.tool_call_end_tokens[0],
-            value_special_token_ids=_argument_marker_token_ids(
-                tokenizer,
-                excluded_token_ids=(
-                    *tokenizer.eos_token_ids,
-                    *tokenizer.tool_call_end_tokens,
-                    *_encode_token_ids(tokenizer, QWEN35_PARAMETER_END),
-                ),
-            ),
         ),
         initial_token_ids=_qwen35_initial_token_ids(tokenizer),
     )
@@ -426,15 +407,8 @@ def create_qwen35_reasoning_guard_logits_processor(
     )
 
 
-def _gemma4_llguidance_grammar(
-    tool_names: tuple[str, ...],
-    *,
-    string_special_token_ids: tuple[int, ...],
-) -> str:
+def _gemma4_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
-    markers = " | ".join(f"<[{token_id}]>" for token_id in string_special_token_ids)
-    # Regex chars handle normal text; explicit special-token alternatives keep
-    # marker-looking text legal inside Gemma strings until the exact <|"|> delimiter.
     return rf"""%llguidance {{}}
 start: "call:" tool WS object WS <tool_call|>
 tool: {tool_choice}
@@ -445,10 +419,8 @@ BARE_KEY: /[A-Za-z0-9_.$\/-]/+
 value: gemma_string | object | array | NUMBER | LITERAL
 LITERAL: "true" | "false" | "null" | "None" | "none"
 array: "[" WS (value (WS "," WS value)*)? WS "]"
-gemma_string: <|"|> gemma_string_char* <|"|>
-gemma_string_char: STRING_CHAR | added_marker
+gemma_string: <|"|> STRING_CHAR* <|"|>
 STRING_CHAR: /[^<]/ | "<" /[^|]/ | "<|" /[^"]/ | "<|\"" /[^|]/ | "<|\"|" /[^>]/
-added_marker: {markers}
 NUMBER: "-"? (/[0-9]/ | /[1-9]/ /[0-9]*/) ("." /[0-9]/+)? (/[eE]/ /[+-]/? /[0-9]/+)?
 WS: /[ \t\n\r]*/
 """
@@ -458,19 +430,16 @@ def _qwen35_llguidance_grammar(
     tool_names: tuple[str, ...],
     *,
     tool_call_end_token_id: int,
-    value_special_token_ids: tuple[int, ...],
 ) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
-    markers = " | ".join(f"<[{token_id}]>" for token_id in value_special_token_ids)
 
     return rf"""%llguidance {{}}
 start: WS "<function=" WS tool ">" WS parameter* "</function>" WS <[{int(tool_call_end_token_id)}]>
 tool: {tool_choice}
 parameter: "<parameter=" PARAM_NAME ">" param_value "</parameter>" WS
 PARAM_NAME: /[^>]/+
-param_value: (PARAM_CHAR | added_marker)*
+param_value: PARAM_CHAR*
 PARAM_CHAR: /[^<]/ | "<" /[^\/]/ | "</" /[^p]/ | "</p" /[^a]/ | "</pa" /[^r]/ | "</par" /[^a]/ | "</para" /[^m]/ | "</param" /[^e]/ | "</parame" /[^t]/ | "</paramet" /[^e]/ | "</paramete" /[^r]/ | "</parameter" /[^>]/
-added_marker: {markers}
 WS: /[ \t\n\r]*/
 """
 
@@ -503,21 +472,6 @@ def _qwen35_initial_token_ids(tokenizer: Any) -> tuple[int, ...]:
         _encode_token_ids(tokenizer, whitespace)[0] for whitespace in _TOOL_WHITESPACE
     )
     return tuple(dict.fromkeys(initial_token_ids))
-
-
-def _argument_marker_token_ids(
-    tokenizer: Any,
-    *,
-    excluded_token_ids: tuple[int, ...],
-) -> tuple[int, ...]:
-    """Return added marker ids allowed inside opaque argument text."""
-    return tuple(
-        sorted(
-            int(token_id)
-            for token_text, token_id in tokenizer.get_added_vocab().items()
-            if "<" in token_text and int(token_id) not in excluded_token_ids
-        )
-    )
 
 
 def _boost_token_ids_mx(
