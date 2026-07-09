@@ -230,9 +230,9 @@ class Gemma4ReasoningGuardLogitsProcessor:
             # this step. Skip it there so llguidance does not see it twice.
             self._context_token_count += 1
             if self._tool_state == self._STATE_POST_TOOL:
-                # The call just closed. Only allow EOS, whitespace, or another
-                # adjacent <|tool_call> from here.
-                logits = _boost_token_ids_mx(
+                # The call just closed. Allow only EOS, whitespace, or another
+                # adjacent <|tool_call>, preserving the model's scores among them.
+                logits = _mask_except_token_ids_mx(
                     logits,
                     mx.array(True),
                     self._post_tool_token_ids,
@@ -250,8 +250,8 @@ class Gemma4ReasoningGuardLogitsProcessor:
                 self._initial_tool_token_ids,
             )
             # Otherwise stay in the post-tool lane: EOS, whitespace, or another
-            # adjacent <|tool_call>. This blocks prose after a completed call.
-            logits = _boost_token_ids_mx(
+            # adjacent <|tool_call>. Preserve scores among those continuations.
+            logits = _mask_except_token_ids_mx(
                 logits,
                 token_id != self._tool_call_start_token_id,
                 self._post_tool_token_ids,
@@ -298,7 +298,7 @@ def _gemma4_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
     # Regex chars handle normal text; explicit special-token alternatives keep
     # marker-looking text legal inside Gemma strings until the exact <|"|> delimiter.
-    return rf'''%llguidance {{}}
+    return rf"""%llguidance {{}}
 start: "call:" tool object <tool_call|>
 tool: {tool_choice}
 object: "{{" WS (member (WS "," WS member)*)? WS "}}"
@@ -314,7 +314,7 @@ STRING_CHAR: /[^<]/ | "<" /[^|]/ | "<|" /[^"]/ | "<|\"" /[^|]/ | "<|\"|" /[^>]/
 gemma_string_special: <|tool> | <tool|> | <|tool_call> | <tool_call|> | <|tool_response> | <tool_response|> | <|channel> | <channel|> | <|turn> | <turn|> | <|think|> | <|image> | <image|> | <|image|> | <|audio> | <audio|> | <|audio|> | <|video|>
 NUMBER: "-"? (/[0-9]/ | /[1-9]/ /[0-9]*/) ("." /[0-9]/+)? (/[eE]/ /[+-]/? /[0-9]/+)?
 WS: /[ \t\n\r]*/
-'''
+"""
 
 
 def _get_llguidance_tokenizer(tokenizer: Any) -> Any:
@@ -345,8 +345,18 @@ def _boost_token_ids_mx(
     return logits
 
 
+def _mask_except_token_ids_mx(
+    logits: mx.array,
+    condition: mx.array,
+    token_ids: tuple[int, ...],
+) -> mx.array:
+    allowed_logits = mx.full(logits.shape, -float("inf"), dtype=logits.dtype)
+    token_id_list = list(token_ids)
+    allowed_logits[:, token_id_list] = logits[:, token_id_list]
+    return mx.where(condition, allowed_logits, logits)
+
+
 def _encode_token_ids(tokenizer: Any, text: str) -> tuple[int, ...]:
     return tuple(
-        int(token_id)
-        for token_id in tokenizer.encode(text, add_special_tokens=False)
+        int(token_id) for token_id in tokenizer.encode(text, add_special_tokens=False)
     )

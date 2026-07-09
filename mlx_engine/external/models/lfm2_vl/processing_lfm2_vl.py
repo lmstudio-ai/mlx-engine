@@ -237,14 +237,10 @@ class Lfm2VlProcessor(ProcessorMixin):
 
         total_factor = encoder_patch_size * downsample_factor
         smart_resize_min_pixels = (
-            min_image_tokens
-            * encoder_patch_size ** 2
-            * downsample_factor ** 2
+            min_image_tokens * encoder_patch_size**2 * downsample_factor**2
         )
         smart_resize_max_pixels = (
-            max_image_tokens
-            * encoder_patch_size ** 2
-            * downsample_factor ** 2
+            max_image_tokens * encoder_patch_size**2 * downsample_factor**2
         )
 
         h_bar = max(total_factor, round_by_factor(height, total_factor))
@@ -286,8 +282,8 @@ class Lfm2VlProcessor(ProcessorMixin):
         return (
             h_bar * w_bar
             > max_image_tokens
-            * encoder_patch_size ** 2
-            * self.downsample_factor ** 2
+            * encoder_patch_size**2
+            * self.downsample_factor**2
             * max_pixels_tolerance
         )
 
@@ -457,7 +453,9 @@ class Lfm2VlProcessor(ProcessorMixin):
     def __call__(
         self,
         images: ImageInput | list[ImageInput] | list[list[ImageInput]] = None,
-        text: Union[TextInput, "PreTokenizedInput", list[TextInput], list["PreTokenizedInput"]] = None,
+        text: Union[
+            TextInput, "PreTokenizedInput", list[TextInput], list["PreTokenizedInput"]
+        ] = None,
         use_image_special_tokens: bool | None = None,
         downsample_factor: int | None = None,
         min_image_tokens: int | None = None,

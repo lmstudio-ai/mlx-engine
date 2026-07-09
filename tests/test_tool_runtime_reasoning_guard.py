@@ -115,7 +115,9 @@ class _FakeToolGrammar:
     def consume_token(self, matcher, token_id: int) -> bool:
         if matcher["state"] == "header":
             pos = matcher["pos"]
-            headers = [header for header in matcher["headers"] if header[pos] == token_id]
+            headers = [
+                header for header in matcher["headers"] if header[pos] == token_id
+            ]
             if not headers:
                 raise ValueError(f"unexpected header token {token_id}")
             matcher["headers"] = headers
@@ -225,11 +227,11 @@ def _mx_context():
     return [14]
 
 
-def _process_token(processor, context, token_id):
+def _process_token(processor, context, token_id, logits=None):
     logits = processor.process_last_token_with_context(
         context,
         mx.array([token_id], dtype=mx.int32),
-        _mx_logits(),
+        _mx_logits() if logits is None else logits,
     )
     context.append(token_id)
     return logits
@@ -237,6 +239,25 @@ def _process_token(processor, context, token_id):
 
 def _mx_logits():
     return mx.zeros((1, 24), dtype=mx.float32)
+
+
+def _post_tool_logits():
+    values = [-10.0] * 24
+    values[0] = 1.0
+    values[4] = 3.0
+    values[15] = 2.0
+    values[17] = 0.5
+    values[14] = 100.0
+    return mx.array([values], dtype=mx.float32)
+
+
+def _assert_post_tool_logits_preserved(logits):
+    assert logits[:, 0].tolist() == [1.0]
+    assert logits[:, 4].tolist() == [3.0]
+    assert logits[:, 15].tolist() == [2.0]
+    assert logits[:, 17].tolist() == [0.5]
+    assert logits[:, 14].tolist() == [-float("inf")]
+    assert mx.argmax(logits, axis=-1).tolist() == [4]
 
 
 def _forced_token_ids(logits):
@@ -295,10 +316,25 @@ def test_gemma4_structure_balances_args_and_requires_tool_end_marker():
     assert _forced_token_ids(logits) == [5]
 
     logits = _process_token(processor, context, 5)
-    assert 0 in _forced_token_ids(logits)
-    assert 4 in _forced_token_ids(logits)
-    assert 15 in _forced_token_ids(logits)
-    assert 14 not in _forced_token_ids(logits)
+    assert logits[:, 0].tolist() == [0.0]
+    assert logits[:, 4].tolist() == [0.0]
+    assert logits[:, 15].tolist() == [0.0]
+    assert logits[:, 14].tolist() == [-float("inf")]
+
+
+def test_gemma4_post_tool_mask_preserves_allowed_logits():
+    processor = _processor()
+    context = _mx_context()
+    for token_id in [4, 6, 7, 8, 9, 10, 11, 12]:
+        _process_token(processor, context, token_id)
+
+    _assert_post_tool_logits_preserved(
+        _process_token(processor, context, 5, _post_tool_logits())
+    )
+
+    _assert_post_tool_logits_preserved(
+        _process_token(processor, context, 15, _post_tool_logits())
+    )
 
 
 def test_gemma4_structure_ignores_braces_inside_gemma_strings():

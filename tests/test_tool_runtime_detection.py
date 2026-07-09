@@ -1,10 +1,10 @@
 from mlx_engine.tool_runtime import create_gemma4_tool_context_from_prompt
 
 
-GEMMA4_TOOL_PROMPT = '''<bos><|turn>system
+GEMMA4_TOOL_PROMPT = """<bos><|turn>system
 <|tool>declaration:get_weather{description:<|"|>Get weather<|"|>,parameters:{properties:{location:{type:<|"|>STRING<|"|>}},type:<|"|>OBJECT<|"|>}}<tool|><|tool>declaration:search{description:<|"|>Search<|"|>,parameters:{properties:{query:{type:<|"|>STRING<|"|>}},type:<|"|>OBJECT<|"|>}}<tool|><turn|>
 <|turn>user
-What is the weather in Paris?'''
+What is the weather in Paris?"""
 
 
 class _Tokenizer:

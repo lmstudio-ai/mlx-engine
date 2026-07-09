@@ -25,7 +25,6 @@ logger = logging.get_logger(__name__)
 
 
 class Ernie4_5_Tokenizer(PreTrainedTokenizer):
-
     vocab_files_names = {
         "vocab_file": "tokenizer.model",
     }
@@ -93,7 +92,7 @@ class Ernie4_5_Tokenizer(PreTrainedTokenizer):
             int: The number of tokens in the vocabulary.
         """
         return self.sp_model.vocab_size()
-    
+
     def get_vocab(self):
         """Get the vocabulary as a dictionary mapping tokens to their IDs.
 
@@ -211,4 +210,3 @@ class Ernie4_5_Tokenizer(PreTrainedTokenizer):
             clean_up_tokenization_spaces=False,
             spaces_between_special_tokens=False,
         )
-
