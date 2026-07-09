@@ -139,7 +139,12 @@ class Gemma4ReasoningGuardLogitsProcessor:
         self._reasoning_open_mx = mx.array(self._reasoning_open)
         self._context_token_count = len(token_ids)
         self._reset_tool_state()
-        return self._apply_prefill_reasoning_mask(logits)
+
+        if self._reasoning_open:
+            # The prompt already ended inside visible reasoning, so prevent the
+            # first generated token from starting a tool call before <channel|>.
+            logits[:, self._tool_call_start_token_id] = -float("inf")
+        return logits
 
     def process_last_token_with_context(
         self,
@@ -148,31 +153,24 @@ class Gemma4ReasoningGuardLogitsProcessor:
         logits: mx.array,
     ) -> mx.array:
         """Catch up from materialized context, then mask next-token logits."""
-        self._catch_up_tool_context(token_context)
+        for token_id in token_context[self._context_token_count :]:
+            if self._tool_state == self._STATE_TOOL:
+                # This token was already materialized by the batcher; feed it
+                # into llguidance so the grammar is caught up before masking.
+                self._consume_tool_grammar_token(token_id)
+            elif token_id == self._tool_call_start_token_id:
+                # A materialized <|tool_call> starts grammar tracking. The
+                # grammar itself begins after that marker, at the `call:` text.
+                self._tool_state = self._STATE_TOOL
+                self._tool_matcher = self._tool_grammar.start_matcher()
+        self._context_token_count = len(token_context)
+
         return self._process_last_token_mx(last_token.reshape(-1)[0], logits)
 
     def _reset_tool_state(self) -> None:
         """Return tool-grammar tracking to ordinary non-tool generation."""
         self._tool_state = self._STATE_NORMAL
         self._tool_matcher = None
-
-    def _start_tool_call(self) -> None:
-        """Enter grammar-tracked mode after sampled <|tool_call>."""
-        self._tool_state = self._STATE_TOOL
-        self._tool_matcher = self._tool_grammar.start_matcher()
-
-    def _catch_up_tool_context(self, token_context: list[int]) -> None:
-        """Consume context tokens not yet seen by the tool grammar."""
-        for token_id in token_context[self._context_token_count :]:
-            self._advance_tool_state_from_token(token_id)
-        self._context_token_count = len(token_context)
-
-    def _advance_tool_state_from_token(self, token_id: int) -> None:
-        """Start or advance tool grammar state from a materialized token."""
-        if self._tool_state == self._STATE_TOOL:
-            self._consume_tool_grammar_token(token_id)
-        elif token_id == self._tool_call_start_token_id:
-            self._start_tool_call()
 
     def _consume_tool_grammar_token(self, token_id: int) -> None:
         """Feed one generated tool token into llguidance and mark completion."""
@@ -213,16 +211,50 @@ class Gemma4ReasoningGuardLogitsProcessor:
         # Remember this token so the next step can detect the two-token opener.
         self._previous_token_mx = token_id
 
-        # Apply reasoning/tool-call constraints to the logits for the next token.
-        return self._apply_next_token_masks_mx(logits, token_id)
+        if self._tool_state == self._STATE_NORMAL:
+            # If the sampled token was <|tool_call>, force the next token to
+            # start the native `call:` prefix. Otherwise leave logits alone.
+            logits = _boost_token_ids_mx(
+                logits,
+                token_id == self._tool_call_start_token_id,
+                self._initial_tool_token_ids,
+            )
 
-    def _apply_next_token_masks_mx(
-        self,
-        logits: mx.array,
-        token_id: mx.array,
-    ) -> mx.array:
-        """Apply tool-structure and reasoning-boundary masks in MLX."""
-        logits = self._apply_tool_structure_mask_mx(logits, token_id)
+        elif self._tool_state == self._STATE_TOOL:
+            # We are inside `call:KNOWN_TOOL{...}<tool_call|>`. This is the one
+            # place we sync token_id to Python so llguidance can advance.
+            self._consume_tool_grammar_token(int(token_id.item()))
+            # The consumed sampled token will be appended to token_context after
+            # this step. Skip it there so llguidance does not see it twice.
+            self._context_token_count += 1
+            if self._tool_state == self._STATE_POST_TOOL:
+                # The call just closed. Only allow EOS, whitespace, or another
+                # adjacent <|tool_call> from here.
+                logits = _boost_token_ids_mx(
+                    logits,
+                    mx.array(True),
+                    self._post_tool_token_ids,
+                )
+            else:
+                # The call is still open. Let llguidance choose the valid next
+                # tokens for the Gemma4 native call grammar.
+                logits = self._tool_grammar.mask_logits(self._tool_matcher, logits)
+
+        elif self._tool_state == self._STATE_POST_TOOL:
+            # If another <|tool_call> was sampled, force its `call:` prefix.
+            logits = _boost_token_ids_mx(
+                logits,
+                token_id == self._tool_call_start_token_id,
+                self._initial_tool_token_ids,
+            )
+            # Otherwise stay in the post-tool lane: EOS, whitespace, or another
+            # adjacent <|tool_call>. This blocks prose after a completed call.
+            logits = _boost_token_ids_mx(
+                logits,
+                token_id != self._tool_call_start_token_id,
+                self._post_tool_token_ids,
+            )
+
         # Keep <|tool_call> blocked while visible reasoning is open. This forces
         # the model to sample the real <channel|> close before starting a tool call.
         logits[:, self._tool_call_start_token_id] = mx.where(
@@ -230,57 +262,6 @@ class Gemma4ReasoningGuardLogitsProcessor:
             -float("inf"),
             logits[:, self._tool_call_start_token_id],
         )
-        return logits
-
-    def _apply_tool_structure_mask_mx(
-        self,
-        logits: mx.array,
-        token_id: mx.array,
-    ) -> mx.array:
-        """Constrain generated tokens once Gemma4 tool-call mode starts."""
-        # Once <|tool_call> is emitted, llguidance enforces one native Gemma4 call:
-        #   call:KNOWN_TOOL{...}<tool_call|>
-        # The post-tool state allows only EOS/whitespace/another adjacent call.
-        if self._tool_state == self._STATE_NORMAL:
-            return _boost_token_ids_mx(
-                logits,
-                token_id == self._tool_call_start_token_id,
-                self._initial_tool_token_ids,
-            )
-
-        if self._tool_state == self._STATE_TOOL:
-            self._consume_tool_grammar_token(int(token_id.item()))
-            # The consumed sampled token will be appended to token_context after
-            # this step. Skip it there so llguidance does not see it twice.
-            self._context_token_count += 1
-            if self._tool_state == self._STATE_POST_TOOL:
-                return _boost_token_ids_mx(
-                    logits,
-                    mx.array(True),
-                    self._post_tool_token_ids,
-                )
-            return self._tool_grammar.mask_logits(self._tool_matcher, logits)
-
-        if self._tool_state == self._STATE_POST_TOOL:
-            logits = _boost_token_ids_mx(
-                logits,
-                token_id == self._tool_call_start_token_id,
-                self._initial_tool_token_ids,
-            )
-            return _boost_token_ids_mx(
-                logits,
-                token_id != self._tool_call_start_token_id,
-                self._post_tool_token_ids,
-            )
-
-        return logits
-
-    def _apply_prefill_reasoning_mask(self, logits: Any) -> Any:
-        """Apply the initial prompt-derived reasoning guard after prefill."""
-        if self._reasoning_open:
-            # Keep <|tool_call> blocked while visible reasoning is open. This forces
-            # the model to sample the real <channel|> close before starting a tool call.
-            logits[:, self._tool_call_start_token_id] = -float("inf")
         return logits
 
 
