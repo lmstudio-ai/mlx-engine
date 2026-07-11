@@ -12,9 +12,8 @@ dtypes, then the fit uses:
 
 Long-prefill experiments on dense and MoE Qwen and Gemma models showed that
 attention memory matched `query heads * prefill chunk * activation dtype size`.
-They also showed that MLX does not retain a second model-wide KV cache, so
-full KV is counted once. The largest measured peak not explained by these
-terms was 2.41 GiB, motivating the 3 GiB reserve floor.
+The largest measured peak not explained by the formula was 2.41 GiB,
+motivating the 3 GiB reserve floor.
 
 For example, Qwen 3.6 35B-A3B on a 27 GiB working set has about 19.06 GiB of
 fixed memory and uses 88 KiB per token. After the 3 GiB reserve, the formula
@@ -213,17 +212,19 @@ def calculate_context_fit(
         + attention_workspace_bytes_per_token
     )
 
-    # These three per-token costs coexist near the end of a long prompt prefill.
-    available_context_bytes = max(0, safe_ceiling_bytes - fixed_memory_bytes)
-    memory_limited_context = available_context_bytes // peak_bytes_per_token
+    # First find how many bytes remain for the prompt after paying the model's
+    # fixed costs. If those costs already exceed the ceiling, zero bytes remain.
+    available_prompt_bytes = max(0, safe_ceiling_bytes - fixed_memory_bytes)
+
+    # Dividing the remaining bytes by one token's peak cost gives the number of
+    # prompt tokens that fit in memory.
+    tokens_that_fit = available_prompt_bytes // peak_bytes_per_token
 
     # MLX allocates KV in token blocks. Round to the measured block boundary;
     # the reserve absorbs the less-than-one-block difference.
     allocation_step = profile.allocation_step
     context_length = (
-        (memory_limited_context + allocation_step - 1)
-        // allocation_step
-        * allocation_step
+        (tokens_that_fit + allocation_step - 1) // allocation_step * allocation_step
     )
     if context_length < MIN_FITTED_CONTEXT_TOKENS:
         logger.warning(
@@ -299,8 +300,8 @@ def _probe_cache_fit_profile(
             return None
 
         if cache_type == "KVCache":
-            # nbytes already includes keys and values. Divide by allocated token
-            # width; experiments showed no second model-wide KV to multiply by 2.
+            # nbytes includes both keys and values. Divide by the allocated token
+            # width to get the cost of one token.
             full_kv_bytes_per_token += cache.nbytes // cache.keys.shape[2]
             cache_allocation_steps.add(cache.step)
         elif cache_type == "RotatingKVCache":
