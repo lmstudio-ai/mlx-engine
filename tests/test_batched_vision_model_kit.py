@@ -91,6 +91,7 @@ def test_load_model_forces_no_trust_remote_code(monkeypatch, tmp_path):
     kit._shutdown = SimpleNamespace(is_set=lambda: True)
     kit._model_path = tmp_path
     kit._trust_remote_code = True
+    kit._auto_fit_context = False
 
     kit._load_model()
 
@@ -171,3 +172,43 @@ def test_generate_fatal_error_preserves_state_for_exception_propagation(monkeypa
     assert not FakeController.instance.cancelled
     assert batch_generator.closed
     assert kit._generation_thread_state is not None
+
+
+def test_load_model_stores_context_fit_before_startup(monkeypatch, tmp_path):
+    loaded_model = SimpleNamespace()
+    fitted_context_length = 65_536
+    calls = {}
+
+    monkeypatch.setattr(
+        model_kit_module.mlx_vlm.utils,
+        "load_model",
+        lambda *_args, **_kwargs: loaded_model,
+    )
+    monkeypatch.setattr(
+        model_kit_module,
+        "patch_loaded_gemma4_model",
+        lambda _model: None,
+    )
+    monkeypatch.setattr(model_kit_module.mx, "synchronize", lambda: None)
+    monkeypatch.setattr(model_kit_module.mx, "clear_cache", lambda: None)
+
+    def fake_fit_context(**kwargs):
+        calls["fit"] = kwargs
+        return fitted_context_length
+
+    monkeypatch.setattr(
+        model_kit_module,
+        "fit_batched_vlm_context",
+        fake_fit_context,
+    )
+    kit = object.__new__(BatchedVisionModelKit)
+    kit._shutdown = SimpleNamespace(is_set=lambda: True)
+    kit._model_path = tmp_path
+    kit._auto_fit_context = True
+    kit._effective_context_length = None
+    kit.prefill_step_size = 2_048
+
+    kit._load_model()
+
+    assert kit.effective_context_length == fitted_context_length
+    assert calls["fit"] == {"model": loaded_model, "prefill_step_size": 2_048}

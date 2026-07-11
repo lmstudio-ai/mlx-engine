@@ -195,6 +195,7 @@ def load_model(
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
     prefill_step_size: Optional[int] = None,
+    auto_fit_context: bool = False,
 ) -> LoadedModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -215,6 +216,8 @@ def load_model(
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
         prefill_step_size (Optional[int]): Number of tokens to process per prefill chunk.
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
+        auto_fit_context (bool): Calculate and report a recommended context length for
+            batched VLMs.
 
     Returns:
         LoadedModelKit: An initialized model instance:
@@ -265,6 +268,7 @@ def load_model(
             max_seq_nums=max_seq_nums,
             trust_remote_code=trust_remote_code,
             seed=seed,
+            auto_fit_context=auto_fit_context,
         )
     else:
         # For non-vision models, choose between BatchedModelKit
@@ -327,6 +331,14 @@ def load_model(
         sanitize_eos_tokens(model_kit)
     model_kit.start()
     return model_kit
+
+
+def get_runtime_load_info(model_kit: LoadedModelKit) -> dict:
+    """Return load-time values discovered by the running model kit."""
+    context_length = getattr(model_kit, "effective_context_length", None)
+    if context_length is None:
+        return {}
+    return {"context_length": context_length}
 
 
 def load_draft_model(
