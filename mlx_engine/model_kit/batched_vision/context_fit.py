@@ -1,3 +1,26 @@
+"""Fit a model's context length to the available unified memory.
+
+A model's native context limit does not account for its loaded weights or the
+memory needed to read a long prompt. Guessing by allocating progressively larger
+prompts is unsafe because a Metal out-of-memory error can terminate the process.
+Instead, a one-token probe reveals the loaded model's real cache shapes and
+dtypes, then the fit uses:
+
+    fixed = loaded baseline + rotating cache + recurrent state
+    bytes/token = full KV + prompt embedding + attention workspace
+    context = (recommended working set - reserve - fixed) / bytes/token
+
+Long-prefill experiments on dense and MoE Qwen and Gemma models showed that
+attention memory matched `query heads * prefill chunk * activation dtype size`.
+They also showed that MLX does not retain a second model-wide KV cache, so
+full KV is counted once. The largest measured peak not explained by these
+terms was 2.41 GiB, motivating the 3 GiB reserve floor.
+
+For example, Qwen 3.6 35B-A3B on a 27 GiB working set has about 19.06 GiB of
+fixed memory and uses 88 KiB per token. After the 3 GiB reserve, the formula
+fits 58,846 tokens, which rounds to a 58,880-token cache boundary.
+"""
+
 import gc
 import logging
 from dataclasses import dataclass
@@ -10,7 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 GIB = 1024**3
+# Product minimum; the fitted value is still capped by the model's native limit.
 MIN_FITTED_CONTEXT_TOKENS = 4_096
+# Round the largest 2.41 GiB unexplained experimental peak up to 3 GiB.
 MIN_RUNTIME_RESERVE_BYTES = 3 * GIB
 
 _FAMILY_GEMMA4 = "gemma4"
@@ -96,8 +121,10 @@ def fit_batched_vlm_context(
         if profile is None:
             return max_context_length
 
-        # Count live model memory plus reusable MLX buffers left after the probe.
+        # Active arrays and allocator cache both occupy unified memory. Together
+        # they are the starting cost before the prompt grows.
         baseline_bytes = mx.get_active_memory() + mx.get_cache_memory()
+        # Apple's recommended working set is the process budget, not total RAM.
         working_set_bytes = mx.device_info()["max_recommended_working_set_size"]
         result = calculate_context_fit(
             profile,
@@ -167,9 +194,14 @@ def calculate_context_fit(
     # Leave 3 GiB for that variation, or 5% on very large working sets.
     runtime_reserve_bytes = max(MIN_RUNTIME_RESERVE_BYTES, working_set_bytes // 20)
     safe_ceiling_bytes = working_set_bytes - runtime_reserve_bytes
+    # These costs do not grow with the ordinary full-context KV cache.
     fixed_memory_bytes = (
         baseline_bytes + profile.rotating_peak_bytes + profile.fixed_ssm_bytes
     )
+
+    # Long-prefill measurements matched one activation value per query head and
+    # prefill token for every context token. The dtype size is measured at runtime
+    # rather than assuming the tested models' two-byte BF16/FP16 activations.
     attention_workspace_bytes_per_token = (
         profile.query_attention_heads
         * profile.prefill_step_size
@@ -184,6 +216,9 @@ def calculate_context_fit(
     # These three per-token costs coexist near the end of a long prompt prefill.
     available_context_bytes = max(0, safe_ceiling_bytes - fixed_memory_bytes)
     memory_limited_context = available_context_bytes // peak_bytes_per_token
+
+    # MLX allocates KV in token blocks. Round to the measured block boundary;
+    # the reserve absorbs the less-than-one-block difference.
     allocation_step = profile.allocation_step
     context_length = (
         (memory_limited_context + allocation_step - 1)
@@ -197,6 +232,7 @@ def calculate_context_fit(
             f"{MIN_FITTED_CONTEXT_TOKENS:,}",
         )
         context_length = MIN_FITTED_CONTEXT_TOKENS
+    # Available memory never permits extending the model beyond its native limit.
     context_length = min(profile.max_context_length, context_length)
 
     return ContextFitResult(
@@ -223,8 +259,12 @@ def _probe_cache_fit_profile(
         if value is not None
     }
     inputs_embeds = embedding_kwargs.pop("inputs_embeds")
+    # With one token, embedding nbytes is directly the retained bytes/token;
+    # itemsize gives the activation dtype size used by attention.
     prompt_embedding_bytes_per_token = inputs_embeds.nbytes
     activation_dtype_bytes = inputs_embeds.itemsize
+
+    # Gemma exposes text settings on config, while Qwen exposes them on args.
     language_config = getattr(language_model, "config", None)
     query_attention_heads = getattr(language_config, "num_attention_heads", None)
     if query_attention_heads is None:
@@ -259,6 +299,8 @@ def _probe_cache_fit_profile(
             return None
 
         if cache_type == "KVCache":
+            # nbytes already includes keys and values. Divide by allocated token
+            # width; experiments showed no second model-wide KV to multiply by 2.
             full_kv_bytes_per_token += cache.nbytes // cache.keys.shape[2]
             cache_allocation_steps.add(cache.step)
         elif cache_type == "RotatingKVCache":
@@ -269,6 +311,8 @@ def _probe_cache_fit_profile(
                     f"{max_context_length:,}",
                 )
                 return None
+            # One layer can briefly hold its window plus the new prefill chunk,
+            # with one overlapping token: max_size + prefill_step_size - 1.
             rotating_peak_bytes += (
                 cache.nbytes
                 // cache.keys.shape[2]
