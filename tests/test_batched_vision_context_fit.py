@@ -468,12 +468,77 @@ def test_qwen3_6_uses_args_context(monkeypatch):
     assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) == 8_192
 
 
-def test_fit_logs_and_falls_back_for_unsupported_family(caplog):
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        "pixtral",
+        "mistral",
+        "lfm2-vl",
+        "lfm2_vl",
+        "lfm2",
+        "mistral3",
+        "ministral3",
+        "qwen2_vl",
+        "qwen2_5_vl",
+        "qwen3_vl",
+        "qwen3_vl_text",
+        "qwen3_vl_moe",
+        "llava_next",
+        "mllama",
+        "paligemma",
+        "gemma2",
+        "gemma3",
+        "gemma3_text",
+        "gemma3n",
+        "gemma3n_text",
+        "granite4_vision",
+        "granitemoehybrid",
+        "future_vlm",
+        None,
+    ],
+)
+def test_unsupported_families_leave_context_unchanged(monkeypatch, caplog, model_type):
+    probe_called = False
+
+    def unexpected_probe(**_kwargs):
+        nonlocal probe_called
+        probe_called = True
+
+    monkeypatch.setattr(context_fit, "_probe_cache_fit_profile", unexpected_probe)
+    caplog.set_level("INFO")
+    model = SimpleNamespace(language_model=SimpleNamespace(model_type=model_type))
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
+    assert not probe_called
+    assert "leaving context unchanged" in caplog.text
+
+
+def test_fit_leaves_context_unchanged_when_fallback_is_unknown(caplog):
     language_model = SimpleNamespace(
-        model_type="unsupported",
+        model_type="gemma4_text",
+        config=SimpleNamespace(model_type="gemma4_text"),
+    )
+    model = SimpleNamespace(language_model=language_model)
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
+    assert "leaving context unchanged" in caplog.text
+
+
+def test_fit_logs_and_falls_back_when_probe_raises(monkeypatch, caplog):
+    language_model = SimpleNamespace(
+        model_type="gemma4_text",
         config=SimpleNamespace(max_position_embeddings=16_384),
     )
     model = SimpleNamespace(language_model=language_model)
+
+    def raise_probe_error(**_kwargs):
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(
+        context_fit,
+        "_probe_cache_fit_profile",
+        raise_probe_error,
+    )
 
     assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) == 16_384
     assert "using max context 16,384" in caplog.text

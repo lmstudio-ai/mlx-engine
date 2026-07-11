@@ -4,7 +4,8 @@ A model's native context limit does not account for its loaded weights or the
 memory needed to read a long prompt. Guessing by allocating progressively larger
 prompts is unsafe because a Metal out-of-memory error can terminate the process.
 Instead, a one-token probe reveals the loaded model's real cache shapes and
-dtypes, then the fit uses:
+dtypes, then uses the formula below. The fitted override is limited to Gemma 4
+and Qwen 3.5; other model families keep their existing context behavior.
 
     fixed = loaded baseline + rotating cache + recurrent state
     bytes/token = full KV + prompt embedding + attention workspace
@@ -70,37 +71,44 @@ def fit_batched_vlm_context(
     *,
     model: Any,
     prefill_step_size: int,
-) -> int:
-    """Return the context length that the loaded model should use.
+) -> int | None:
+    """Return a fitted token limit, or `None` to leave the limit unchanged.
 
     A one-token probe measures the model's cache, embedding, and activation
     layout. The fit leaves a runtime reserve, subtracts fixed memory, then uses
     the remaining memory for KV, retained prompt embeddings, and chunked
-    attention work. The return value is the fitted token limit. If fitting fails,
-    the error is logged and `max_position_embeddings` is returned instead.
+    attention work. Unsupported families return `None`. Errors fall back to the
+    model's maximum context when it is known, otherwise they also return `None`.
     """
-    language_model = getattr(model, "language_model", model)
-    max_context_length = getattr(
-        getattr(language_model, "config", None),
-        "max_position_embeddings",
-        None,
-    )
-    if max_context_length is None:
-        max_context_length = language_model.args.max_position_embeddings
-
+    max_context_length = None
     try:
-        model_type = language_model.model_type.lower()
+        language_model = getattr(model, "language_model", model)
+        language_config = getattr(language_model, "config", None)
+        language_args = getattr(language_model, "args", None)
+        model_type = str(
+            getattr(language_model, "model_type", None)
+            or getattr(language_config, "model_type", None)
+            or getattr(language_args, "model_type", "")
+        ).lower()
         if model_type.startswith("gemma4"):
             family = _FAMILY_GEMMA4
         elif model_type.startswith(("qwen3_5", "qwen3_6")):
             family = _FAMILY_QWEN3_5
         else:
-            logger.error(
-                "Unsupported model family %s; using max context %s",
-                model_type,
-                f"{max_context_length:,}",
+            logger.info(
+                "Model family %s does not use context auto-fit; "
+                "leaving context unchanged",
+                model_type or "unknown",
             )
-            return max_context_length
+            return None
+
+        max_context_length = getattr(
+            language_config,
+            "max_position_embeddings",
+            None,
+        )
+        if max_context_length is None:
+            max_context_length = language_args.max_position_embeddings
 
         try:
             profile = _probe_cache_fit_profile(
@@ -169,6 +177,12 @@ def fit_batched_vlm_context(
         )
         return result.context_length
     except Exception:
+        if max_context_length is None:
+            logger.exception(
+                "Model context auto-fit failed before finding a fallback; "
+                "leaving context unchanged"
+            )
+            return None
         logger.exception(
             "Model context auto-fit failed; using max context %s",
             f"{max_context_length:,}",
