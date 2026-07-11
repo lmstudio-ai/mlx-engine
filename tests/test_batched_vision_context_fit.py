@@ -145,6 +145,20 @@ def test_probe_counts_actual_qwen_arrays_state_bytes(monkeypatch):
     assert profile.query_attention_heads == 16
 
 
+def test_probe_accepts_single_fixed_array_state(monkeypatch):
+    arrays_cache = ArraysCache(size=1)
+    arrays_cache[0] = mx.ones((1, 3, 4), dtype=mx.float16)
+    mx.eval(arrays_cache.state)
+
+    profile = _probe_profile(
+        monkeypatch,
+        [_initialized_kv_cache(), arrays_cache],
+        family="other_vlm",
+    )
+
+    assert profile.fixed_ssm_bytes == arrays_cache.nbytes
+
+
 def test_probe_rejects_unknown_cache_type(monkeypatch, caplog):
     class UnknownCache:
         state = []
@@ -468,49 +482,99 @@ def test_qwen3_6_uses_args_context(monkeypatch):
     assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) == 8_192
 
 
-@pytest.mark.parametrize(
-    "model_type",
-    [
-        "pixtral",
-        "mistral",
-        "lfm2-vl",
-        "lfm2_vl",
-        "lfm2",
-        "mistral3",
-        "ministral3",
-        "qwen2_vl",
-        "qwen2_5_vl",
-        "qwen3_vl",
-        "qwen3_vl_text",
-        "qwen3_vl_moe",
-        "llava_next",
-        "mllama",
-        "paligemma",
-        "gemma2",
-        "gemma3",
-        "gemma3_text",
-        "gemma3n",
-        "gemma3n_text",
-        "granite4_vision",
-        "granitemoehybrid",
-        "future_vlm",
-        None,
-    ],
-)
-def test_unsupported_families_leave_context_unchanged(monkeypatch, caplog, model_type):
+def test_other_family_uses_best_effort_fit(monkeypatch):
+    language_model = SimpleNamespace(
+        config=SimpleNamespace(
+            model_type="other_vlm",
+            max_position_embeddings=8_192,
+        )
+    )
+    model = SimpleNamespace(language_model=language_model)
+    monkeypatch.setattr(
+        context_fit,
+        "_probe_cache_fit_profile",
+        lambda **_kwargs: _profile(
+            family="other_vlm",
+            max_context_length=8_192,
+            full_kv_bytes_per_token=512 * KIB,
+        ),
+    )
+    monkeypatch.setattr(context_fit.mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(context_fit.mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(
+        context_fit.mx,
+        "device_info",
+        lambda: {"max_recommended_working_set_size": 10 * GIB},
+    )
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) == 8_192
+
+
+def test_other_family_leaves_low_reported_maximum_unchanged(monkeypatch, caplog):
     probe_called = False
 
     def unexpected_probe(**_kwargs):
         nonlocal probe_called
         probe_called = True
 
+    language_model = SimpleNamespace(
+        model_type="other_vlm",
+        config=SimpleNamespace(max_position_embeddings=4_096),
+    )
+    model = SimpleNamespace(language_model=language_model)
     monkeypatch.setattr(context_fit, "_probe_cache_fit_profile", unexpected_probe)
     caplog.set_level("INFO")
-    model = SimpleNamespace(language_model=SimpleNamespace(model_type=model_type))
 
     assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
     assert not probe_called
     assert "leaving context unchanged" in caplog.text
+
+
+def test_other_family_does_not_override_context_with_minimum_fit(monkeypatch):
+    profile = _profile(
+        family="other_vlm",
+        max_context_length=100_000,
+    )
+    language_model = SimpleNamespace(
+        model_type="other_vlm",
+        config=SimpleNamespace(max_position_embeddings=100_000),
+    )
+    model = SimpleNamespace(language_model=language_model)
+    monkeypatch.setattr(
+        context_fit,
+        "_probe_cache_fit_profile",
+        lambda **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        context_fit.mx,
+        "get_active_memory",
+        lambda: 7 * GIB - 2_000 * _peak_bytes_per_token(profile),
+    )
+    monkeypatch.setattr(context_fit.mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(
+        context_fit.mx,
+        "device_info",
+        lambda: {"max_recommended_working_set_size": 10 * GIB},
+    )
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
+
+
+def test_other_family_leaves_context_unchanged_when_probe_is_unsupported(
+    monkeypatch,
+):
+    language_model = SimpleNamespace(
+        model_type="other_vlm",
+        config=SimpleNamespace(max_position_embeddings=32_768),
+    )
+    model = SimpleNamespace(language_model=language_model)
+    monkeypatch.setattr(
+        context_fit,
+        "_probe_cache_fit_profile",
+        lambda **_kwargs: None,
+    )
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
 
 
 def test_fit_leaves_context_unchanged_when_fallback_is_unknown(caplog):

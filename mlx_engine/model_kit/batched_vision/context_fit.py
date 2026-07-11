@@ -4,8 +4,8 @@ A model's native context limit does not account for its loaded weights or the
 memory needed to read a long prompt. Guessing by allocating progressively larger
 prompts is unsafe because a Metal out-of-memory error can terminate the process.
 Instead, a one-token probe reveals the loaded model's real cache shapes and
-dtypes, then uses the formula below. The fitted override is limited to Gemma 4
-and Qwen 3.5; other model families keep their existing context behavior.
+dtypes, then uses the formula below. The formula is validated for Gemma 4 and
+Qwen 3.5, and is used as a best-effort fit for other measurable cache layouts.
 
     fixed = loaded baseline + rotating cache + recurrent state
     bytes/token = full KV + prompt embedding + attention workspace
@@ -40,10 +40,13 @@ MIN_RUNTIME_RESERVE_BYTES = 3 * GIB
 
 _FAMILY_GEMMA4 = "gemma4"
 _FAMILY_QWEN3_5 = "qwen3_5"
-_SUPPORTED_CACHE_TYPES = {
-    _FAMILY_GEMMA4: {"KVCache", "RotatingKVCache"},
-    _FAMILY_QWEN3_5: {"KVCache", "ArraysCache"},
-}
+_SUPPORTED_CACHE_TYPES = {"KVCache", "RotatingKVCache", "ArraysCache"}
+
+
+def _config_value(config: Any, key: str) -> Any:
+    if isinstance(config, dict):
+        return config.get(key)
+    return getattr(config, key, None)
 
 
 @dataclass(frozen=True)
@@ -75,40 +78,55 @@ def fit_batched_vlm_context(
     """Return a fitted token limit, or `None` to leave the limit unchanged.
 
     A one-token probe measures the model's cache, embedding, and activation
-    layout. The fit leaves a runtime reserve, subtracts fixed memory, then uses
-    the remaining memory for KV, retained prompt embeddings, and chunked
-    attention work. Unsupported families return `None`. Errors fall back to the
-    model's maximum context when it is known, otherwise they also return `None`.
+    layout. Gemma 4 and Qwen 3.5 use the validated fit. Other families use the
+    same fit when their memory layout can be measured without assumptions.
     """
     max_context_length = None
+    validated_family = False
     try:
         language_model = getattr(model, "language_model", model)
         language_config = getattr(language_model, "config", None)
         language_args = getattr(language_model, "args", None)
-        model_type = str(
-            getattr(language_model, "model_type", None)
-            or getattr(language_config, "model_type", None)
-            or getattr(language_args, "model_type", "")
-        ).lower()
+        model_config = getattr(model, "config", None)
+        text_config = _config_value(model_config, "text_config")
+        config_sources = (
+            language_config,
+            language_args,
+            text_config,
+            model_config,
+        )
+        model_type = getattr(language_model, "model_type", None)
+        for source in config_sources:
+            if model_type is not None:
+                break
+            model_type = _config_value(source, "model_type")
+        model_type = str(model_type or "unknown").lower()
         if model_type.startswith("gemma4"):
             family = _FAMILY_GEMMA4
+            validated_family = True
         elif model_type.startswith(("qwen3_5", "qwen3_6")):
             family = _FAMILY_QWEN3_5
+            validated_family = True
         else:
-            logger.info(
-                "Model family %s does not use context auto-fit; "
-                "leaving context unchanged",
-                model_type or "unknown",
+            family = model_type
+
+        for source in config_sources:
+            max_context_length = _config_value(source, "max_position_embeddings")
+            if max_context_length is not None:
+                break
+        if max_context_length is None:
+            logger.error(
+                "Model context auto-fit could not find the native context; "
+                "leaving context unchanged"
             )
             return None
-
-        max_context_length = getattr(
-            language_config,
-            "max_position_embeddings",
-            None,
-        )
-        if max_context_length is None:
-            max_context_length = language_args.max_position_embeddings
+        if not validated_family and max_context_length <= MIN_FITTED_CONTEXT_TOKENS:
+            logger.info(
+                "Model family %s reports a %s token maximum; leaving context unchanged",
+                family,
+                f"{max_context_length:,}",
+            )
+            return None
 
         try:
             profile = _probe_cache_fit_profile(
@@ -126,7 +144,7 @@ def fit_batched_vlm_context(
             mx.synchronize()
 
         if profile is None:
-            return max_context_length
+            return max_context_length if validated_family else None
 
         # Active arrays and allocator cache both occupy unified memory. Together
         # they are the starting cost before the prompt grows.
@@ -138,6 +156,14 @@ def fit_batched_vlm_context(
             working_set_bytes=working_set_bytes,
             baseline_bytes=baseline_bytes,
         )
+        if not validated_family and result.context_length <= MIN_FITTED_CONTEXT_TOKENS:
+            logger.info(
+                "Best-effort context fit for model family %s was only %s tokens; "
+                "leaving context unchanged",
+                family,
+                f"{result.context_length:,}",
+            )
+            return None
 
         attention_workspace_bytes_per_token = (
             profile.query_attention_heads
@@ -177,17 +203,14 @@ def fit_batched_vlm_context(
         )
         return result.context_length
     except Exception:
-        if max_context_length is None:
+        if validated_family and max_context_length is not None:
             logger.exception(
-                "Model context auto-fit failed before finding a fallback; "
-                "leaving context unchanged"
+                "Model context auto-fit failed; using max context %s",
+                f"{max_context_length:,}",
             )
-            return None
-        logger.exception(
-            "Model context auto-fit failed; using max context %s",
-            f"{max_context_length:,}",
-        )
-        return max_context_length
+            return max_context_length
+        logger.exception("Model context auto-fit failed; leaving context unchanged")
+        return None
 
 
 def calculate_context_fit(
@@ -279,11 +302,15 @@ def _probe_cache_fit_profile(
     prompt_embedding_bytes_per_token = inputs_embeds.nbytes
     activation_dtype_bytes = inputs_embeds.itemsize
 
-    # Gemma exposes text settings on config, while Qwen exposes them on args.
     language_config = getattr(language_model, "config", None)
-    query_attention_heads = getattr(language_config, "num_attention_heads", None)
+    language_args = getattr(language_model, "args", None)
+    query_attention_heads = _config_value(
+        language_config, "num_attention_heads"
+    ) or _config_value(language_args, "num_attention_heads")
     if query_attention_heads is None:
-        query_attention_heads = language_model.args.num_attention_heads
+        query_attention_heads = _config_value(
+            language_config, "n_heads"
+        ) or _config_value(language_args, "n_heads")
 
     language_model(
         input_ids,
@@ -304,12 +331,11 @@ def _probe_cache_fit_profile(
 
     for cache in prompt_cache:
         cache_type = type(cache).__name__
-        if cache_type not in _SUPPORTED_CACHE_TYPES[family]:
+        if cache_type not in _SUPPORTED_CACHE_TYPES:
             logger.error(
-                "Unsupported %s in %s cache topology; using max context %s",
+                "Unsupported %s in %s cache topology; skipping context auto-fit",
                 cache_type,
                 family,
-                f"{max_context_length:,}",
             )
             return None
 
@@ -321,9 +347,9 @@ def _probe_cache_fit_profile(
         elif cache_type == "RotatingKVCache":
             if cache.keep != 0:
                 logger.error(
-                    "Gemma4 rotating cache uses keep=%s; using max context %s",
+                    "Rotating cache in %s uses keep=%s; skipping context auto-fit",
+                    family,
                     cache.keep,
-                    f"{max_context_length:,}",
                 )
                 return None
             # One layer can briefly hold its window plus the new prefill chunk,
@@ -335,26 +361,27 @@ def _probe_cache_fit_profile(
             )
             cache_allocation_steps.add(cache.step)
         else:
-            # Qwen Gated DeltaNet keeps convolution history and recurrent state.
-            if len(cache.cache) != 2 or any(state is None for state in cache.cache):
+            # ArraysCache holds fixed-size convolution or recurrent state.
+            if any(state is None for state in cache.cache):
                 logger.error(
-                    "Qwen ArraysCache probe did not initialize both states; "
-                    "using max context %s",
-                    f"{max_context_length:,}",
+                    "ArraysCache probe for %s left state uninitialized; "
+                    "skipping context auto-fit",
+                    family,
                 )
                 return None
             fixed_ssm_bytes += cache.nbytes
 
     if full_kv_bytes_per_token == 0:
         logger.error(
-            "Model cache has no full KV layers; using max context %s",
-            f"{max_context_length:,}",
+            "Model cache for %s has no full KV layers; skipping context auto-fit",
+            family,
         )
         return None
     if len(cache_allocation_steps) != 1:
         logger.error(
-            "MLX prompt caches use inconsistent allocation steps; using max context %s",
-            f"{max_context_length:,}",
+            "Model cache for %s uses inconsistent allocation steps; "
+            "skipping context auto-fit",
+            family,
         )
         return None
 
