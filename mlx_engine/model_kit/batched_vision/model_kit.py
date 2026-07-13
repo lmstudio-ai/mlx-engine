@@ -127,7 +127,6 @@ class BatchedVisionModelKit:
         max_seq_nums: int | None = DEFAULT_MAX_SEQ_NUMS,
         trust_remote_code: bool = False,
         seed: int | None = None,
-        auto_fit_context: bool = False,
     ):
         # External requests and internal generation events share one queue so
         # restore completions wake the generation thread without polling.
@@ -139,7 +138,6 @@ class BatchedVisionModelKit:
         self._startup_complete = Event()
         self.prefill_step_size = prefill_step_size
         self._model_path = model_path
-        self._auto_fit_context = auto_fit_context
         self._effective_context_length: int | None = None
         if max_seq_nums is None:
             max_seq_nums = DEFAULT_MAX_SEQ_NUMS
@@ -234,11 +232,10 @@ class BatchedVisionModelKit:
         mx.synchronize()
         mx.clear_cache()
 
-        if self._auto_fit_context:
-            self._effective_context_length = fit_batched_vlm_context(
-                model=self.model,
-                prefill_step_size=self.prefill_step_size,
-            )
+        self._effective_context_length = fit_batched_vlm_context(
+            model=self.model,
+            prefill_step_size=self.prefill_step_size,
+        )
 
     @property
     def effective_context_length(self) -> int | None:

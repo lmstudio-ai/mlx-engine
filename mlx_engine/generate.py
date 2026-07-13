@@ -195,7 +195,6 @@ def load_model(
     kv_group_size: Optional[int] = None,
     quantized_kv_start: Optional[int] = None,
     prefill_step_size: Optional[int] = None,
-    auto_fit_context: bool = False,
 ) -> LoadedModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -216,8 +215,6 @@ def load_model(
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
         prefill_step_size (Optional[int]): Number of tokens to process per prefill chunk.
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
-        auto_fit_context (bool): Calculate and report a recommended context length for
-            batched VLMs.
 
     Returns:
         LoadedModelKit: An initialized model instance:
@@ -268,7 +265,6 @@ def load_model(
             max_seq_nums=max_seq_nums,
             trust_remote_code=trust_remote_code,
             seed=seed,
-            auto_fit_context=auto_fit_context,
         )
     else:
         # For non-vision models, choose between BatchedModelKit

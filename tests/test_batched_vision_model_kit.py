@@ -86,12 +86,17 @@ def test_load_model_forces_no_trust_remote_code(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(model_kit_module.mx, "synchronize", lambda: None)
     monkeypatch.setattr(model_kit_module.mx, "clear_cache", lambda: None)
+    monkeypatch.setattr(
+        model_kit_module,
+        "fit_batched_vlm_context",
+        lambda **_kwargs: None,
+    )
 
     kit = object.__new__(BatchedVisionModelKit)
     kit._shutdown = SimpleNamespace(is_set=lambda: True)
     kit._model_path = tmp_path
     kit._trust_remote_code = True
-    kit._auto_fit_context = False
+    kit.prefill_step_size = 2_048
 
     kit._load_model()
 
@@ -204,8 +209,6 @@ def test_load_model_stores_context_fit_before_startup(monkeypatch, tmp_path):
     kit = object.__new__(BatchedVisionModelKit)
     kit._shutdown = SimpleNamespace(is_set=lambda: True)
     kit._model_path = tmp_path
-    kit._auto_fit_context = True
-    kit._effective_context_length = None
     kit.prefill_step_size = 2_048
 
     kit._load_model()
