@@ -8,7 +8,7 @@ dtypes, then uses the formula below. The formula is validated for Gemma 4 and
 Qwen 3.5, and is used as a best-effort fit for other measurable cache layouts.
 
     fixed = loaded baseline + rotating cache + recurrent state
-    bytes/token = full KV + prompt embedding + attention workspace
+    bytes/token = full KV + retained prompt inputs + attention workspace
     context = (recommended working set - reserve - fixed) / bytes/token
 
 Long-prefill experiments on dense and MoE Qwen and Gemma models showed that
@@ -54,7 +54,7 @@ class CacheFitProfile:
     family: str
     allocation_step: int
     full_kv_bytes_per_token: int
-    prompt_embedding_bytes_per_token: int
+    prompt_input_bytes_per_token: int
     query_attention_heads: int
     activation_dtype_bytes: int
     prefill_step_size: int
@@ -77,9 +77,9 @@ def fit_batched_vlm_context(
 ) -> int | None:
     """Return a fitted token limit, or `None` to leave the limit unchanged.
 
-    A one-token probe measures the model's cache, embedding, and activation
-    layout. Gemma 4 and Qwen 3.5 use the validated fit. Other families use the
-    same fit when their memory layout can be measured without assumptions.
+    A one-token probe measures the model's cache, retained prompt inputs, and
+    activation layout. Gemma 4 and Qwen 3.5 use the validated fit. Other families
+    use the same fit when their memory layout can be measured without assumptions.
     """
     max_context_length = None
     validated_family = False
@@ -172,7 +172,7 @@ def fit_batched_vlm_context(
         )
         peak_bytes_per_token = (
             profile.full_kv_bytes_per_token
-            + profile.prompt_embedding_bytes_per_token
+            + profile.prompt_input_bytes_per_token
             + attention_workspace_bytes_per_token
         )
         estimated_memory_bytes = (
@@ -184,7 +184,7 @@ def fit_batched_vlm_context(
         logger.info(
             "Model context auto-fit: family=%s max=%s fitted=%s "
             "working_set=%.2fGiB reserve=%.2fGiB safe_ceiling=%.2fGiB "
-            "baseline=%.2fGiB full_kv=%dB/token embedding=%dB/token "
+            "baseline=%.2fGiB full_kv=%dB/token prompt_inputs=%dB/token "
             "attention=%dB/token rotating_peak=%.2fGiB fixed_ssm=%.2fGiB "
             "estimated_peak=%.2fGiB",
             profile.family,
@@ -195,7 +195,7 @@ def fit_batched_vlm_context(
             result.safe_ceiling_bytes / GIB,
             baseline_bytes / GIB,
             profile.full_kv_bytes_per_token,
-            profile.prompt_embedding_bytes_per_token,
+            profile.prompt_input_bytes_per_token,
             attention_workspace_bytes_per_token,
             profile.rotating_peak_bytes / GIB,
             profile.fixed_ssm_bytes / GIB,
@@ -217,7 +217,7 @@ def calculate_context_fit(
 
     The fit subtracts the runtime reserve and fixed memory from the recommended
     working set. It divides what remains by the per-token peak for KV, retained
-    prompt embeddings, and chunked attention work. The result contains the
+    prompt inputs, and chunked attention work. The result contains the
     chosen token limit and the reserve and safe ceiling used to calculate it.
     """
     # The modeled terms undercounted measured prefill peaks by at most 2.41 GiB.
@@ -239,7 +239,7 @@ def calculate_context_fit(
     )
     peak_bytes_per_token = (
         profile.full_kv_bytes_per_token
-        + profile.prompt_embedding_bytes_per_token
+        + profile.prompt_input_bytes_per_token
         + attention_workspace_bytes_per_token
     )
 
@@ -291,9 +291,12 @@ def _probe_cache_fit_profile(
         if value is not None
     }
     inputs_embeds = embedding_kwargs.pop("inputs_embeds")
-    # With one token, embedding nbytes is directly the retained bytes/token;
-    # itemsize gives the activation dtype size used by attention.
-    prompt_embedding_bytes_per_token = inputs_embeds.nbytes
+    # Gemma 4 keeps per-layer inputs alive for the full prompt too.
+    prompt_input_bytes_per_token = inputs_embeds.nbytes
+    per_layer_inputs = embedding_kwargs.get("per_layer_inputs")
+    if per_layer_inputs is not None:
+        prompt_input_bytes_per_token += per_layer_inputs.nbytes
+    # Attention uses the same activation dtype as the token embeddings.
     activation_dtype_bytes = inputs_embeds.itemsize
 
     language_config = getattr(language_model, "config", None)
@@ -383,7 +386,7 @@ def _probe_cache_fit_profile(
         family=family,
         allocation_step=next(iter(cache_allocation_steps)),
         full_kv_bytes_per_token=full_kv_bytes_per_token,
-        prompt_embedding_bytes_per_token=prompt_embedding_bytes_per_token,
+        prompt_input_bytes_per_token=prompt_input_bytes_per_token,
         query_attention_heads=query_attention_heads,
         activation_dtype_bytes=activation_dtype_bytes,
         prefill_step_size=prefill_step_size,

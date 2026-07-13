@@ -68,7 +68,7 @@ def _profile(
     family="gemma4",
     max_context_length=100_000,
     full_kv_bytes_per_token=MIB,
-    prompt_embedding_bytes_per_token=4 * KIB,
+    prompt_input_bytes_per_token=4 * KIB,
     query_attention_heads=8,
     activation_dtype_bytes=2,
     prefill_step_size=2_048,
@@ -79,7 +79,7 @@ def _profile(
         family=family,
         allocation_step=256,
         full_kv_bytes_per_token=full_kv_bytes_per_token,
-        prompt_embedding_bytes_per_token=prompt_embedding_bytes_per_token,
+        prompt_input_bytes_per_token=prompt_input_bytes_per_token,
         query_attention_heads=query_attention_heads,
         activation_dtype_bytes=activation_dtype_bytes,
         prefill_step_size=prefill_step_size,
@@ -92,7 +92,7 @@ def _profile(
 def _peak_bytes_per_token(profile):
     return (
         profile.full_kv_bytes_per_token
-        + profile.prompt_embedding_bytes_per_token
+        + profile.prompt_input_bytes_per_token
         + profile.query_attention_heads
         * profile.prefill_step_size
         * profile.activation_dtype_bytes
@@ -109,10 +109,29 @@ def test_probe_sums_full_kv_bytes_from_real_allocation(monkeypatch):
     assert profile.full_kv_bytes_per_token == (
         first_cache.nbytes // 256 + second_cache.nbytes // 256
     )
-    assert profile.prompt_embedding_bytes_per_token == 4
+    assert profile.prompt_input_bytes_per_token == 4
     assert profile.query_attention_heads == 8
     assert profile.activation_dtype_bytes == 2
     assert profile.prefill_step_size == 2_048
+
+
+def test_probe_counts_retained_per_layer_inputs(monkeypatch):
+    class EmbeddingOutput:
+        def to_dict(self):
+            return {
+                "inputs_embeds": mx.ones((1, 1, 2), dtype=mx.float16),
+                "per_layer_inputs": mx.ones((1, 1, 3, 4), dtype=mx.float16),
+            }
+
+    monkeypatch.setattr(
+        _ProbeModel,
+        "get_input_embeddings",
+        lambda _self, _input_ids: EmbeddingOutput(),
+    )
+
+    profile = _probe_profile(monkeypatch, [_initialized_kv_cache()])
+
+    assert profile.prompt_input_bytes_per_token == 4 + 24
 
 
 def test_probe_uses_rotating_prefill_peak(monkeypatch):
@@ -296,7 +315,7 @@ def test_fit_uses_minimum_when_fixed_memory_reaches_ceiling():
                 family="qwen3_5",
                 max_context_length=262_144,
                 full_kv_bytes_per_token=12_288,
-                prompt_embedding_bytes_per_token=4_096,
+                prompt_input_bytes_per_token=4_096,
                 query_attention_heads=8,
                 fixed_ssm_bytes=19_537_920,
             ),
@@ -309,7 +328,7 @@ def test_fit_uses_minimum_when_fixed_memory_reaches_ceiling():
                 family="qwen3_5",
                 max_context_length=262_144,
                 full_kv_bytes_per_token=20_480,
-                prompt_embedding_bytes_per_token=4_096,
+                prompt_input_bytes_per_token=4_096,
                 query_attention_heads=16,
                 fixed_ssm_bytes=64_389_120,
             ),
@@ -322,7 +341,7 @@ def test_fit_uses_minimum_when_fixed_memory_reaches_ceiling():
                 family="qwen3_5",
                 max_context_length=262_144,
                 full_kv_bytes_per_token=65_536,
-                prompt_embedding_bytes_per_token=10_240,
+                prompt_input_bytes_per_token=10_240,
                 query_attention_heads=24,
                 fixed_ssm_bytes=153_944_064,
             ),
@@ -334,7 +353,7 @@ def test_fit_uses_minimum_when_fixed_memory_reaches_ceiling():
             _profile(
                 max_context_length=131_072,
                 full_kv_bytes_per_token=6_144,
-                prompt_embedding_bytes_per_token=3_072,
+                prompt_input_bytes_per_token=20_992,
                 query_attention_heads=8,
                 rotating_peak_bytes=31_444_992,
             ),
@@ -346,7 +365,7 @@ def test_fit_uses_minimum_when_fixed_memory_reaches_ceiling():
             _profile(
                 max_context_length=262_144,
                 full_kv_bytes_per_token=20_480,
-                prompt_embedding_bytes_per_token=5_632,
+                prompt_input_bytes_per_token=5_632,
                 query_attention_heads=16,
                 rotating_peak_bytes=628_940_800,
             ),
@@ -358,7 +377,7 @@ def test_fit_uses_minimum_when_fixed_memory_reaches_ceiling():
             _profile(
                 max_context_length=262_144,
                 full_kv_bytes_per_token=16_384,
-                prompt_embedding_bytes_per_token=7_680,
+                prompt_input_bytes_per_token=7_680,
                 query_attention_heads=16,
                 rotating_peak_bytes=1_006_305_280,
             ),
@@ -370,7 +389,7 @@ def test_fit_uses_minimum_when_fixed_memory_reaches_ceiling():
             _profile(
                 max_context_length=262_144,
                 full_kv_bytes_per_token=16_384,
-                prompt_embedding_bytes_per_token=7_680,
+                prompt_input_bytes_per_token=7_680,
                 query_attention_heads=16,
                 rotating_peak_bytes=1_006_305_280,
             ),
@@ -403,7 +422,7 @@ def test_fit_scales_across_memory_tiers(working_set_gib, expected_context):
     profile = _profile(
         max_context_length=262_144,
         full_kv_bytes_per_token=16_384,
-        prompt_embedding_bytes_per_token=7_680,
+        prompt_input_bytes_per_token=7_680,
         query_attention_heads=16,
         rotating_peak_bytes=1_006_305_280,
     )
