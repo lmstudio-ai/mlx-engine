@@ -577,6 +577,23 @@ def test_other_family_leaves_context_unchanged_when_probe_is_unsupported(
     assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
 
 
+def test_validated_family_leaves_context_unchanged_when_probe_is_unsupported(
+    monkeypatch,
+):
+    language_model = SimpleNamespace(
+        model_type="gemma4_text",
+        config=SimpleNamespace(max_position_embeddings=32_768),
+    )
+    model = SimpleNamespace(language_model=language_model)
+    monkeypatch.setattr(
+        context_fit,
+        "_probe_cache_fit_profile",
+        lambda **_kwargs: None,
+    )
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
+
+
 def test_fit_leaves_context_unchanged_when_fallback_is_unknown(caplog):
     language_model = SimpleNamespace(
         model_type="gemma4_text",
@@ -588,7 +605,7 @@ def test_fit_leaves_context_unchanged_when_fallback_is_unknown(caplog):
     assert "leaving context unchanged" in caplog.text
 
 
-def test_fit_logs_and_falls_back_when_probe_raises(monkeypatch, caplog):
+def test_fit_logs_and_leaves_context_unchanged_when_probe_raises(monkeypatch, caplog):
     language_model = SimpleNamespace(
         model_type="gemma4_text",
         config=SimpleNamespace(max_position_embeddings=16_384),
@@ -604,5 +621,5 @@ def test_fit_logs_and_falls_back_when_probe_raises(monkeypatch, caplog):
         raise_probe_error,
     )
 
-    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) == 16_384
-    assert "using max context 16,384" in caplog.text
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
+    assert "failed; leaving context unchanged" in caplog.text

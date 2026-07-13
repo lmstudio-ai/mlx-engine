@@ -144,7 +144,7 @@ def fit_batched_vlm_context(
             mx.synchronize()
 
         if profile is None:
-            return max_context_length if validated_family else None
+            return None
 
         # Active arrays and allocator cache both occupy unified memory. Together
         # they are the starting cost before the prompt grows.
@@ -203,12 +203,6 @@ def fit_batched_vlm_context(
         )
         return result.context_length
     except Exception:
-        if validated_family and max_context_length is not None:
-            logger.exception(
-                "Model context auto-fit failed; using max context %s",
-                f"{max_context_length:,}",
-            )
-            return max_context_length
         logger.exception("Model context auto-fit failed; leaving context unchanged")
         return None
 
