@@ -436,10 +436,10 @@ def _qwen35_llguidance_grammar(
     return rf"""%llguidance {{}}
 start: WS "<function=" WS tool ">" WS parameter* "</function>" WS <[{int(tool_call_end_token_id)}]>
 tool: {tool_choice}
-parameter: "<parameter=" PARAM_NAME ">" param_value "</parameter>" WS
+parameter: "<parameter=" PARAM_NAME ">" param_value WS
 PARAM_NAME: /[^>]/+
-param_value: PARAM_CHAR*
-PARAM_CHAR: /[^<]/ | "<" /[^\/]/ | "</" /[^p]/ | "</p" /[^a]/ | "</pa" /[^r]/ | "</par" /[^a]/ | "</para" /[^m]/ | "</param" /[^e]/ | "</parame" /[^t]/ | "</paramet" /[^e]/ | "</paramete" /[^r]/ | "</parameter" /[^>]/
+param_value[suffix="</parameter>"]: SAFE_PARAM_VALUE
+SAFE_PARAM_VALUE: /(?s:.*)/ & ~/(?s:.*)<\/(function|tool_call)>(?s:.*)/
 WS: /[ \t\n\r]*/
 """
 

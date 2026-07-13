@@ -647,6 +647,47 @@ def test_qwen35_llguidance_grammar_rejects_special_tokens_in_parameter_values():
         assert matcher.get_error()
 
 
+def test_qwen35_llguidance_grammar_rejects_closing_tags_in_parameter_values():
+    import llguidance
+    import llguidance.hf
+
+    hf_tokenizer = _qwen35_hf_tokenizer()
+    llg_tokenizer = llguidance.hf.from_tokenizer(
+        hf_tokenizer,
+        n_vocab=max(hf_tokenizer.get_vocab().values()) + 1,
+        eos_token=[hf_tokenizer.eos_token_id],
+    )
+    grammar = _qwen35_llguidance_grammar(
+        ("lookup",),
+        tool_call_end_token_id=hf_tokenizer.convert_tokens_to_ids("</tool_call>"),
+    )
+    prefix_token_ids = hf_tokenizer.encode(
+        "<function=lookup><parameter=query>before",
+        add_special_tokens=False,
+    )
+    closing_tags = [
+        ("</function>", hf_tokenizer.encode("</function>", add_special_tokens=False)),
+        (
+            "</tool_call>",
+            [
+                *hf_tokenizer.encode("</", add_special_tokens=False),
+                *hf_tokenizer.encode("tool", add_special_tokens=False),
+                *hf_tokenizer.encode("_call", add_special_tokens=False),
+                *hf_tokenizer.encode(">", add_special_tokens=False),
+            ],
+        ),
+    ]
+
+    for closing_tag, closing_tag_token_ids in closing_tags:
+        assert hf_tokenizer.decode(closing_tag_token_ids) == closing_tag
+        matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+        for token_id in [*prefix_token_ids, *closing_tag_token_ids]:
+            matcher.consume_token(token_id)
+            if matcher.get_error():
+                break
+        assert matcher.get_error()
+
+
 def test_qwen35_llguidance_grammar_rejects_unknown_tool_names():
     import llguidance
     import llguidance.hf
