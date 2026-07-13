@@ -232,10 +232,18 @@ class BatchedVisionModelKit:
         mx.synchronize()
         mx.clear_cache()
 
-        self._effective_context_length = fit_batched_vlm_context(
-            model=self.model,
-            prefill_step_size=self.prefill_step_size,
-        )
+        if _requires_global_no_chunked_prefill(
+            self.model,
+            self.model_type,
+            self._uses_gemma4_bidirectional_visual_attention,
+        ):
+            logger.info("Model requires unchunked prefill; leaving context unchanged")
+            self._effective_context_length = None
+        else:
+            self._effective_context_length = fit_batched_vlm_context(
+                model=self.model,
+                prefill_step_size=self.prefill_step_size,
+            )
 
     @property
     def effective_context_length(self) -> int | None:

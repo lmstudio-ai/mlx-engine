@@ -96,6 +96,8 @@ def test_load_model_forces_no_trust_remote_code(monkeypatch, tmp_path):
     kit._shutdown = SimpleNamespace(is_set=lambda: True)
     kit._model_path = tmp_path
     kit._trust_remote_code = True
+    kit.model_type = "other_vlm"
+    kit._uses_gemma4_bidirectional_visual_attention = False
     kit.prefill_step_size = 2_048
 
     kit._load_model()
@@ -209,9 +211,51 @@ def test_load_model_stores_context_fit_before_startup(monkeypatch, tmp_path):
     kit = object.__new__(BatchedVisionModelKit)
     kit._shutdown = SimpleNamespace(is_set=lambda: True)
     kit._model_path = tmp_path
+    kit.model_type = "other_vlm"
+    kit._uses_gemma4_bidirectional_visual_attention = False
     kit.prefill_step_size = 2_048
 
     kit._load_model()
 
     assert kit.effective_context_length == fitted_context_length
     assert calls["fit"] == {"model": loaded_model, "prefill_step_size": 2_048}
+
+
+def test_load_model_skips_context_fit_for_unchunked_prefill(
+    monkeypatch, tmp_path, caplog
+):
+    loaded_model = SimpleNamespace(no_chunked_prefill=True)
+    monkeypatch.setattr(
+        model_kit_module.mlx_vlm.utils,
+        "load_model",
+        lambda *_args, **_kwargs: loaded_model,
+    )
+    monkeypatch.setattr(
+        model_kit_module,
+        "patch_loaded_gemma4_model",
+        lambda _model: None,
+    )
+    monkeypatch.setattr(model_kit_module.mx, "synchronize", lambda: None)
+    monkeypatch.setattr(model_kit_module.mx, "clear_cache", lambda: None)
+
+    def unexpected_fit(**_kwargs):
+        pytest.fail("context fitting should be skipped")
+
+    monkeypatch.setattr(
+        model_kit_module,
+        "fit_batched_vlm_context",
+        unexpected_fit,
+    )
+    caplog.set_level("INFO")
+
+    kit = object.__new__(BatchedVisionModelKit)
+    kit._shutdown = SimpleNamespace(is_set=lambda: True)
+    kit._model_path = tmp_path
+    kit.model_type = "falcon_ocr"
+    kit._uses_gemma4_bidirectional_visual_attention = False
+    kit.prefill_step_size = 2_048
+
+    kit._load_model()
+
+    assert kit.effective_context_length is None
+    assert "requires unchunked prefill" in caplog.text
