@@ -36,6 +36,8 @@ class _Tokenizer:
         self.text = text
         self.tool_call_start = "<tool_call>"
         self.tool_call_end = "</tool_call>"
+        self.tool_call_start_tokens = (1,)
+        self.tool_call_end_tokens = (2,)
 
     def decode(self, _token_ids):
         return self.text
@@ -148,6 +150,23 @@ def test_qwen35_context_requires_native_tool_markers():
     )
 
     assert context is None
+
+
+def test_qwen35_context_requires_single_token_tool_markers():
+    for marker_tokens_attr in (
+        "tool_call_start_tokens",
+        "tool_call_end_tokens",
+    ):
+        tokenizer = _Tokenizer(QWEN35_TOOL_PROMPT)
+        setattr(tokenizer, marker_tokens_attr, (1, 2))
+
+        context = create_qwen35_tool_context_from_prompt(
+            tokenizer=tokenizer,
+            prompt_tokens=[1, 2, 3],
+            model_type="qwen3_5_vl",
+        )
+
+        assert context is None
 
 
 def test_qwen35_context_requires_tool_declarations():

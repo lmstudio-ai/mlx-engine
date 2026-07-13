@@ -78,6 +78,11 @@ def create_qwen35_tool_context_from_prompt(
         return None
     if tokenizer.tool_call_end != QWEN35_TOOL_CALL_END:
         return None
+    if (
+        len(tokenizer.tool_call_start_tokens) != 1
+        or len(tokenizer.tool_call_end_tokens) != 1
+    ):
+        return None
 
     prompt_text = tokenizer.decode(prompt_tokens)
     if (
