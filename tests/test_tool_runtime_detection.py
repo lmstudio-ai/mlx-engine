@@ -27,6 +27,17 @@ def test_gemma4_context_extracts_declared_tool_names():
     assert not context.reasoning_open
 
 
+def test_gemma4_context_extracts_colon_namespaced_tool_name():
+    context = create_gemma4_tool_context_from_prompt(
+        tokenizer=_Tokenizer("<|tool>declaration:mcp:search{}<tool|>"),
+        prompt_tokens=[1, 2, 3],
+        model_type="gemma4",
+    )
+
+    assert context is not None
+    assert context.tool_names == ("mcp:search",)
+
+
 def test_gemma4_context_requires_gemma4_model_type():
     context = create_gemma4_tool_context_from_prompt(
         tokenizer=_Tokenizer(GEMMA4_TOOL_PROMPT),

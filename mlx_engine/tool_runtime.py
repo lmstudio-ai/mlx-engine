@@ -21,7 +21,7 @@ from mlx_engine.tool_protocols import (
 # and capture only the declared tool name (`get_weather`).
 _GEMMA4_TOOL_NAME_RE = re.compile(
     rf"{re.escape(GEMMA4_TOOL_DECLARATION_START)}.*?"
-    r"declaration:\s*([A-Za-z_][A-Za-z0-9_.$/-]*)\s*{.*?"
+    r"declaration:\s*([A-Za-z_][A-Za-z0-9_.$/:-]*)\s*{.*?"
     rf"{re.escape(GEMMA4_TOOL_DECLARATION_END)}",
     re.DOTALL,
 )
