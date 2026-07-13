@@ -43,6 +43,10 @@ from mlx_engine.utils.speculative_decoding import (
 )
 from outlines.processors.structured import JSONLogitsProcessor
 from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
+from mlx_engine.tool_runtime import (
+    create_gemma4_reasoning_guard_logits_processor,
+    create_gemma4_tool_context_from_prompt,
+)
 from mlx_engine.cache_wrapper import validate_prefill_step_size
 from mlx_engine.utils.prompt_progress_reporter import (
     BatchedMlxLmReporterAdapter,
@@ -718,6 +722,18 @@ def _batched_generation(
                     json_schema,
                 )
             )
+        else:
+            gemma4_tool_context = create_gemma4_tool_context_from_prompt(
+                tokenizer=model_kit.tokenizer,
+                prompt_tokens=prompt_tokens,
+                model_type=model_kit.model_type,
+            )
+            if gemma4_tool_context is not None:
+                gemma4_reasoning_guard = create_gemma4_reasoning_guard_logits_processor(
+                    tokenizer=model_kit.tokenizer,
+                    context=gemma4_tool_context,
+                )
+                logits_processors.append(gemma4_reasoning_guard)
 
         stream = model_kit.generate(
             prompt_tokens=input_tokens,

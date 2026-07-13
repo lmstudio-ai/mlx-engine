@@ -13,6 +13,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
     build_prefix_cache_chunks,
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
+from mlx_engine.tool_runtime import Gemma4ReasoningGuardLogitsProcessor
 
 
 def _argmax_sampler(logprobs):
@@ -58,6 +59,13 @@ class _IntLastTokenProcessor:
     def __call__(self, tokens, logits):
         self.calls.append(tokens.tolist())
         return _bump(logits, self.token)
+
+
+class _NoopToolGrammar:
+    initial_token_ids = (7,)
+
+    def start_matcher(self):
+        raise AssertionError("tool grammar should not activate in this test")
 
 
 class _FakeBatchCache:
@@ -195,6 +203,30 @@ def test_int_last_token_processor_uses_full_context_call():
     assert processor.calls == [[100, 2]]
     assert processor.last_token_calls == []
     assert mx.argmax(logits, axis=-1).tolist() == [5]
+
+
+def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
+    processor = Gemma4ReasoningGuardLogitsProcessor(
+        reasoning_open=False,
+        reasoning_start_token_ids=(1, 2),
+        reasoning_end_token_ids=(3,),
+        tool_call_start_token_id=5,
+        tool_grammar=_NoopToolGrammar(),
+        eos_token_ids=(0,),
+        whitespace_token_ids=(13,),
+    )
+    processor(mx.array([1], dtype=mx.int32), mx.zeros((1, 16), dtype=mx.float32))
+    token_context = [[100]]
+
+    logits = batcher._apply_logits_processors(
+        mx.zeros((1, 16), dtype=mx.float32),
+        token_context,
+        [[processor]],
+        last_tokens=mx.array([2], dtype=mx.int32),
+    )
+
+    assert token_context == [[100]]
+    assert logits[:, 5].tolist() == [-float("inf")]
 
 
 def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():

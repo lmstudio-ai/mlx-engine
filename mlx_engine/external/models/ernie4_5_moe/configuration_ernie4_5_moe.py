@@ -15,7 +15,6 @@
 from transformers import PretrainedConfig
 
 
-
 class Ernie4_5_MoeConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`Ernie4_5_Model`].
@@ -185,7 +184,7 @@ class Ernie4_5_MoeConfig(PretrainedConfig):
         # Set default for tied embeddings if not specified.
         if "tie_word_embeddings" not in kwargs:
             kwargs["tie_word_embeddings"] = False
-        
+
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
