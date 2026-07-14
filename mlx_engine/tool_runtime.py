@@ -12,8 +12,15 @@ import mlx.core as mx
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_DECLARATION_END,
     GEMMA4_TOOL_DECLARATION_START,
+    QWEN35_FUNCTION_START,
+    QWEN35_TOOL_CALL_END,
+    QWEN35_TOOL_CALL_START,
+    QWEN35_TOOLS_END,
+    QWEN35_TOOLS_START,
     Gemma4ToolContext,
+    Qwen35ToolContext,
     gemma4_reasoning_is_open,
+    qwen35_reasoning_is_open,
 )
 
 # Match Gemma4 declaration blocks like:
@@ -25,12 +32,16 @@ _GEMMA4_TOOL_NAME_RE = re.compile(
     rf"{re.escape(GEMMA4_TOOL_DECLARATION_END)}",
     re.DOTALL,
 )
+_QWEN35_TOOLS_RE = re.compile(
+    rf"{re.escape(QWEN35_TOOLS_START)}(.*?){re.escape(QWEN35_TOOLS_END)}",
+    re.DOTALL,
+)
 _GEMMA4_CALL_PREFIX = "call:"
-_GEMMA4_WHITESPACE = (" ", "\n", "\t", "\r")
+_TOOL_WHITESPACE = (" ", "\n", "\t", "\r")
 # For tiny forced-token states, update only the allowed token ids instead of
 # adding an unnecessary full-vocabulary mask.
 _FORCED_TOOL_LOGIT = 1e9
-_LLG_TOKENIZER_CACHE: dict[int, Any] = {}
+_LLG_TOKENIZER_CACHE: dict[tuple[int, int, tuple[int, ...]], Any] = {}
 
 
 def create_gemma4_tool_context_from_prompt(
@@ -54,32 +65,96 @@ def create_gemma4_tool_context_from_prompt(
     )
 
 
-class _Gemma4LLGuidanceToolGrammar:
-    """llguidance-backed grammar for one Gemma4 native tool call."""
+def create_qwen35_tool_context_from_prompt(
+    *,
+    tokenizer: Any,
+    prompt_tokens: list[int],
+    model_type: str | None,
+) -> Qwen35ToolContext | None:
+    """Return Qwen3.5 tool context only for rendered native tool prompts."""
+    if not str(model_type or "").startswith("qwen3_5"):
+        return None
+    if tokenizer.tool_call_start != QWEN35_TOOL_CALL_START:
+        return None
+    if tokenizer.tool_call_end != QWEN35_TOOL_CALL_END:
+        return None
+    if (
+        len(tokenizer.tool_call_start_tokens) != 1
+        or len(tokenizer.tool_call_end_tokens) != 1
+    ):
+        return None
+
+    prompt_text = tokenizer.decode(prompt_tokens)
+    if (
+        QWEN35_TOOL_CALL_START not in prompt_text
+        or QWEN35_FUNCTION_START not in prompt_text
+    ):
+        return None
+
+    tool_names = _qwen35_tool_names_from_prompt(prompt_text)
+    if len(tool_names) == 0:
+        return None
+
+    return Qwen35ToolContext(
+        tool_names=tool_names,
+        reasoning_open=qwen35_reasoning_is_open(prompt_text),
+    )
+
+
+def _qwen35_tool_names_from_prompt(prompt_text: str) -> tuple[str, ...]:
+    tools_match = _QWEN35_TOOLS_RE.search(prompt_text)
+    if tools_match is None:
+        return ()
+
+    tool_names: list[str] = []
+    for line in tools_match.group(1).splitlines():
+        line = line.strip()
+        if line == "":
+            continue
+        try:
+            tool = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if isinstance(name, str) and name != "":
+            tool_names.append(name)
+    return tuple(dict.fromkeys(tool_names))
+
+
+class _LLGuidanceToolGrammar:
+    """llguidance-backed grammar for one native tool call."""
 
     def __init__(
         self,
         *,
         tokenizer: Any,
-        tool_names: tuple[str, ...],
-        call_prefix_token_ids: tuple[int, ...],
-        vocab_size: int,
+        grammar: str,
+        initial_token_ids: tuple[int, ...],
     ):
-        self.initial_token_ids = (call_prefix_token_ids[0],)
+        self.initial_token_ids = tuple(dict.fromkeys(initial_token_ids))
         self._tokenizer = tokenizer
-        self._grammar = _gemma4_llguidance_grammar(tool_names)
-        self._vocab_size = vocab_size
+        self._grammar = grammar
         self._llg_tokenizer = None
+        self._llg_vocab_size = 0
         self._bitmask = None
+        self._bitmask_vocab_size = 0
 
-    def _ensure_ready(self) -> None:
-        if self._llg_tokenizer is not None:
+    def _ensure_ready(self, vocab_size: int) -> None:
+        vocab_size = max(_tokenizer_vocab_size(self._tokenizer), int(vocab_size))
+        if self._llg_tokenizer is not None and self._llg_vocab_size == vocab_size:
             return
-        self._llg_tokenizer = _get_llguidance_tokenizer(self._tokenizer)
-        self._bitmask = llguidance.numpy.allocate_token_bitmask(1, self._vocab_size)
+        self._llg_tokenizer = _get_llguidance_tokenizer(self._tokenizer, vocab_size)
+        self._llg_vocab_size = vocab_size
+        self._bitmask = None
+        self._bitmask_vocab_size = 0
 
-    def start_matcher(self) -> Any:
-        self._ensure_ready()
+    def start_matcher(self, vocab_size: int) -> Any:
+        self._ensure_ready(vocab_size)
         return llguidance.LLMatcher(self._llg_tokenizer, self._grammar)
 
     def consume_token(self, matcher: Any, token_id: int) -> bool:
@@ -89,12 +164,17 @@ class _Gemma4LLGuidanceToolGrammar:
         return matcher.is_stopped()
 
     def mask_logits(self, matcher: Any, logits: mx.array) -> mx.array:
+        if self._bitmask is None or self._bitmask_vocab_size != self._llg_vocab_size:
+            self._bitmask = llguidance.numpy.allocate_token_bitmask(
+                1, self._llg_vocab_size
+            )
+            self._bitmask_vocab_size = self._llg_vocab_size
         llguidance.numpy.fill_next_token_bitmask(matcher, self._bitmask, 0)
         return llguidance.mlx.apply_token_bitmask(logits, self._bitmask)
 
 
-class Gemma4ReasoningGuardLogitsProcessor:
-    """Guard reasoning boundaries and Gemma4 tool-call structure."""
+class NativeToolReasoningGuardLogitsProcessor:
+    """Guard reasoning boundaries and native tool-call structure."""
 
     _STATE_NORMAL = 0
     _STATE_TOOL = 1
@@ -111,11 +191,15 @@ class Gemma4ReasoningGuardLogitsProcessor:
         eos_token_ids: tuple[int, ...],
         whitespace_token_ids: tuple[int, ...],
     ):
-        """Initialize Gemma4 marker ids, tool grammar, and reasoning state."""
+        """Initialize native marker ids, tool grammar, and reasoning state."""
         self._reasoning_open = reasoning_open
         self._reasoning_open_mx = mx.array(reasoning_open)
         self._reasoning_start_first_token_id = reasoning_start_token_ids[0]
-        self._reasoning_start_second_token_id = reasoning_start_token_ids[1]
+        self._reasoning_start_second_token_id = (
+            reasoning_start_token_ids[1]
+            if len(reasoning_start_token_ids) == 2
+            else None
+        )
         self._reasoning_end_token_id = reasoning_end_token_ids[0]
         self._tool_call_start_token_id = tool_call_start_token_id
         self._tool_grammar = tool_grammar
@@ -133,7 +217,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
         """Initialize from VLM prefill tokens and apply prompt-time masks."""
         # VLM calls this once on prompt prefill. Prompt reasoning state already
         # came from decoded prompt text. Historical prompt tool calls are
-        # ignored; the structural grammar starts on generated <|tool_call> only.
+        # ignored; the structural grammar starts on generated tool calls only.
         token_ids = tokens.tolist()
         self._previous_token_mx = mx.array(token_ids[-1])
         self._reasoning_open_mx = mx.array(self._reasoning_open)
@@ -142,7 +226,7 @@ class Gemma4ReasoningGuardLogitsProcessor:
 
         if self._reasoning_open:
             # The prompt already ended inside visible reasoning, so prevent the
-            # first generated token from starting a tool call before <channel|>.
+            # first generated token from starting a tool call before reasoning closes.
             logits[:, self._tool_call_start_token_id] = -float("inf")
         return logits
 
@@ -159,10 +243,12 @@ class Gemma4ReasoningGuardLogitsProcessor:
                 # into llguidance so the grammar is caught up before masking.
                 self._consume_tool_grammar_token(token_id)
             elif token_id == self._tool_call_start_token_id:
-                # A materialized <|tool_call> starts grammar tracking. The
-                # grammar itself begins after that marker, at the `call:` text.
+                # A materialized tool-call marker starts grammar tracking. The
+                # grammar itself begins after that protocol-specific marker.
                 self._tool_state = self._STATE_TOOL
-                self._tool_matcher = self._tool_grammar.start_matcher()
+                self._tool_matcher = self._tool_grammar.start_matcher(
+                    int(logits.shape[-1])
+                )
         self._context_token_count = len(token_context)
 
         return self._process_last_token_mx(last_token.reshape(-1)[0], logits)
@@ -185,16 +271,19 @@ class Gemma4ReasoningGuardLogitsProcessor:
         # eval()/wait and can create a per-token graph break. We only sync the
         # sampled token while an llguidance tool grammar is active.
 
-        # Gemma4 opens visible reasoning with a two-token sequence:
-        # <|channel> followed by thought.
-        reasoning_start = (
-            self._previous_token_mx == self._reasoning_start_first_token_id
-        ) & (token_id == self._reasoning_start_second_token_id)
+        if self._reasoning_start_second_token_id is None:
+            # Qwen-style reasoning opens with a single <think> token.
+            reasoning_start = token_id == self._reasoning_start_first_token_id
+        else:
+            # Gemma-style reasoning opens with a two-token marker.
+            reasoning_start = (
+                self._previous_token_mx == self._reasoning_start_first_token_id
+            ) & (token_id == self._reasoning_start_second_token_id)
 
-        # Gemma4 closes visible reasoning with the single <channel|> token.
+        # Visible reasoning closes with a single protocol-specific token.
         reasoning_end = token_id == self._reasoning_end_token_id
 
-        # If the opening sequence just completed, mark reasoning as open.
+        # If the opening marker just completed, mark reasoning as open.
         self._reasoning_open_mx = mx.where(
             reasoning_start,
             mx.array(True),
@@ -208,14 +297,15 @@ class Gemma4ReasoningGuardLogitsProcessor:
             self._reasoning_open_mx,
         )
 
-        # Remember this token so the next step can detect the two-token opener.
+        # Remember this token so the next step can detect two-token openers.
         self._previous_token_mx = token_id
 
         if self._tool_state == self._STATE_NORMAL:
-            # Bridge the first token after <|tool_call> without syncing token_id
-            # to Python. Starting llguidance here would require token_id.item()
-            # on every normal decode step; instead, use an MLX condition to force
-            # the native `call:` prefix only when <|tool_call> was sampled.
+            # Bridge the first token after a tool-call start without syncing
+            # token_id to Python. Starting llguidance here would require
+            # token_id.item() on every normal decode step; instead, use an MLX
+            # condition to force the grammar's valid first token only when the
+            # tool-call marker was sampled.
             logits = _boost_token_ids_mx(
                 logits,
                 token_id == self._tool_call_start_token_id,
@@ -223,15 +313,15 @@ class Gemma4ReasoningGuardLogitsProcessor:
             )
 
         elif self._tool_state == self._STATE_TOOL:
-            # We are inside `call:KNOWN_TOOL{...}<tool_call|>`. This is the one
-            # place we sync token_id to Python so llguidance can advance.
+            # We are inside a native tool call. This is the one place we sync
+            # token_id to Python so llguidance can advance.
             self._consume_tool_grammar_token(int(token_id.item()))
             # The consumed sampled token will be appended to token_context after
             # this step. Skip it there so llguidance does not see it twice.
             self._context_token_count += 1
             if self._tool_state == self._STATE_POST_TOOL:
                 # The call just closed. Allow only EOS, whitespace, or another
-                # adjacent <|tool_call>, preserving the model's scores among them.
+                # adjacent tool call, preserving the model's scores among them.
                 logits = _mask_except_token_ids_mx(
                     logits,
                     mx.array(True),
@@ -239,26 +329,26 @@ class Gemma4ReasoningGuardLogitsProcessor:
                 )
             else:
                 # The call is still open. Let llguidance choose the valid next
-                # tokens for the Gemma4 native call grammar.
+                # tokens for this protocol's native call grammar.
                 logits = self._tool_grammar.mask_logits(self._tool_matcher, logits)
 
         elif self._tool_state == self._STATE_POST_TOOL:
-            # If another <|tool_call> was sampled, force its `call:` prefix.
+            # If another tool call was sampled, force its first grammar token.
             logits = _boost_token_ids_mx(
                 logits,
                 token_id == self._tool_call_start_token_id,
                 self._initial_tool_token_ids,
             )
             # Otherwise stay in the post-tool lane: EOS, whitespace, or another
-            # adjacent <|tool_call>. Preserve scores among those continuations.
+            # adjacent tool call. Preserve scores among those continuations.
             logits = _mask_except_token_ids_mx(
                 logits,
                 token_id != self._tool_call_start_token_id,
                 self._post_tool_token_ids,
             )
 
-        # Keep <|tool_call> blocked while visible reasoning is open. This forces
-        # the model to sample the real <channel|> close before starting a tool call.
+        # Keep tool-call starts blocked while visible reasoning is open. This
+        # forces the model to sample the real reasoning close marker first.
         logits[:, self._tool_call_start_token_id] = mx.where(
             self._reasoning_open_mx,
             -float("inf"),
@@ -267,17 +357,24 @@ class Gemma4ReasoningGuardLogitsProcessor:
         return logits
 
 
+class Gemma4ReasoningGuardLogitsProcessor(NativeToolReasoningGuardLogitsProcessor):
+    """Guard reasoning boundaries and Gemma4 tool-call structure."""
+
+
+class Qwen35ReasoningGuardLogitsProcessor(NativeToolReasoningGuardLogitsProcessor):
+    """Guard reasoning boundaries and Qwen3.5 tool-call structure."""
+
+
 def create_gemma4_reasoning_guard_logits_processor(
     *,
     tokenizer: Any,
     context: Gemma4ToolContext,
 ) -> Gemma4ReasoningGuardLogitsProcessor:
     tool_call_start_token_id = tokenizer.tool_call_start_tokens[0]
-    tool_grammar = _Gemma4LLGuidanceToolGrammar(
+    tool_grammar = _LLGuidanceToolGrammar(
         tokenizer=tokenizer,
-        tool_names=context.tool_names,
-        call_prefix_token_ids=_encode_token_ids(tokenizer, _GEMMA4_CALL_PREFIX),
-        vocab_size=int(tokenizer.vocab_size),
+        grammar=_gemma4_llguidance_grammar(context.tool_names),
+        initial_token_ids=(_encode_token_ids(tokenizer, _GEMMA4_CALL_PREFIX)[0],),
     )
 
     return Gemma4ReasoningGuardLogitsProcessor(
@@ -289,17 +386,44 @@ def create_gemma4_reasoning_guard_logits_processor(
         eos_token_ids=tuple(int(token_id) for token_id in tokenizer.eos_token_ids),
         whitespace_token_ids=tuple(
             _encode_token_ids(tokenizer, whitespace)[0]
-            for whitespace in _GEMMA4_WHITESPACE
+            for whitespace in _TOOL_WHITESPACE
+        ),
+    )
+
+
+def create_qwen35_reasoning_guard_logits_processor(
+    *,
+    tokenizer: Any,
+    context: Qwen35ToolContext,
+) -> Qwen35ReasoningGuardLogitsProcessor:
+    tool_call_start_token_id = tokenizer.tool_call_start_tokens[0]
+    tool_grammar = _LLGuidanceToolGrammar(
+        tokenizer=tokenizer,
+        grammar=_qwen35_llguidance_grammar(
+            context.tool_names,
+            tool_call_end_token_id=tokenizer.tool_call_end_tokens[0],
+        ),
+        initial_token_ids=(_encode_token_ids(tokenizer, "\n")[0],),
+    )
+
+    return Qwen35ReasoningGuardLogitsProcessor(
+        reasoning_open=context.reasoning_open,
+        reasoning_start_token_ids=tokenizer.think_start_tokens,
+        reasoning_end_token_ids=tokenizer.think_end_tokens,
+        tool_call_start_token_id=tool_call_start_token_id,
+        tool_grammar=tool_grammar,
+        eos_token_ids=tuple(int(token_id) for token_id in tokenizer.eos_token_ids),
+        whitespace_token_ids=tuple(
+            _encode_token_ids(tokenizer, whitespace)[0]
+            for whitespace in _TOOL_WHITESPACE
         ),
     )
 
 
 def _gemma4_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
-    # Regex chars handle normal text; explicit special-token alternatives keep
-    # marker-looking text legal inside Gemma strings until the exact <|"|> delimiter.
     return rf"""%llguidance {{}}
-start: "call:" tool object <tool_call|>
+start: "call:" tool object WS <tool_call|>
 tool: {tool_choice}
 object: "{{" WS (member (WS "," WS member)*)? WS "}}"
 member: key WS ":" WS value
@@ -308,27 +432,51 @@ BARE_KEY: /[A-Za-z0-9_.$\/-]/+
 value: gemma_string | object | array | NUMBER | LITERAL
 LITERAL: "true" | "false" | "null" | "None" | "none"
 array: "[" WS (value (WS "," WS value)*)? WS "]"
-gemma_string: <|"|> gemma_string_char* <|"|>
-gemma_string_char: STRING_CHAR | gemma_string_special
+gemma_string: <|"|> STRING_CHAR* <|"|>
 STRING_CHAR: /[^<]/ | "<" /[^|]/ | "<|" /[^"]/ | "<|\"" /[^|]/ | "<|\"|" /[^>]/
-gemma_string_special: <|tool> | <tool|> | <|tool_call> | <tool_call|> | <|tool_response> | <tool_response|> | <|channel> | <channel|> | <|turn> | <turn|> | <|think|> | <|image> | <image|> | <|image|> | <|audio> | <audio|> | <|audio|> | <|video|>
 NUMBER: "-"? (/[0-9]/ | /[1-9]/ /[0-9]*/) ("." /[0-9]/+)? (/[eE]/ /[+-]/? /[0-9]/+)?
 WS: /[ \t\n\r]*/
 """
 
 
-def _get_llguidance_tokenizer(tokenizer: Any) -> Any:
+def _qwen35_llguidance_grammar(
+    tool_names: tuple[str, ...],
+    *,
+    tool_call_end_token_id: int,
+) -> str:
+    tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
+
+    return rf"""%llguidance {{}}
+start: WS "<function=" tool ">" WS parameter* "</function>" WS <[{int(tool_call_end_token_id)}]>
+tool: {tool_choice}
+parameter: "<parameter=" PARAM_NAME ">" param_value WS
+PARAM_NAME: /[^>]/+
+param_value[suffix="</parameter>"]: SAFE_PARAM_VALUE
+SAFE_PARAM_VALUE: /(?s:.*)/ & ~/(?s:.*)<\/(function|tool_call)>(?s:.*)/
+WS: /[ \t\n\r]*/
+"""
+
+
+def _get_llguidance_tokenizer(tokenizer: Any, vocab_size: int) -> Any:
     hf_tokenizer = tokenizer._tokenizer
-    cache_key = id(hf_tokenizer)
+    eos_token_ids = tuple(sorted(int(token_id) for token_id in tokenizer.eos_token_ids))
+    cache_key = (id(hf_tokenizer), int(vocab_size), eos_token_ids)
     llg_tokenizer = _LLG_TOKENIZER_CACHE.get(cache_key)
     if llg_tokenizer is None:
         llg_tokenizer = llguidance.hf.from_tokenizer(
             hf_tokenizer,
-            n_vocab=int(tokenizer.vocab_size),
-            eos_token=list(tokenizer.eos_token_ids),
+            n_vocab=int(vocab_size),
+            eos_token=list(eos_token_ids),
         )
         _LLG_TOKENIZER_CACHE[cache_key] = llg_tokenizer
     return llg_tokenizer
+
+
+def _tokenizer_vocab_size(tokenizer: Any) -> int:
+    vocab = tokenizer.get_vocab()
+    return max(
+        int(tokenizer.vocab_size), max(int(token_id) for token_id in vocab.values()) + 1
+    )
 
 
 def _boost_token_ids_mx(

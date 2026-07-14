@@ -46,6 +46,8 @@ from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerT
 from mlx_engine.tool_runtime import (
     create_gemma4_reasoning_guard_logits_processor,
     create_gemma4_tool_context_from_prompt,
+    create_qwen35_reasoning_guard_logits_processor,
+    create_qwen35_tool_context_from_prompt,
 )
 from mlx_engine.cache_wrapper import validate_prefill_step_size
 from mlx_engine.utils.prompt_progress_reporter import (
@@ -737,11 +739,25 @@ def _batched_generation(
                 model_type=model_kit.model_type,
             )
             if gemma4_tool_context is not None:
-                gemma4_reasoning_guard = create_gemma4_reasoning_guard_logits_processor(
-                    tokenizer=model_kit.tokenizer,
-                    context=gemma4_tool_context,
+                logits_processors.append(
+                    create_gemma4_reasoning_guard_logits_processor(
+                        tokenizer=model_kit.tokenizer,
+                        context=gemma4_tool_context,
+                    )
                 )
-                logits_processors.append(gemma4_reasoning_guard)
+            else:
+                qwen35_tool_context = create_qwen35_tool_context_from_prompt(
+                    tokenizer=model_kit.tokenizer,
+                    prompt_tokens=prompt_tokens,
+                    model_type=model_kit.model_type,
+                )
+                if qwen35_tool_context is not None:
+                    logits_processors.append(
+                        create_qwen35_reasoning_guard_logits_processor(
+                            tokenizer=model_kit.tokenizer,
+                            context=qwen35_tool_context,
+                        )
+                    )
 
         stream = model_kit.generate(
             prompt_tokens=input_tokens,
