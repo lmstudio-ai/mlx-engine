@@ -102,24 +102,27 @@ def create_qwen35_tool_context_from_prompt(
 
 
 def _qwen35_tool_names_from_prompt(prompt_text: str) -> tuple[str, ...]:
+    tools_match = _QWEN35_TOOLS_RE.search(prompt_text)
+    if tools_match is None:
+        return ()
+
     tool_names: list[str] = []
-    for tools_block in _QWEN35_TOOLS_RE.findall(prompt_text):
-        for line in tools_block.splitlines():
-            line = line.strip()
-            if line == "":
-                continue
-            try:
-                tool = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(tool, dict):
-                continue
-            function = tool.get("function")
-            if not isinstance(function, dict):
-                continue
-            name = function.get("name")
-            if isinstance(name, str) and name != "":
-                tool_names.append(name)
+    for line in tools_match.group(1).splitlines():
+        line = line.strip()
+        if line == "":
+            continue
+        try:
+            tool = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if isinstance(name, str) and name != "":
+            tool_names.append(name)
     return tuple(dict.fromkeys(tool_names))
 
 
