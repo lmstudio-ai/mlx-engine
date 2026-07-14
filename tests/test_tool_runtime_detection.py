@@ -132,6 +132,23 @@ def test_qwen35_context_extracts_declared_tool_names():
     assert not context.reasoning_open
 
 
+def test_qwen35_context_ignores_non_declaration_json():
+    prompt = QWEN35_TOOL_PROMPT + """
+<tools>
+[]
+{"function":[]}
+</tools>"""
+
+    context = create_qwen35_tool_context_from_prompt(
+        tokenizer=_Tokenizer(prompt),
+        prompt_tokens=[1, 2, 3],
+        model_type="qwen3_5_vl",
+    )
+
+    assert context is not None
+    assert context.tool_names == ("get_weather", "search")
+
+
 def test_qwen35_context_requires_qwen35_model_type():
     context = create_qwen35_tool_context_from_prompt(
         tokenizer=_Tokenizer(QWEN35_TOOL_PROMPT),

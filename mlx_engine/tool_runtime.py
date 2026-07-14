@@ -112,7 +112,12 @@ def _qwen35_tool_names_from_prompt(prompt_text: str) -> tuple[str, ...]:
                 tool = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            name = tool.get("function", {}).get("name")
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
             if isinstance(name, str) and name != "":
                 tool_names.append(name)
     return tuple(dict.fromkeys(tool_names))
