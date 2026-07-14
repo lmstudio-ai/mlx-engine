@@ -333,6 +333,14 @@ def load_model(
     return model_kit
 
 
+def get_runtime_load_info(model_kit: LoadedModelKit) -> dict:
+    """Return load-time values discovered by the running model kit."""
+    context_length = getattr(model_kit, "effective_context_length", None)
+    if context_length is None:
+        return {}
+    return {"context_length": context_length}
+
+
 def load_draft_model(
     model_kit: LoadedModelKit,
     path: str | Path,

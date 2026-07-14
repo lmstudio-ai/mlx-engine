@@ -22,6 +22,7 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 from mlx_engine.model_kit.batched_vision.batch_generator import (
     BatchGenerator as LocalVlmBatchGenerator,
 )
+from mlx_engine.model_kit.batched_vision.context_fit import fit_batched_vlm_context
 from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     VlmPromptCacheCoordinator,
 )
@@ -137,6 +138,7 @@ class BatchedVisionModelKit:
         self._startup_complete = Event()
         self.prefill_step_size = prefill_step_size
         self._model_path = model_path
+        self._effective_context_length: int | None = None
         if max_seq_nums is None:
             max_seq_nums = DEFAULT_MAX_SEQ_NUMS
         elif max_seq_nums < 1:
@@ -229,6 +231,23 @@ class BatchedVisionModelKit:
         patch_loaded_gemma4_model(self.model)
         mx.synchronize()
         mx.clear_cache()
+
+        if _requires_global_no_chunked_prefill(
+            self.model,
+            self.model_type,
+            self._uses_gemma4_bidirectional_visual_attention,
+        ):
+            logger.info("Model requires unchunked prefill; leaving context unchanged")
+            self._effective_context_length = None
+        else:
+            self._effective_context_length = fit_batched_vlm_context(
+                model=self.model,
+                prefill_step_size=self.prefill_step_size,
+            )
+
+    @property
+    def effective_context_length(self) -> int | None:
+        return self._effective_context_length
 
     def start(self):
         self._generation_thread = Thread(

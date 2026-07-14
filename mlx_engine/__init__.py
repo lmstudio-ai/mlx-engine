@@ -4,6 +4,7 @@
 
 __all__ = [
     "load_model",
+    "get_runtime_load_info",
     "load_draft_model",
     "is_draft_model_compatible",
     "unload_draft_model",
@@ -23,6 +24,7 @@ from .utils.logger import setup_logging
 
 from .generate import (
     load_model,
+    get_runtime_load_info,
     load_draft_model,
     is_draft_model_compatible,
     unload_draft_model,
