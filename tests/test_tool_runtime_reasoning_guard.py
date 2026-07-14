@@ -530,7 +530,7 @@ def test_gemma4_llguidance_grammar_accepts_parser_syntax():
     grammar = _gemma4_llguidance_grammar(("lookup",))
 
     for text in [
-        'call:lookup {2fa_code:<|"|>what is <tag>?<|"|>} <tool_call|>',
+        'call:lookup{2fa_code:<|"|>what is <tag>?<|"|>} <tool_call|>',
         "call:lookup{optional:None}<tool_call|>",
         "call:lookup{optional:none}<tool_call|>",
     ]:
@@ -541,6 +541,7 @@ def test_gemma4_llguidance_grammar_accepts_parser_syntax():
         assert matcher.is_stopped()
 
     for text in [
+        "call:lookup {optional:None}<tool_call|>",
         'call:lookup{user name:<|"|>Alice<|"|>}<tool_call|>',
         "call:lookup{optional:nil}<tool_call|>",
         "call:lookup{optional:NULL}<tool_call|>",

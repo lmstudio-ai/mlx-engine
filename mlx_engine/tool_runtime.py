@@ -415,7 +415,7 @@ def create_qwen35_reasoning_guard_logits_processor(
 def _gemma4_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
     return rf"""%llguidance {{}}
-start: "call:" tool WS object WS <tool_call|>
+start: "call:" tool object WS <tool_call|>
 tool: {tool_choice}
 object: "{{" WS (member (WS "," WS member)*)? WS "}}"
 member: key WS ":" WS value
