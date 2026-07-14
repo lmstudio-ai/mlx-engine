@@ -133,11 +133,14 @@ def test_qwen35_context_extracts_declared_tool_names():
 
 
 def test_qwen35_context_ignores_non_declaration_json():
-    prompt = QWEN35_TOOL_PROMPT + """
+    prompt = (
+        QWEN35_TOOL_PROMPT
+        + """
 <tools>
 []
 {"function":[]}
 </tools>"""
+    )
 
     context = create_qwen35_tool_context_from_prompt(
         tokenizer=_Tokenizer(prompt),
