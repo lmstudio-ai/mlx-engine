@@ -611,7 +611,6 @@ def test_qwen35_llguidance_grammar_accepts_parser_edge_cases():
 
     for text in [
         "\n<function=lookup>\n<parameter=2fa_code>\n123\n</parameter>\n</function>\n</tool_call>",
-        "<function=  lookup></function></tool_call>",
         "<function=lookup><parameter=user:id>123</parameter></function></tool_call>",
         "<function=lookup><parameter=display name>Alice</parameter></function></tool_call>",
         '<function=lookup><parameter=html><div>{"a":[1,2]}</div>\n</parameter></function></tool_call>',
@@ -689,7 +688,7 @@ def test_qwen35_llguidance_grammar_rejects_closing_tags_in_parameter_values():
         assert matcher.get_error()
 
 
-def test_qwen35_llguidance_grammar_rejects_unknown_tool_names():
+def test_qwen35_llguidance_grammar_rejects_invalid_tool_names():
     import llguidance
     import llguidance.hf
 
@@ -703,16 +702,17 @@ def test_qwen35_llguidance_grammar_rejects_unknown_tool_names():
         ("lookup",),
         tool_call_end_token_id=hf_tokenizer.convert_tokens_to_ids("</tool_call>"),
     )
-    matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
 
-    for token_id in hf_tokenizer.encode(
-        "<function=unknown></function></tool_call>", add_special_tokens=False
-    ):
-        matcher.consume_token(token_id)
-        if matcher.get_error():
-            break
-
-    assert matcher.get_error()
+    for text in [
+        "<function=unknown></function></tool_call>",
+        "<function=  lookup></function></tool_call>",
+    ]:
+        matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+        for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
+            matcher.consume_token(token_id)
+            if matcher.get_error():
+                break
+        assert matcher.get_error()
 
 
 def test_llguidance_vocab_size_includes_added_tokens():

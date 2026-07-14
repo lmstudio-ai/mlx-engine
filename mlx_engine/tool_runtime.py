@@ -439,7 +439,7 @@ def _qwen35_llguidance_grammar(
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
 
     return rf"""%llguidance {{}}
-start: WS "<function=" WS tool ">" WS parameter* "</function>" WS <[{int(tool_call_end_token_id)}]>
+start: WS "<function=" tool ">" WS parameter* "</function>" WS <[{int(tool_call_end_token_id)}]>
 tool: {tool_choice}
 parameter: "<parameter=" PARAM_NAME ">" param_value WS
 PARAM_NAME: /[^>]/+
