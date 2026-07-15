@@ -113,6 +113,17 @@ class VlmPromptCacheStore:
             "cleanup=model_unload_or_process_exit"
         )
 
+    def ensure_max_kv_size(self, max_kv_size: int) -> None:
+        """Keep the larger configured or fitted context as the budget target."""
+        configured_max_kv_size = self._max_kv_size
+        self._max_kv_size = max(configured_max_kv_size or 0, max_kv_size)
+        logger.info(
+            "VLM prompt cache context target: configured=%s fitted=%s effective=%s",
+            "None" if configured_max_kv_size is None else f"{configured_max_kv_size:,}",
+            f"{max_kv_size:,}",
+            f"{self._max_kv_size:,}",
+        )
+
     def plan_longest_prefix_restore(
         self,
         prompt_input_ids: list[int],

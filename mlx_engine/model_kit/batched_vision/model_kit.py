@@ -244,6 +244,10 @@ class BatchedVisionModelKit:
                 model=self.model,
                 prefill_step_size=self.prefill_step_size,
             )
+            if self._effective_context_length is not None:
+                self._prompt_cache_store.ensure_max_kv_size(
+                    self._effective_context_length
+                )
 
     @property
     def effective_context_length(self) -> int | None:

@@ -64,9 +64,10 @@ def test_final_budget_requires_max_kv_size(monkeypatch, tmp_path):
     )
 
 
-def test_final_budget_scales_cache_kinds(monkeypatch, tmp_path):
+def test_final_budget_scales_cache_kinds(monkeypatch, tmp_path, caplog):
     """KV/SWA scale to max size, while state scales by checkpoint count."""
     _set_free_disk(monkeypatch, 200 * _GIB)
+    caplog.set_level("INFO")
     max_kv_size = 16
     prompt_cache = [
         _kv_cache(4),
@@ -84,6 +85,10 @@ def test_final_budget_scales_cache_kinds(monkeypatch, tmp_path):
     rotating_bytes = 2 * max_kv_size * 4
     arrays_bytes = 1 * 2 * 3 * 4
     assert budget == kv_bytes + rotating_bytes + arrays_bytes
+    assert (
+        "stage=final target_tokens=16 desired_gib=0.00 cap_gib=0.00 "
+        "limiter=max_kv_size" in caplog.text
+    )
 
     budget = disk_budget.final_cache_store_budget_bytes(
         tmp_path,
