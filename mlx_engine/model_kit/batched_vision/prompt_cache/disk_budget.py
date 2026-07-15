@@ -69,7 +69,10 @@ def final_cache_store_budget_bytes(
         desired_bytes,
     )
     logger.info(
-        "VLM prompt cache disk budget: stage=final cap_gib=%.2f limiter=%s",
+        "VLM prompt cache disk budget: stage=final target_tokens=%s "
+        "desired_gib=%.2f cap_gib=%.2f limiter=%s",
+        f"{max_kv_size:,}",
+        _bytes_to_gib(desired_bytes),
         _bytes_to_gib(budget_bytes),
         "free_disk_space" if limited_by_free_disk else "max_kv_size",
     )

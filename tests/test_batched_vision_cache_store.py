@@ -80,12 +80,17 @@ def _save_chunk(
     )
 
 
-def test_cache_store_keeps_larger_configured_or_fitted_context():
+def test_cache_store_keeps_larger_configured_or_fitted_context(caplog):
+    caplog.set_level("INFO")
     store = VlmPromptCacheStore(max_kv_size=131_072)
 
     try:
         store.ensure_max_kv_size(65_536)
         assert store._max_kv_size == 131_072
+        assert (
+            "context target: configured=131,072 fitted=65,536 effective=131,072"
+            in caplog.text
+        )
         store.ensure_max_kv_size(262_144)
         assert store._max_kv_size == 262_144
     finally:
