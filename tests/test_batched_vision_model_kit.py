@@ -214,11 +214,17 @@ def test_load_model_stores_context_fit_before_startup(monkeypatch, tmp_path):
     kit.model_type = "other_vlm"
     kit._uses_gemma4_bidirectional_visual_attention = False
     kit.prefill_step_size = 2_048
+    kit._prompt_cache_store = SimpleNamespace(
+        ensure_max_kv_size=lambda max_kv_size: calls.update(
+            disk_cache_max_kv_size=max_kv_size
+        )
+    )
 
     kit._load_model()
 
     assert kit.effective_context_length == fitted_context_length
     assert calls["fit"] == {"model": loaded_model, "prefill_step_size": 2_048}
+    assert calls["disk_cache_max_kv_size"] == fitted_context_length
 
 
 def test_load_model_skips_context_fit_for_unchunked_prefill(

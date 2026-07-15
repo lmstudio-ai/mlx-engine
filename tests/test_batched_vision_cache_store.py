@@ -80,6 +80,18 @@ def _save_chunk(
     )
 
 
+def test_cache_store_keeps_larger_configured_or_fitted_context():
+    store = VlmPromptCacheStore(max_kv_size=131_072)
+
+    try:
+        store.ensure_max_kv_size(65_536)
+        assert store._max_kv_size == 131_072
+        store.ensure_max_kv_size(262_144)
+        assert store._max_kv_size == 262_144
+    finally:
+        store.close()
+
+
 def _assert_two_chunk_restore(loaded):
     kv_keys, kv_values = loaded.prompt_cache[0].state
     boundary_state = loaded.prompt_cache[1][0]
