@@ -34,7 +34,7 @@ from mlx_vlm.generate import (
     _left_pad_prompts,
     wired_limit,
 )
-from mlx_lm.models.cache import make_prompt_cache
+from mlx_vlm.models.cache import make_prompt_cache
 from mlx_engine.processors.repetition_penalty_processor import (
     RepetitionPenaltyProcessor,
 )

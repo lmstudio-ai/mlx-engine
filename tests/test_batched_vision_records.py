@@ -11,7 +11,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     RECORD_KIND_ROTATING_DELTA,
     RECORD_KIND_STATE_CHECKPOINT,
 )
-from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx_vlm.models.cache import ArraysCache, KVCache, RotatingKVCache
 
 
 def _kv_cache(start: int, end: int):
@@ -104,6 +104,8 @@ def test_records_prepare_slices_chunk_records():
         RECORD_KIND_ROTATING_DELTA,
         RECORD_KIND_STATE_CHECKPOINT,
     ]
+    assert type(record_caches[0]) is KVCache
+    assert type(record_caches[1]) is RotatingKVCache
     # Both cache kinds should persist the same logical token chunk [2, 6).
     assert _values(record_caches[0]) == (
         [2.0, 3.0, 4.0, 5.0],
@@ -156,6 +158,9 @@ def test_records_assemble_prompt_cache_chunks():
     state_value = assembled[2][0]
     mx.eval(state_value)
 
+    assert type(assembled[0]) is KVCache
+    assert type(assembled[1]) is RotatingKVCache
+    assert type(assembled[2]) is ArraysCache
     # Full-attention KV reconstructs the whole cached prefix.
     assert _values(assembled[0]) == (
         list(map(float, range(12))),

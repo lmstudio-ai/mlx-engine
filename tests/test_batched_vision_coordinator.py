@@ -9,7 +9,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     LoadedDiskPromptCache,
     PromptImageSpan,
 )
-from mlx_lm.models.cache import KVCache, RotatingKVCache
+from mlx_vlm.models.cache import KVCache, RotatingKVCache
 
 
 class _FakeCacheStore:
@@ -101,7 +101,7 @@ def test_coordinator_trims_hot_branch_and_drops_rope():
     """A branch from hot cache trims reusable KV and recomputes rope state."""
     cache_store = _FakeCacheStore()
     coordinator, _ = _coordinator(cache_store)
-    prompt_cache = [_kv_cache(768)]
+    prompt_cache = [_kv_cache(768), _kv_cache(768)]
 
     coordinator.store_hot_prompt_cache(
         prompt_input_ids=list(range(768)),
@@ -113,14 +113,14 @@ def test_coordinator_trims_hot_branch_and_drops_rope():
         prompt_input_ids=list(range(512)) + [-1],
         image_spans=[],
     )
-    kv_keys, _ = prompt_cache[0].state
+    kv_keys = [cache.state[0] for cache in prompt_cache]
     mx.eval(kv_keys)
 
     assert restored is not None
     assert restored.cached_prefix_len == 512
     assert restored.prompt_cache is prompt_cache
     assert restored.rope_deltas is None
-    assert kv_keys.shape[2] == 512
+    assert [keys.shape[2] for keys in kv_keys] == [512, 512]
     assert cache_store.recorded_tokens == [(512, 0)]
 
 

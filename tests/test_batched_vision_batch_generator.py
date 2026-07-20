@@ -2,6 +2,12 @@ import contextlib
 from types import SimpleNamespace
 
 import mlx.core as mx
+from mlx_vlm.models.cache import (
+    BatchKVCache,
+    BatchRotatingKVCache,
+    KVCache,
+    RotatingKVCache,
+)
 
 from mlx_engine.model_kit.batched_vision import batch_generator as batcher
 from mlx_engine.model_kit.batched_vision.batch_generator import (
@@ -160,6 +166,15 @@ def _gemma4_non_bidir_model():
     return model
 
 
+def test_batch_generator_uses_vlm_prompt_cache_factory():
+    model = _FakeModel()
+    model.layers = [object()]
+
+    prompt_cache = batcher.make_prompt_cache(model)
+
+    assert type(prompt_cache[0]) is KVCache
+
+
 def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
     """Processors are per-row, and sampled token metadata follows decode-ahead."""
     model = _FakeModel()
@@ -252,6 +267,40 @@ def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():
     assert response.all_tokens == [1, 2, 9]
     assert response.prompt_cache[0].name == "cache:0"
     assert response.rope_deltas.tolist() == [[5]]
+
+
+def test_generation_batch_extracts_vlm_scalar_caches_from_vlm_batches():
+    keys = mx.arange(4, dtype=mx.float32).reshape(1, 1, 4, 1)
+    values = keys + 10
+    cache_cases = [
+        (KVCache(), BatchKVCache),
+        (RotatingKVCache(max_size=8, keep=0), BatchRotatingKVCache),
+    ]
+
+    for scalar_cache, batch_cache_type in cache_cases:
+        scalar_cache.update_and_fetch(keys, values)
+        batch_cache = scalar_cache.merge([scalar_cache])
+        generation_batch = GenerationBatch(
+            model=_FakeModel(),
+            uids=[7],
+            inputs=mx.array([9], dtype=mx.int32),
+            prompt_cache=[batch_cache],
+            samplers=[_argmax_sampler],
+            stop_criteria=lambda _token: False,
+            max_tokens=[1],
+            all_tokens=[[1, 2]],
+            logits_processors=[[]],
+            prefix_cache_save_states=_prefix_cache_save_states(1),
+        )
+
+        extracted = generation_batch.extract_cache(0)
+
+        assert type(batch_cache) is batch_cache_type
+        assert extracted is not None
+        assert type(extracted[0]) is type(scalar_cache)
+        assert extracted[0].meta_state == scalar_cache.meta_state
+        assert extracted[0].state[0].tolist() == scalar_cache.state[0].tolist()
+        assert extracted[0].state[1].tolist() == scalar_cache.state[1].tolist()
 
 
 def test_generation_batch_extends_mixed_rope_rows_without_broadcasting():

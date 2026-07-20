@@ -13,7 +13,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     RECORD_KIND_STATE_CHECKPOINT,
     make_record_key,
 )
-from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx_vlm.models.cache import ArraysCache, KVCache, RotatingKVCache
 
 
 @pytest.fixture
@@ -103,6 +103,8 @@ def _assert_two_chunk_restore(loaded):
     mx.eval(kv_keys, kv_values, boundary_state)
 
     assert loaded.cached_prefix_len == 512
+    assert type(loaded.prompt_cache[0]) is KVCache
+    assert type(loaded.prompt_cache[1]) is ArraysCache
     assert kv_keys.shape[2] == 512
     assert kv_keys[0, 0, 0, 0].item() == 0
     assert kv_keys[0, 0, -1, 0].item() == 511
@@ -116,6 +118,8 @@ def _assert_rotating_restore(loaded):
     mx.eval(kv_keys, rotating_keys)
 
     assert loaded.cached_prefix_len == 768
+    assert type(loaded.prompt_cache[0]) is KVCache
+    assert type(loaded.prompt_cache[1]) is RotatingKVCache
     assert kv_keys.shape[2] == 768
     assert rotating_keys.shape[2] == 512
     assert rotating_keys[0, 0, 0, 0].item() == 256

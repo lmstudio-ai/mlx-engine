@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
-import mlx_lm.models.cache as mlx_lm_cache
+import mlx_vlm.models.cache as mlx_vlm_cache
 from mlx.utils import tree_unflatten
 
 
@@ -215,7 +215,7 @@ class TemporarySafetensorBlobStore:
 
 
 def _load_record_from_file(file_obj) -> list[Any]:
-    """Deserialize one safetensors blob back into MLX-LM cache objects."""
+    """Deserialize one safetensors blob back into mlx-vlm cache objects."""
     arrays, safetensor_metadata = mx.load(
         file_obj,
         format="safetensors",
@@ -226,7 +226,7 @@ def _load_record_from_file(file_obj) -> list[Any]:
         list(safetensor_metadata.items())
     )
     return [
-        getattr(mlx_lm_cache, cache_class_name).from_state(state, meta_state)
+        getattr(mlx_vlm_cache, cache_class_name).from_state(state, meta_state)
         for cache_class_name, state, meta_state in zip(
             cache_class_names, arrays, cache_meta_states
         )
