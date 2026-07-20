@@ -306,6 +306,11 @@ def _add_qwen_text_restore_rope_state(
         return False
 
     if _clear_qwen3_5_text_rope_state(model):
+        # get_input_embeddings computes request-local positions for this suffix,
+        # starting at zero. A restored cache already supplies the true offset,
+        # so keep Qwen3.5 on its text-only cache-position path instead.
+        prompt_kwargs.pop("position_ids", None)
+        prompt_kwargs.pop("rope_deltas", None)
         return True
 
     # Text restores start from a nonzero KV offset, so pass explicit text MRoPE

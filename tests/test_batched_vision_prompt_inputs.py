@@ -247,10 +247,42 @@ def test_build_prompt_kwargs_text_clears_qwen3_5_rope_state():
     assert model.language_model._rope_deltas is None
 
 
-def test_build_cached_prompt_kwargs_text_clears_qwen3_5_rope_state():
-    """Text-only Qwen3.5 restores keep the fast text RoPE path."""
+def test_build_prompt_kwargs_text_keeps_request_owned_qwen3_5_rope_state():
+    """Fresh request state is returned without relying on shared model state."""
+    position_ids = mx.arange(6, dtype=mx.int32).reshape(3, 1, 2)
+    rope_deltas = mx.array([[0]], dtype=mx.int32)
     model = _FakeModel(
         inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        embedding_kwargs={
+            "position_ids": position_ids,
+            "rope_deltas": rope_deltas,
+        },
+    )
+    model.language_model.model_type = "qwen3_5_vl"
+    model.language_model._position_ids = mx.ones((3, 1, 4), dtype=mx.int32)
+    model.language_model._rope_deltas = mx.ones((1, 1), dtype=mx.int32)
+    prepared_prompt = PreparedPrompt(
+        prompt_input_ids=[1, 2],
+        raw_inputs=None,
+        image_spans=[],
+    )
+
+    prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+
+    assert prompt_kwargs["position_ids"] is position_ids
+    assert prompt_kwargs["rope_deltas"] is rope_deltas
+    assert model.language_model._position_ids is None
+    assert model.language_model._rope_deltas is None
+
+
+def test_build_cached_prompt_kwargs_text_clears_qwen3_5_rope_state():
+    """Text-only Qwen3.5 restores discard suffix-local MRoPE state."""
+    model = _FakeModel(
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        embedding_kwargs={
+            "position_ids": mx.arange(6, dtype=mx.int32).reshape(3, 1, 2),
+            "rope_deltas": mx.array([[0]], dtype=mx.int32),
+        },
     )
     model.language_model.model_type = "qwen3_5_vl"
     model.language_model._position_ids = mx.ones((3, 1, 4), dtype=mx.int32)

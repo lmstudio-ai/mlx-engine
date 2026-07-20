@@ -302,6 +302,35 @@ def test_capture_rope_deltas_keeps_qwen3_5_text_only_none():
     assert batcher._capture_rope_deltas(qwen_model, rows=2).tolist() == [[0], [0]]
 
 
+def test_prompt_prefill_prefers_request_owned_rope_deltas(monkeypatch):
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _FakeModel()
+    model.language_model = SimpleNamespace(
+        model_type="qwen3_5_vl",
+        _rope_deltas=mx.array([99], dtype=mx.int32),
+    )
+    prompt_prefill = batcher._PromptPrefill(
+        model=model,
+        uid=1,
+        input_ids=[1, 2],
+        max_tokens=1,
+        top_logprobs=0,
+        sampler=_argmax_sampler,
+        logits_processors=[],
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        prompt_kwargs={"rope_deltas": mx.array([7], dtype=mx.int32)},
+        prefix_cache_save_state=_prefix_cache_save_states(1)[0],
+    )
+
+    generation_batch, _ = prompt_prefill.generate(lambda _token: False)
+
+    assert generation_batch._rope_deltas.tolist() == [[7]]
+
+
 def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     monkeypatch,
 ):

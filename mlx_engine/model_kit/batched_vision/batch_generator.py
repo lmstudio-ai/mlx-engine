@@ -184,16 +184,26 @@ def _extend_optional_rope_deltas(
     return mx.concatenate([rope_deltas, other_rope_deltas])
 
 
-def _capture_rope_deltas(model, rows: int) -> Any | None:
-    language_model = getattr(model, "language_model", model)
-    if not hasattr(language_model, "_rope_deltas"):
-        return None
-
-    rope_deltas = getattr(language_model, "_rope_deltas", None)
-    if rope_deltas is None:
-        if str(getattr(language_model, "model_type", "")).startswith("qwen3_5"):
+def _capture_rope_deltas(
+    model,
+    rows: int,
+    prompt_kwargs: dict | None = None,
+) -> Any | None:
+    request_rope_deltas = (
+        prompt_kwargs.get("rope_deltas") if prompt_kwargs is not None else None
+    )
+    if isinstance(request_rope_deltas, mx.array):
+        rope_deltas = request_rope_deltas
+    else:
+        language_model = getattr(model, "language_model", model)
+        if not hasattr(language_model, "_rope_deltas"):
             return None
-        return mx.zeros((rows, 1), dtype=mx.int32)
+
+        rope_deltas = getattr(language_model, "_rope_deltas", None)
+        if rope_deltas is None:
+            if str(getattr(language_model, "model_type", "")).startswith("qwen3_5"):
+                return None
+            return mx.zeros((rows, 1), dtype=mx.int32)
 
     rope_deltas = _normalize_rope_deltas(rope_deltas)
     if rope_deltas.shape[0] == 1 and rows > 1:
@@ -970,11 +980,13 @@ class _PromptPrefill:
         gen_batch._next_top_idx = top_idx
         gen_batch._next_top_logprobs = top_logprobs
 
-        # Same capture point as external/src/mlx-vlm/mlx_vlm/generate.py:
-        # PromptProcessingBatch.generate. Qwen model get_input_embeddings
-        # primes language_model._rope_deltas via get_rope_index; see
-        # external/src/mlx-vlm/mlx_vlm/models/qwen3_5/qwen3_5.py.
-        rope_deltas = _capture_rope_deltas(self.model, len(gen_batch.uids))
+        # Request-owned MRoPE state is authoritative. Older model families may
+        # still expose only the language-model side state, so retain that fallback.
+        rope_deltas = _capture_rope_deltas(
+            self.model,
+            len(gen_batch.uids),
+            prompt_kwargs,
+        )
         gen_batch._rope_deltas = rope_deltas
 
         self.prompt_cache = []
