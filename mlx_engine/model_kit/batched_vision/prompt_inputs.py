@@ -202,8 +202,8 @@ def slice_prompt_kwargs(
     if "inputs_embeds" in sliced:
         sliced["inputs_embeds"] = sliced["inputs_embeds"][:, start:end]
     if "position_ids" in sliced:
-        # Qwen MRoPE positions are token-local and use shape (3, B, S).
-        sliced["position_ids"] = sliced["position_ids"][:, :, start:end]
+        # Text positions are (B, S); Qwen MRoPE positions are (3, B, S).
+        sliced["position_ids"] = sliced["position_ids"][..., start:end]
     if "mask" in sliced:
         # Multimodal masks are query-local; chunked prefill clips future keys.
         sliced["mask"] = sliced["mask"][:, :, start:end, :mask_key_end]

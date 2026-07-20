@@ -2,6 +2,7 @@ import contextlib
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
 from mlx_vlm.models.cache import (
     BatchKVCache,
     BatchRotatingKVCache,
@@ -380,10 +381,12 @@ def test_prompt_prefill_prefers_request_owned_rope_deltas(monkeypatch):
     assert generation_batch._rope_deltas.tolist() == [[7]]
 
 
+@pytest.mark.parametrize("use_mrope", [False, True], ids=["text", "mrope"])
 def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     monkeypatch,
+    use_mrope,
 ):
-    """Chunked prefill keeps Qwen MRoPE positions aligned with sliced embeds."""
+    """Chunked prefill keeps text and MRoPE positions aligned with embeds."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
@@ -398,14 +401,17 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     )
     snapshots = []
     prompt = list(range(513))
-    position_ids = mx.array(
-        [
-            [list(range(513))],
-            [list(range(1000, 1513))],
-            [list(range(2000, 2513))],
-        ],
-        dtype=mx.int32,
-    )
+    if use_mrope:
+        position_ids = mx.array(
+            [
+                [list(range(513))],
+                [list(range(1000, 1513))],
+                [list(range(2000, 2513))],
+            ],
+            dtype=mx.int32,
+        )
+    else:
+        position_ids = mx.array([list(range(513))], dtype=mx.int32)
 
     prefix_chunks = build_prefix_cache_chunks(prompt, [])
 
@@ -433,12 +439,11 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
         generator.close()
 
     assert [len(call["input_ids"][0]) for call in model.calls] == [256, 256, 1]
-    assert [len(call["position_ids"][0][0]) for call in model.calls] == [256, 256, 1]
-    assert model.calls[0]["position_ids"][0][0][0] == 0
-    assert model.calls[0]["position_ids"][0][0][-1] == 255
-    assert model.calls[1]["position_ids"][0][0][0] == 256
-    assert model.calls[1]["position_ids"][0][0][-1] == 511
-    assert model.calls[2]["position_ids"][0][0] == [512]
+    assert [call["position_ids"] for call in model.calls] == [
+        position_ids[..., :256].tolist(),
+        position_ids[..., 256:512].tolist(),
+        position_ids[..., 512:].tolist(),
+    ]
     assert [
         (start_chunk_idx, end_chunk_idx, snapshot_len)
         for _, _, start_chunk_idx, end_chunk_idx, snapshot_len in snapshots
