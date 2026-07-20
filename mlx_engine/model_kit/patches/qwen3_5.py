@@ -163,10 +163,12 @@ def _has_vlm_qwen3_5_ragged_cache_state(cache) -> bool:
 
 def _patched_vlm_qwen3_5_is_single_row_batch_cache(cache_entry) -> bool:
     left_padding = getattr(cache_entry, "left_padding", None)
+    # Quantized caches must update in place; this shortcut rebuilds dense state.
     if not (
         isinstance(left_padding, mx.array)
         and left_padding.ndim > 0
         and left_padding.size == 1
+        and not hasattr(cache_entry, "bits")
     ):
         return False
 
