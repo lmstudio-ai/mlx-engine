@@ -38,9 +38,6 @@ _QWEN35_TOOLS_RE = re.compile(
 )
 _GEMMA4_CALL_PREFIX = "call:"
 _TOOL_WHITESPACE = (" ", "\n", "\t", "\r")
-# For tiny forced-token states, update only the allowed token ids instead of
-# adding an unnecessary full-vocabulary mask.
-_FORCED_TOOL_LOGIT = 1e9
 _LLG_TOKENIZER_CACHE: dict[tuple[int, int, tuple[int, ...]], Any] = {}
 
 
@@ -304,9 +301,9 @@ class NativeToolReasoningGuardLogitsProcessor:
             # Bridge the first token after a tool-call start without syncing
             # token_id to Python. Starting llguidance here would require
             # token_id.item() on every normal decode step; instead, use an MLX
-            # condition to force the grammar's valid first token only when the
-            # tool-call marker was sampled.
-            logits = _boost_token_ids_mx(
+            # condition to mask all but the grammar's valid first tokens when
+            # the tool-call marker was sampled.
+            logits = _mask_except_token_ids_mx(
                 logits,
                 token_id == self._tool_call_start_token_id,
                 self._initial_tool_token_ids,
@@ -333,8 +330,8 @@ class NativeToolReasoningGuardLogitsProcessor:
                 logits = self._tool_grammar.mask_logits(self._tool_matcher, logits)
 
         elif self._tool_state == self._STATE_POST_TOOL:
-            # If another tool call was sampled, force its first grammar token.
-            logits = _boost_token_ids_mx(
+            # If another tool call was sampled, allow only its first grammar tokens.
+            logits = _mask_except_token_ids_mx(
                 logits,
                 token_id == self._tool_call_start_token_id,
                 self._initial_tool_token_ids,
@@ -477,20 +474,6 @@ def _tokenizer_vocab_size(tokenizer: Any) -> int:
     return max(
         int(tokenizer.vocab_size), max(int(token_id) for token_id in vocab.values()) + 1
     )
-
-
-def _boost_token_ids_mx(
-    logits: mx.array,
-    condition: mx.array,
-    token_ids: tuple[int, ...],
-) -> mx.array:
-    token_id_list = list(token_ids)
-    logits[:, token_id_list] = mx.where(
-        condition,
-        _FORCED_TOOL_LOGIT,
-        logits[:, token_id_list],
-    )
-    return logits
 
 
 def _mask_except_token_ids_mx(
