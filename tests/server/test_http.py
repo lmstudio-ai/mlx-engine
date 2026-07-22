@@ -334,16 +334,8 @@ def test_generation_session_cancellation_stops_the_exact_request():
         stop_generation_fn=stop_generation,
     )
     request = ChatGenerationRequest(
-        prompt="prompt",
         prompt_tokens=[1, 2, 3],
-        images_b64=[],
-        temperature=0.8,
-        max_tokens=None,
-        stop_strings=None,
-        top_p=0.95,
-        top_k=40,
-        min_p=0.05,
-        repetition_penalty=1.1,
+        generation_kwargs={},
     )
     session = GenerationSession(runtime, request)
 
@@ -369,16 +361,8 @@ def test_cancellation_failure_does_not_break_cleanup():
         stop_generation_fn=stop_generation,
     )
     request = ChatGenerationRequest(
-        prompt="prompt",
         prompt_tokens=[1],
-        images_b64=[],
-        temperature=0.8,
-        max_tokens=None,
-        stop_strings=None,
-        top_p=0.95,
-        top_k=40,
-        min_p=0.05,
-        repetition_penalty=1.1,
+        generation_kwargs={},
     )
     session = GenerationSession(runtime, request)
 
@@ -388,7 +372,7 @@ def test_cancellation_failure_does_not_break_cleanup():
     assert stop_calls == [session.request_id]
 
 
-def test_runtime_unloads_model_only_once():
+def test_runtime_unloads_model():
     unload_calls = []
     model_kit = _FakeModelKit()
     runtime = EngineRuntime(
@@ -397,7 +381,6 @@ def test_runtime_unloads_model_only_once():
         unload_fn=lambda received_model_kit: unload_calls.append(received_model_kit),
     )
 
-    runtime.unload()
     runtime.unload()
 
     assert unload_calls == [model_kit]

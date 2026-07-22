@@ -1,133 +1,101 @@
 from dataclasses import dataclass
-import re
-from typing import Callable
+from typing import Annotated, Callable, Literal
 
-
-_INLINE_IMAGE_PATTERN = re.compile(r"^data:image/[^;,]+;base64,(.*)$", re.DOTALL)
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatRequestError(ValueError):
     """The chat request does not match the server contract."""
 
 
+class _ImageUrl(BaseModel):
+    url: str
+
+
+class _TextContentPart(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class _ImageContentPart(BaseModel):
+    type: Literal["image_url"]
+    image_url: _ImageUrl
+
+
+_ContentPart = Annotated[
+    _TextContentPart | _ImageContentPart,
+    Field(discriminator="type"),
+]
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | list[_ContentPart] | None = None
+
+
+class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    messages: list[ChatMessage]
+    stream: Literal[True]
+    temperature: float
+    max_tokens: int | None = None
+    stop: list[str] | None = None
+    top_p: float | None = None
+    top_k: int
+    min_p: float | None = None
+    repeat_penalty: float | None = None
+    tools: list[dict] | None = None
+    chat_template_kwargs: dict = Field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class ChatGenerationRequest:
-    prompt: str
     prompt_tokens: list[int]
-    images_b64: list[str]
-    temperature: float
-    max_tokens: int | None
-    stop_strings: list[str] | None
-    top_p: float | None
-    top_k: int
-    min_p: float | None
-    repetition_penalty: float | None
+    generation_kwargs: dict[str, object]
 
 
-def _normalize_content(
-    content: object,
-    *,
-    role: str,
-    images_b64: list[str],
-) -> object:
-    if isinstance(content, str) or content is None:
-        return content
-    if not isinstance(content, list):
-        raise ChatRequestError(
-            f"Message content for role '{role}' must be text or parts."
-        )
-
-    normalized_parts: list[dict] = []
-    for part in content:
-        if not isinstance(part, dict):
-            raise ChatRequestError("Message content parts must be objects.")
-        part_type = part.get("type")
-        if part_type == "text":
-            text = part.get("text")
-            if not isinstance(text, str):
-                raise ChatRequestError("Text content parts must contain text.")
-            normalized_parts.append({"type": "text", "text": text})
-            continue
-        if part_type == "image_url":
-            if role not in ("user", "tool"):
-                raise ChatRequestError(
-                    f"Images are not supported in '{role}' messages."
-                )
-            image_url = part.get("image_url")
-            if not isinstance(image_url, dict):
-                raise ChatRequestError("Image content parts must contain image_url.")
-            url = image_url.get("url")
-            if not isinstance(url, str):
-                raise ChatRequestError("Image URLs must be strings.")
-            match = _INLINE_IMAGE_PATTERN.fullmatch(url)
-            if match is None:
-                raise ChatRequestError("Images must use inline base64 data URLs.")
-            images_b64.append(match.group(1))
-            normalized_parts.append({"type": "image"})
-            continue
-        raise ChatRequestError(f"Unsupported message content part type: {part_type!r}.")
-    return normalized_parts
+def _base64_image_data(url: str) -> str:
+    header, separator, data = url.partition(",")
+    if (
+        separator == ""
+        or not header.startswith("data:image/")
+        or not header.endswith(";base64")
+    ):
+        raise ChatRequestError("Images must use inline base64 data URLs.")
+    return data
 
 
-def normalize_messages(messages: object) -> tuple[list[dict], list[str]]:
-    if not isinstance(messages, list):
-        raise ChatRequestError("messages must be an array.")
-
+def normalize_messages(messages: list[ChatMessage]) -> tuple[list[dict], list[str]]:
     normalized_messages: list[dict] = []
     images_b64: list[str] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            raise ChatRequestError("messages must contain objects.")
-        role = message.get("role")
-        if role not in ("system", "user", "assistant", "tool"):
-            raise ChatRequestError(f"Unsupported message role: {role!r}.")
 
-        normalized_message = dict(message)
-        if "content" in normalized_message:
-            normalized_message["content"] = _normalize_content(
-                normalized_message["content"],
-                role=role,
-                images_b64=images_b64,
-            )
+    for message in messages:
+        normalized_message = message.model_dump(exclude_unset=True)
+        if isinstance(message.content, list):
+            normalized_parts: list[dict] = []
+            for part in message.content:
+                if isinstance(part, _TextContentPart):
+                    normalized_parts.append({"type": "text", "text": part.text})
+                else:
+                    images_b64.append(_base64_image_data(part.image_url.url))
+                    normalized_parts.append({"type": "image"})
+            normalized_message["content"] = normalized_parts
         normalized_messages.append(normalized_message)
 
     return normalized_messages, images_b64
 
 
-def _get_number(body: dict, field_name: str, *, required: bool) -> int | float | None:
-    value = body.get(field_name)
-    if value is None and not required:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ChatRequestError(f"{field_name} must be a number.")
-    return value
-
-
 def _get_chat_template(model_kit: object, *, supports_vision: bool) -> Callable:
-    tokenizer = getattr(model_kit, "tokenizer", None)
-    if supports_vision:
-        processor = getattr(model_kit, "processor", None)
-        candidates = [
-            processor,
-            getattr(processor, "tokenizer", None),
-            tokenizer,
-            getattr(tokenizer, "_tokenizer", None),
-        ]
-    else:
-        candidates = [getattr(tokenizer, "_tokenizer", None), tokenizer]
+    if not supports_vision:
+        return model_kit.tokenizer._tokenizer.apply_chat_template
 
-    for renderer in candidates:
-        apply_chat_template = getattr(renderer, "apply_chat_template", None)
-        if (
-            callable(apply_chat_template)
-            and getattr(renderer, "chat_template", None) is not None
-        ):
-            return apply_chat_template
-    for renderer in candidates:
-        apply_chat_template = getattr(renderer, "apply_chat_template", None)
-        if callable(apply_chat_template):
-            return apply_chat_template
-    raise ChatRequestError("The loaded model does not provide a chat template.")
+    processor = model_kit.processor
+    if getattr(processor, "chat_template", None) is not None:
+        return processor.apply_chat_template
+    return processor.tokenizer.apply_chat_template
 
 
 def prepare_chat_generation_request(
@@ -137,80 +105,40 @@ def prepare_chat_generation_request(
     supports_vision: bool,
     tokenize: Callable[[object, str], list[int]],
 ) -> ChatGenerationRequest:
-    if not isinstance(body, dict):
-        raise ChatRequestError("The request body must be an object.")
-    if body.get("stream") is not True:
-        raise ChatRequestError("Streaming generation requires stream=true.")
-
-    normalized_messages, images_b64 = normalize_messages(body.get("messages"))
-    if len(images_b64) > 0 and not supports_vision:
+    request = ChatCompletionRequest.model_validate(body)
+    normalized_messages, images_b64 = normalize_messages(request.messages)
+    if images_b64 and not supports_vision:
         raise ChatRequestError("The loaded model does not support images.")
 
-    tools = body.get("tools")
-    if tools is not None and not isinstance(tools, list):
-        raise ChatRequestError("tools must be an array.")
-    chat_template_kwargs = body.get("chat_template_kwargs")
-    if chat_template_kwargs is None:
-        chat_template_kwargs = {}
-    if not isinstance(chat_template_kwargs, dict):
-        raise ChatRequestError("chat_template_kwargs must be an object.")
-
-    template_kwargs = dict(chat_template_kwargs)
-    if tools is not None and len(tools) > 0:
-        template_kwargs["tools"] = tools
-    apply_chat_template = _get_chat_template(
+    template_kwargs = dict(request.chat_template_kwargs)
+    if request.tools:
+        template_kwargs["tools"] = request.tools
+    prompt = _get_chat_template(
         model_kit,
         supports_vision=supports_vision,
-    )
-    prompt = apply_chat_template(
+    )(
         normalized_messages,
         tokenize=False,
         add_generation_prompt=True,
         **template_kwargs,
     )
-    if not isinstance(prompt, str):
-        raise ChatRequestError("The model chat template did not return text.")
 
-    stop_strings = body.get("stop")
-    if stop_strings is not None and (
-        not isinstance(stop_strings, list)
-        or any(not isinstance(stop_string, str) for stop_string in stop_strings)
+    generation_kwargs: dict[str, object] = {
+        "images_b64": images_b64,
+        "temp": request.temperature,
+        "top_k": request.top_k,
+    }
+    for name, value in (
+        ("max_tokens", request.max_tokens),
+        ("stop_strings", request.stop),
+        ("top_p", request.top_p),
+        ("min_p", request.min_p),
+        ("repetition_penalty", request.repeat_penalty),
     ):
-        raise ChatRequestError("stop must be an array of strings.")
-
-    max_tokens = _get_number(body, "max_tokens", required=False)
-    if max_tokens is not None and not isinstance(max_tokens, int):
-        raise ChatRequestError("max_tokens must be an integer.")
-    top_k = _get_number(body, "top_k", required=True)
-    if not isinstance(top_k, int):
-        raise ChatRequestError("top_k must be an integer.")
+        if value is not None:
+            generation_kwargs[name] = value
 
     return ChatGenerationRequest(
-        prompt=prompt,
         prompt_tokens=tokenize(model_kit, prompt),
-        images_b64=images_b64,
-        temperature=float(_get_number(body, "temperature", required=True)),
-        max_tokens=max_tokens,
-        stop_strings=stop_strings,
-        top_p=(
-            None
-            if (top_p := _get_number(body, "top_p", required=False)) is None
-            else float(top_p)
-        ),
-        top_k=top_k,
-        min_p=(
-            None
-            if (min_p := _get_number(body, "min_p", required=False)) is None
-            else float(min_p)
-        ),
-        repetition_penalty=(
-            None
-            if (
-                repetition_penalty := _get_number(
-                    body, "repeat_penalty", required=False
-                )
-            )
-            is None
-            else float(repetition_penalty)
-        ),
+        generation_kwargs=generation_kwargs,
     )

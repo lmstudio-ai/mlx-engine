@@ -11,6 +11,8 @@ import threading
 from typing import Callable, Iterator
 import uuid
 
+from pydantic import ValidationError
+
 from mlx_engine import (
     create_generator,
     get_runtime_load_info,
@@ -19,6 +21,10 @@ from mlx_engine import (
     unload,
 )
 from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
+from mlx_engine.utils.generation_result import (
+    GenerationResult,
+    GenerationStopCondition,
+)
 from mlx_engine.utils.prompt_progress_reporter import PromptProgressReporter
 
 from .chat import (
@@ -38,7 +44,7 @@ class _PromptProgressEvent:
 
 @dataclass(frozen=True)
 class _GenerationResultEvent:
-    result: object
+    result: GenerationResult
 
 
 @dataclass(frozen=True)
@@ -82,8 +88,6 @@ class EngineRuntime:
         self._stop_generation = stop_generation_fn
         self._tokenize = tokenize_fn
         self._unload = unload_fn
-        self._unload_lock = threading.Lock()
-        self._unloaded = False
 
     def prepare_chat_generation(self, body: object) -> ChatGenerationRequest:
         return prepare_chat_generation_request(
@@ -100,40 +104,21 @@ class EngineRuntime:
         request_id: str,
         prompt_progress_reporter: PromptProgressReporter,
     ) -> Iterator:
-        generation_kwargs = {
-            "images_b64": request.images_b64,
-            "prompt_progress_reporter": prompt_progress_reporter,
-            "repetition_penalty": request.repetition_penalty,
-            "request_id": request_id,
-            "stop_strings": request.stop_strings,
-            "temp": request.temperature,
-            "top_k": request.top_k,
-            "top_p": request.top_p,
-            "min_p": request.min_p,
-        }
-        if request.max_tokens is not None:
-            generation_kwargs["max_tokens"] = request.max_tokens
         return self._create_generator(
             self.model_kit,
             request.prompt_tokens,
-            **generation_kwargs,
+            request_id=request_id,
+            prompt_progress_reporter=prompt_progress_reporter,
+            **request.generation_kwargs,
         )
 
     def runtime_context_length(self) -> int | None:
-        runtime_info = self._get_runtime_load_info(self.model_kit)
-        context_length = runtime_info.get("context_length")
-        if isinstance(context_length, int) and context_length > 0:
-            return context_length
-        return None
+        return self._get_runtime_load_info(self.model_kit).get("context_length")
 
     def stop(self, request_id: str) -> None:
         self._stop_generation(self.model_kit, request_id)
 
     def unload(self) -> None:
-        with self._unload_lock:
-            if self._unloaded:
-                return
-            self._unloaded = True
         self._unload(self.model_kit)
 
 
@@ -224,9 +209,8 @@ class GenerationSession:
             self.events.put(_GenerationErrorEvent(error))
         finally:
             try:
-                close = getattr(generator, "close", None)
-                if callable(close):
-                    close()
+                if generator is not None:
+                    generator.close()
             finally:
                 self._done.set()
                 self.events.put(_GENERATION_DONE)
@@ -293,7 +277,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         try:
             body = self._read_json_body()
             request = self.server.runtime.prepare_chat_generation(body)
-        except ChatRequestError as error:
+        except (ChatRequestError, ValidationError) as error:
             self._send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
         except Exception as error:
@@ -346,26 +330,23 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
                 continue
             if isinstance(event, _GenerationResultEvent):
                 result = event.result
-                tokens = getattr(result, "tokens")
-                completion_tokens += len(tokens)
-                text = getattr(result, "text")
-                if text != "":
+                completion_tokens += len(result.tokens)
+                if result.text != "":
                     self._write_sse_json(
                         {
                             "choices": [
                                 {
                                     "index": 0,
-                                    "delta": {"content": text},
+                                    "delta": {"content": result.text},
                                     "finish_reason": None,
                                 }
                             ]
                         }
                     )
-                stop_condition = getattr(result, "stop_condition")
-                if stop_condition is not None:
+                if result.stop_condition is not None:
                     self._write_sse_json(
                         self._terminal_payload(
-                            stop_condition=stop_condition,
+                            stop_condition=result.stop_condition,
                             prompt_tokens=prompt_tokens,
                             completion_tokens=completion_tokens,
                         )
@@ -384,11 +365,11 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
     def _terminal_payload(
         self,
         *,
-        stop_condition: object,
+        stop_condition: GenerationStopCondition,
         prompt_tokens: int,
         completion_tokens: int,
     ) -> dict:
-        stop_reason = getattr(stop_condition, "stop_reason")
+        stop_reason = stop_condition.stop_reason
         if stop_reason == "eos_token":
             finish_reason = "stop"
             stop_metadata = {"stop_type": "eos"}
@@ -396,7 +377,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             finish_reason = "stop"
             stop_metadata = {
                 "stop_type": "word",
-                "stopping_word": getattr(stop_condition, "stop_string"),
+                "stopping_word": stop_condition.stop_string,
             }
         elif stop_reason == "token_limit":
             finish_reason = "length"

@@ -1,6 +1,7 @@
 import pytest
 
 from mlx_engine.server.chat import (
+    ChatMessage,
     ChatRequestError,
     normalize_messages,
     prepare_chat_generation_request,
@@ -9,6 +10,7 @@ from mlx_engine.server.chat import (
 
 class _FakeRenderer:
     def __init__(self):
+        self.chat_template = "model template"
         self.calls = []
 
     def apply_chat_template(self, messages, **kwargs):
@@ -77,16 +79,17 @@ def test_prepare_text_request_uses_only_supported_generation_settings():
         or [1, 2, 3],
     )
 
-    assert request.prompt == "rendered prompt"
     assert request.prompt_tokens == [1, 2, 3]
-    assert request.images_b64 == []
-    assert request.temperature == 0.7
-    assert request.max_tokens == 100
-    assert request.stop_strings == ["END"]
-    assert request.top_p == 0.9
-    assert request.top_k == 40
-    assert request.min_p == 0.05
-    assert request.repetition_penalty == 1.1
+    assert request.generation_kwargs == {
+        "images_b64": [],
+        "temp": 0.7,
+        "max_tokens": 100,
+        "stop_strings": ["END"],
+        "top_p": 0.9,
+        "top_k": 40,
+        "min_p": 0.05,
+        "repetition_penalty": 1.1,
+    }
     assert tokenization_calls == [(model_kit, "rendered prompt")]
 
     messages, template_kwargs = renderer.calls[0]
@@ -148,7 +151,9 @@ def test_normalize_images_preserves_user_and_tool_result_order():
         },
     ]
 
-    normalized, images_b64 = normalize_messages(messages)
+    normalized, images_b64 = normalize_messages(
+        [ChatMessage.model_validate(message) for message in messages]
+    )
 
     assert images_b64 == ["first-image", "second-image", "first-image"]
     assert normalized[0]["content"] == [
@@ -191,7 +196,7 @@ def test_prepare_vision_request_forwards_base64_to_generation_boundary():
         tokenize=lambda _model_kit, _prompt: [7, 8],
     )
 
-    assert request.images_b64 == ["image-payload"]
+    assert request.generation_kwargs["images_b64"] == ["image-payload"]
     assert renderer.calls[0][0][0]["content"] == [
         {"type": "text", "text": "Describe this"},
         {"type": "image"},
@@ -217,7 +222,7 @@ def test_vision_request_uses_processor_tokenizer_when_processor_template_is_miss
         tokenize=lambda _model_kit, _prompt: [7, 8],
     )
 
-    assert request.prompt == "rendered prompt"
+    assert request.prompt_tokens == [7, 8]
     assert len(tokenizer_renderer.calls) == 1
 
 
@@ -225,15 +230,17 @@ def test_non_base64_image_url_is_rejected():
     with pytest.raises(ChatRequestError, match="inline base64"):
         normalize_messages(
             [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "https://example.com/image.png"},
-                        }
-                    ],
-                }
+                ChatMessage.model_validate(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://example.com/image.png"},
+                            }
+                        ],
+                    }
+                )
             ]
         )
 
