@@ -3,7 +3,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache import disk_budget
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     DEFAULT_PREFIX_CHUNK_SIZE,
 )
-from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx_vlm.models.cache import ArraysCache, KVCache, RotatingKVCache
 
 
 _GIB = 1024 * 1024 * 1024

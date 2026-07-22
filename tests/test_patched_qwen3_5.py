@@ -8,7 +8,9 @@ from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
 import mlx_lm.models.qwen3_5 as qwen3_5_module
 from mlx_lm.models.qwen3_next import Qwen3NextAttention
+from mlx_vlm.models.cache import BatchQuantizedKVCache
 from mlx_vlm.models.qwen3_5 import language as vlm_qwen3_5_language
+from mlx_vlm.turboquant import BatchTurboQuantKVCache
 from transformers import AutoTokenizer
 
 from mlx_engine.model_kit.patches import qwen3_5 as qwen3_5_patches
@@ -491,6 +493,18 @@ def test_vlm_qwen3_5_single_row_batch_cache_requires_real_left_padding(
     assert (
         qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache)
         is expected
+    )
+
+
+def test_vlm_qwen3_5_single_row_batch_cache_excludes_quantized_caches():
+    quantized_caches = [
+        BatchQuantizedKVCache([3], bits=4),
+        BatchTurboQuantKVCache([3], bits=4),
+    ]
+
+    assert all(
+        not qwen3_5_patches._patched_vlm_qwen3_5_is_single_row_batch_cache(cache)
+        for cache in quantized_caches
     )
 
 

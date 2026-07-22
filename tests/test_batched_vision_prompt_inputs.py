@@ -247,10 +247,42 @@ def test_build_prompt_kwargs_text_clears_qwen3_5_rope_state():
     assert model.language_model._rope_deltas is None
 
 
-def test_build_cached_prompt_kwargs_text_clears_qwen3_5_rope_state():
-    """Text-only Qwen3.5 restores keep the fast text RoPE path."""
+def test_build_prompt_kwargs_text_keeps_request_owned_qwen3_5_rope_state():
+    """Fresh request state is returned without relying on shared model state."""
+    position_ids = mx.arange(2, dtype=mx.int32).reshape(1, 2)
+    rope_deltas = mx.array([[0]], dtype=mx.int32)
     model = _FakeModel(
         inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        embedding_kwargs={
+            "position_ids": position_ids,
+            "rope_deltas": rope_deltas,
+        },
+    )
+    model.language_model.model_type = "qwen3_5_vl"
+    model.language_model._position_ids = mx.ones((3, 1, 4), dtype=mx.int32)
+    model.language_model._rope_deltas = mx.ones((1, 1), dtype=mx.int32)
+    prepared_prompt = PreparedPrompt(
+        prompt_input_ids=[1, 2],
+        raw_inputs=None,
+        image_spans=[],
+    )
+
+    prompt_kwargs = build_prompt_kwargs(model, prepared_prompt)
+
+    assert prompt_kwargs["position_ids"] is position_ids
+    assert prompt_kwargs["rope_deltas"] is rope_deltas
+    assert model.language_model._position_ids is None
+    assert model.language_model._rope_deltas is None
+
+
+def test_build_cached_prompt_kwargs_text_clears_qwen3_5_rope_state():
+    """Text-only Qwen3.5 restores discard suffix-local MRoPE state."""
+    model = _FakeModel(
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        embedding_kwargs={
+            "position_ids": mx.arange(6, dtype=mx.int32).reshape(3, 1, 2),
+            "rope_deltas": mx.array([[0]], dtype=mx.int32),
+        },
     )
     model.language_model.model_type = "qwen3_5_vl"
     model.language_model._position_ids = mx.ones((3, 1, 4), dtype=mx.int32)
@@ -366,6 +398,19 @@ def test_build_cached_prompt_kwargs_slices_image_embeds_and_position_ids(monkeyp
     )
     assert prompt_kwargs["token_type_ids"].tolist() == token_type_ids[:, 4:].tolist()
     assert prompt_kwargs["rope_deltas"].tolist() == [5]
+
+
+def test_slice_prompt_kwargs_slices_text_and_mrope_position_ids():
+    """Position IDs keep their layout while slicing the sequence axis."""
+    position_ids_by_layout = (
+        mx.arange(6, dtype=mx.int32).reshape(1, 6),
+        mx.arange(18, dtype=mx.int32).reshape(3, 1, 6),
+    )
+
+    for position_ids in position_ids_by_layout:
+        sliced = slice_prompt_kwargs({"position_ids": position_ids}, 2, 5)
+
+        assert sliced["position_ids"].tolist() == position_ids[..., 2:5].tolist()
 
 
 def test_slice_prompt_kwargs_slices_gemma4_token_type_ids():

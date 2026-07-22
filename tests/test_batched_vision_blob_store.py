@@ -5,7 +5,7 @@ from mlx.utils import tree_flatten
 from mlx_engine.model_kit.batched_vision.prompt_cache.blob_store import (
     TemporarySafetensorBlobStore,
 )
-from mlx_lm.models.cache import ArraysCache, RotatingKVCache
+from mlx_vlm.models.cache import ArraysCache, RotatingKVCache
 
 
 @pytest.fixture

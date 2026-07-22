@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 import mlx.core as mx
-from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx_vlm.models.cache import ArraysCache, KVCache, RotatingKVCache
 
 from mlx_engine.model_kit.batched_vision import context_fit
 from mlx_engine.model_kit.batched_vision.context_fit import (
@@ -61,6 +61,14 @@ def _probe_profile(
         max_context_length=8_192,
         prefill_step_size=2_048,
     )
+
+
+def test_context_fit_uses_vlm_prompt_cache_factory():
+    language_model = SimpleNamespace(layers=[object()])
+
+    prompt_cache = context_fit.make_prompt_cache(language_model)
+
+    assert type(prompt_cache[0]) is KVCache
 
 
 def _profile(

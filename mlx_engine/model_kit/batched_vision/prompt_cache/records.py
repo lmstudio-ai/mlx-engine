@@ -21,7 +21,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     RECORD_KIND_STATE_CHECKPOINT,
     RecordKind,
 )
-from mlx_lm.models.cache import KVCache, RotatingKVCache
+from mlx_vlm.models.cache import KVCache, RotatingKVCache
 
 
 class PromptCacheRecordCoverageError(ValueError):
@@ -76,8 +76,8 @@ def record_kind_for_prompt_cache(cache: Any) -> RecordKind:
     """Classify one live cache layer into its disk record kind."""
     cache_type = type(cache).__name__
     if cache_type == "KVCache":
-        # mlx-vlm re-exports mlx-lm cache classes; keep this name-based so local
-        # forks do not need identical module identities.
+        # The record format stores canonical cache class names, so classify
+        # with the same module-independent identifier.
         return RECORD_KIND_KV_DELTA
     if cache_type == "RotatingKVCache" and getattr(cache, "keep", 0) == 0:
         return RECORD_KIND_ROTATING_DELTA

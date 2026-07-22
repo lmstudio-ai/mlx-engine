@@ -18,9 +18,16 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
 from mlx_engine.model_kit.batched_vision.prompt_cache.records import (
     PromptCacheRecordCoverageError,
 )
-from mlx_lm.models.cache import can_trim_prompt_cache, trim_prompt_cache
 
 logger = logging.getLogger(__name__)
+
+
+def _trim_prompt_cache(prompt_cache: list[Any], num_tokens: int) -> int:
+    if len(prompt_cache) == 0 or not all(
+        cache.is_trimmable() for cache in prompt_cache
+    ):
+        return 0
+    return [cache.trim(num_tokens) for cache in prompt_cache][0]
 
 
 @dataclass
@@ -234,9 +241,7 @@ class VlmPromptCacheCoordinator:
         entry = plan.entry
         trim_count = len(entry.prompt_input_ids) - plan.cached_prefix_len
         if trim_count > 0:
-            if not can_trim_prompt_cache(entry.prompt_cache):
-                return None
-            trimmed = trim_prompt_cache(entry.prompt_cache, trim_count)
+            trimmed = _trim_prompt_cache(entry.prompt_cache, trim_count)
             if trimmed != trim_count:
                 return None
 

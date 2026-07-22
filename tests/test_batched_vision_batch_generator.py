@@ -2,6 +2,13 @@ import contextlib
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
+from mlx_vlm.models.cache import (
+    BatchKVCache,
+    BatchRotatingKVCache,
+    KVCache,
+    RotatingKVCache,
+)
 
 from mlx_engine.model_kit.batched_vision import batch_generator as batcher
 from mlx_engine.model_kit.batched_vision.batch_generator import (
@@ -160,6 +167,15 @@ def _gemma4_non_bidir_model():
     return model
 
 
+def test_batch_generator_uses_vlm_prompt_cache_factory():
+    model = _FakeModel()
+    model.layers = [object()]
+
+    prompt_cache = batcher.make_prompt_cache(model)
+
+    assert type(prompt_cache[0]) is KVCache
+
+
 def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
     """Processors are per-row, and sampled token metadata follows decode-ahead."""
     model = _FakeModel()
@@ -254,6 +270,40 @@ def test_generation_batch_finish_returns_cache_tokens_and_rope_delta():
     assert response.rope_deltas.tolist() == [[5]]
 
 
+def test_generation_batch_extracts_vlm_scalar_caches_from_vlm_batches():
+    keys = mx.arange(4, dtype=mx.float32).reshape(1, 1, 4, 1)
+    values = keys + 10
+    cache_cases = [
+        (KVCache(), BatchKVCache),
+        (RotatingKVCache(max_size=8, keep=0), BatchRotatingKVCache),
+    ]
+
+    for scalar_cache, batch_cache_type in cache_cases:
+        scalar_cache.update_and_fetch(keys, values)
+        batch_cache = scalar_cache.merge([scalar_cache])
+        generation_batch = GenerationBatch(
+            model=_FakeModel(),
+            uids=[7],
+            inputs=mx.array([9], dtype=mx.int32),
+            prompt_cache=[batch_cache],
+            samplers=[_argmax_sampler],
+            stop_criteria=lambda _token: False,
+            max_tokens=[1],
+            all_tokens=[[1, 2]],
+            logits_processors=[[]],
+            prefix_cache_save_states=_prefix_cache_save_states(1),
+        )
+
+        extracted = generation_batch.extract_cache(0)
+
+        assert type(batch_cache) is batch_cache_type
+        assert extracted is not None
+        assert type(extracted[0]) is type(scalar_cache)
+        assert extracted[0].meta_state == scalar_cache.meta_state
+        assert extracted[0].state[0].tolist() == scalar_cache.state[0].tolist()
+        assert extracted[0].state[1].tolist() == scalar_cache.state[1].tolist()
+
+
 def test_generation_batch_extends_mixed_rope_rows_without_broadcasting():
     """Appending text-only work to image work gives each row its own RoPE delta."""
     model = _FakeModel()
@@ -302,10 +352,41 @@ def test_capture_rope_deltas_keeps_qwen3_5_text_only_none():
     assert batcher._capture_rope_deltas(qwen_model, rows=2).tolist() == [[0], [0]]
 
 
+def test_prompt_prefill_prefers_request_owned_rope_deltas(monkeypatch):
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _FakeModel()
+    model.language_model = SimpleNamespace(
+        model_type="qwen3_5_vl",
+        _rope_deltas=mx.array([99], dtype=mx.int32),
+    )
+    prompt_prefill = batcher._PromptPrefill(
+        model=model,
+        uid=1,
+        input_ids=[1, 2],
+        max_tokens=1,
+        top_logprobs=0,
+        sampler=_argmax_sampler,
+        logits_processors=[],
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        prompt_kwargs={"rope_deltas": mx.array([7], dtype=mx.int32)},
+        prefix_cache_save_state=_prefix_cache_save_states(1)[0],
+    )
+
+    generation_batch, _ = prompt_prefill.generate(lambda _token: False)
+
+    assert generation_batch._rope_deltas.tolist() == [[7]]
+
+
+@pytest.mark.parametrize("use_mrope", [False, True], ids=["text", "mrope"])
 def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     monkeypatch,
+    use_mrope,
 ):
-    """Chunked prefill keeps Qwen MRoPE positions aligned with sliced embeds."""
+    """Chunked prefill keeps text and MRoPE positions aligned with embeds."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
@@ -320,14 +401,17 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     )
     snapshots = []
     prompt = list(range(513))
-    position_ids = mx.array(
-        [
-            [list(range(513))],
-            [list(range(1000, 1513))],
-            [list(range(2000, 2513))],
-        ],
-        dtype=mx.int32,
-    )
+    if use_mrope:
+        position_ids = mx.array(
+            [
+                [list(range(513))],
+                [list(range(1000, 1513))],
+                [list(range(2000, 2513))],
+            ],
+            dtype=mx.int32,
+        )
+    else:
+        position_ids = mx.array([list(range(513))], dtype=mx.int32)
 
     prefix_chunks = build_prefix_cache_chunks(prompt, [])
 
@@ -355,12 +439,11 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
         generator.close()
 
     assert [len(call["input_ids"][0]) for call in model.calls] == [256, 256, 1]
-    assert [len(call["position_ids"][0][0]) for call in model.calls] == [256, 256, 1]
-    assert model.calls[0]["position_ids"][0][0][0] == 0
-    assert model.calls[0]["position_ids"][0][0][-1] == 255
-    assert model.calls[1]["position_ids"][0][0][0] == 256
-    assert model.calls[1]["position_ids"][0][0][-1] == 511
-    assert model.calls[2]["position_ids"][0][0] == [512]
+    assert [call["position_ids"] for call in model.calls] == [
+        position_ids[..., :256].tolist(),
+        position_ids[..., 256:512].tolist(),
+        position_ids[..., 512:].tolist(),
+    ]
     assert [
         (start_chunk_idx, end_chunk_idx, snapshot_len)
         for _, _, start_chunk_idx, end_chunk_idx, snapshot_len in snapshots

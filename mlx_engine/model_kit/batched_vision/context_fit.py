@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import mlx.core as mx
-from mlx_lm.models.cache import make_prompt_cache
+from mlx_vlm.models.cache import make_prompt_cache
 
 logger = logging.getLogger(__name__)
 
