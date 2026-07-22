@@ -50,6 +50,7 @@ def _probe_profile(
     *,
     family="gemma4",
     language_model=None,
+    query_attention_heads=8,
 ):
     if language_model is None:
         language_model = _ProbeLanguageModel()
@@ -59,6 +60,7 @@ def _probe_profile(
         language_model=language_model,
         family=family,
         max_context_length=8_192,
+        query_attention_heads=query_attention_heads,
         prefill_step_size=2_048,
     )
 
@@ -158,14 +160,13 @@ def test_probe_counts_actual_qwen_arrays_state_bytes(monkeypatch):
     arrays_cache[1] = mx.ones((1, 2, 2), dtype=mx.float16)
     mx.eval(arrays_cache.state)
     language_model = _ProbeLanguageModel()
-    language_model.config = SimpleNamespace()
-    language_model.args = SimpleNamespace(num_attention_heads=16)
 
     profile = _probe_profile(
         monkeypatch,
         [_initialized_kv_cache(), arrays_cache],
         family="qwen3_5",
         language_model=language_model,
+        query_attention_heads=16,
     )
 
     assert profile.fixed_ssm_bytes == arrays_cache.nbytes
@@ -483,11 +484,73 @@ def test_one_token_probe_uses_token_zero_and_reports_fit(monkeypatch):
     assert context_length == 8_192
 
 
+def test_text_adapter_uses_top_level_config(monkeypatch):
+    probe_args = {}
+    language_model = SimpleNamespace(model_type="qwen2")
+    model = SimpleNamespace(
+        language_model=language_model,
+        config=SimpleNamespace(
+            model_type="qwen2",
+            max_position_embeddings=8_192,
+            num_attention_heads=12,
+            text_config=SimpleNamespace(),
+        ),
+    )
+
+    def capture_probe_args(**kwargs):
+        probe_args.update(kwargs)
+        return _profile(
+            family="qwen2",
+            max_context_length=8_192,
+            full_kv_bytes_per_token=512 * KIB,
+            query_attention_heads=kwargs["query_attention_heads"],
+        )
+
+    monkeypatch.setattr(
+        context_fit,
+        "_probe_cache_fit_profile",
+        capture_probe_args,
+    )
+    monkeypatch.setattr(context_fit.mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(context_fit.mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(
+        context_fit.mx,
+        "device_info",
+        lambda: {"max_recommended_working_set_size": 10 * GIB},
+    )
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) == 8_192
+    assert probe_args["max_context_length"] == 8_192
+    assert probe_args["query_attention_heads"] == 12
+
+
+def test_fit_skips_model_without_attention_head_count(monkeypatch, caplog):
+    probe_called = False
+
+    def unexpected_probe(**_kwargs):
+        nonlocal probe_called
+        probe_called = True
+
+    language_model = SimpleNamespace(
+        model_type="other_vlm",
+        config=SimpleNamespace(max_position_embeddings=8_192),
+    )
+    model = SimpleNamespace(language_model=language_model)
+    monkeypatch.setattr(context_fit, "_probe_cache_fit_profile", unexpected_probe)
+
+    assert fit_batched_vlm_context(model=model, prefill_step_size=2_048) is None
+    assert not probe_called
+    assert "could not find the query attention head count" in caplog.text
+
+
 def test_qwen3_6_uses_args_context(monkeypatch):
     language_model = SimpleNamespace(
         model_type="qwen3_6_moe",
         config=SimpleNamespace(),
-        args=SimpleNamespace(max_position_embeddings=8_192),
+        args=SimpleNamespace(
+            max_position_embeddings=8_192,
+            num_attention_heads=8,
+        ),
     )
     model = SimpleNamespace(language_model=language_model)
     monkeypatch.setattr(
@@ -514,6 +577,7 @@ def test_other_family_uses_best_effort_fit(monkeypatch):
         config=SimpleNamespace(
             model_type="other_vlm",
             max_position_embeddings=8_192,
+            num_attention_heads=8,
         )
     )
     model = SimpleNamespace(language_model=language_model)
@@ -564,7 +628,10 @@ def test_other_family_does_not_override_context_with_minimum_fit(monkeypatch):
     )
     language_model = SimpleNamespace(
         model_type="other_vlm",
-        config=SimpleNamespace(max_position_embeddings=100_000),
+        config=SimpleNamespace(
+            max_position_embeddings=100_000,
+            num_attention_heads=8,
+        ),
     )
     model = SimpleNamespace(language_model=language_model)
     monkeypatch.setattr(
@@ -592,7 +659,10 @@ def test_other_family_leaves_context_unchanged_when_probe_is_unsupported(
 ):
     language_model = SimpleNamespace(
         model_type="other_vlm",
-        config=SimpleNamespace(max_position_embeddings=32_768),
+        config=SimpleNamespace(
+            max_position_embeddings=32_768,
+            num_attention_heads=8,
+        ),
     )
     model = SimpleNamespace(language_model=language_model)
     monkeypatch.setattr(
@@ -609,7 +679,10 @@ def test_validated_family_leaves_context_unchanged_when_probe_is_unsupported(
 ):
     language_model = SimpleNamespace(
         model_type="gemma4_text",
-        config=SimpleNamespace(max_position_embeddings=32_768),
+        config=SimpleNamespace(
+            max_position_embeddings=32_768,
+            num_attention_heads=8,
+        ),
     )
     model = SimpleNamespace(language_model=language_model)
     monkeypatch.setattr(
@@ -635,7 +708,10 @@ def test_fit_leaves_context_unchanged_when_fallback_is_unknown(caplog):
 def test_fit_logs_and_leaves_context_unchanged_when_probe_raises(monkeypatch, caplog):
     language_model = SimpleNamespace(
         model_type="gemma4_text",
-        config=SimpleNamespace(max_position_embeddings=16_384),
+        config=SimpleNamespace(
+            max_position_embeddings=16_384,
+            num_attention_heads=8,
+        ),
     )
     model = SimpleNamespace(language_model=language_model)
 

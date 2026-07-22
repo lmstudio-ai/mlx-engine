@@ -18,9 +18,9 @@ import threading
 
 from mlx_engine.utils.kv_cache_quantization import get_kv_cache_quantization_params
 from mlx_lm.generate import stream_generate
-from mlx_lm.utils import load as mlx_lm_load
-from mlx_lm.models.cache import make_prompt_cache
+from mlx_vlm.models.cache import make_prompt_cache
 from mlx_vlm.structured import build_json_schema_logits_processor
+from mlx_vlm.utils import load_model as mlx_vlm_load_model
 
 from mlx_engine.model_kit.model_kit import ModelKit
 from mlx_engine.utils.token import Token
@@ -225,7 +225,6 @@ def load_model(
     Returns:
         LoadedModelKit: An initialized model instance:
             - ModelKit: for sequential text-only models and vocab-only loads
-            - BatchedModelKit: for text-only continuous batching
             - BatchedVisionModelKit: for mlx-vlm continuous batching
 
     Raises:
@@ -247,11 +246,8 @@ def load_model(
                 f"The model will process requests sequentially."
             )
 
-    # Determine which model kit to use based on model capabilities and configuration.
-    # The decision tree is:
-    # 1. BatchedVisionModelKit: mlx-vlm continuous batching for VLMs
-    # 2. BatchedModelKit: continuous batching for text-only models
-    # 3. ModelKit: fallback for sequential text-only processing
+    # BatchedVisionModelKit provides mlx-vlm continuous batching for both text
+    # and vision models. ModelKit remains the fallback for sequential text loads.
     if "vision_config" in config_json and vocab_only:
         model_kit = ModelKit(
             model_path,
@@ -273,8 +269,6 @@ def load_model(
             seed=seed,
         )
     else:
-        # For non-vision models, choose between BatchedModelKit
-        # (continuous batching) and ModelKit (sequential).
         kv_bits, kv_group_size, quantized_kv_start = get_kv_cache_quantization_params(
             kv_bits,
             kv_group_size,
@@ -282,13 +276,10 @@ def load_model(
         )
 
         def is_batchable() -> bool:
-            # 0. Ensure the load isn't vocab only
-            if vocab_only:
-                return False
-            # 1. All cache layers must support merge
-            model, _ = mlx_lm_load(model_path, lazy=True)
+            model = mlx_vlm_load_model(model_path, lazy=True)
+            language_model = getattr(model, "language_model", model)
             cache_has_merge_attr = all(
-                hasattr(c, "merge") for c in make_prompt_cache(model)
+                hasattr(cache, "merge") for cache in make_prompt_cache(language_model)
             )
             del model
             if not cache_has_merge_attr:
@@ -296,26 +287,25 @@ def load_model(
                     "this model architecture does not support continuous batching"
                 )
                 return False
-            # 2. KV cache quantization is not compatible with batching yet
-            if kv_bits is not None:
-                warn_if_parallel(
-                    "concurrency is not supported with KV Cache Quantization"
-                )
-                return False
             return True
 
-        # If max_seq_nums is set to 1, use ModelKit instead of BatchedModelKit. This gives users an escape hatch,
-        # which they could use to enable spec decoding. We can remove this additional restriction once we add
-        # spec decoding support to the batched backend
-        use_batched_kit = max_seq_nums != 1 and is_batchable()
+        # max_seq_nums=1 remains an escape hatch for sequential generation and
+        # speculative decoding. KV cache quantization also stays on that path.
+        if vocab_only or max_seq_nums == 1:
+            use_batched_kit = False
+        elif kv_bits is not None:
+            warn_if_parallel("concurrency is not supported with KV Cache Quantization")
+            use_batched_kit = False
+        else:
+            use_batched_kit = is_batchable()
 
         if use_batched_kit:
-            batched_max_seq_nums = 4 if max_seq_nums is None else max_seq_nums
-            model_kit = BatchedModelKit(
+            model_kit = BatchedVisionModelKit(
                 model_path,
                 max_kv_size=max_kv_size,
-                max_seq_nums=batched_max_seq_nums,
+                max_seq_nums=max_seq_nums,
                 prefill_step_size=prefill_step_size,
+                trust_remote_code=trust_remote_code,
                 seed=seed,
             )
         else:

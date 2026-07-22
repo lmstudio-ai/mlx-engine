@@ -2,7 +2,7 @@ import pytest
 import threading
 import time
 
-from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
+from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
 from tests.shared import model_getter
 from mlx_engine.generate import load_model, create_generator, tokenize, unload
 
@@ -19,7 +19,7 @@ def model_kit():
 def test_batched_generation_max_tokens(model_kit):
     """Test that batched generation stops with token_limit when max_tokens is reached."""
 
-    assert isinstance(model_kit, BatchedModelKit)
+    assert isinstance(model_kit, BatchedVisionModelKit)
 
     prompt = """<|im_start|>user
 Write a short paragraph about the Eiffel Tower in Paris.<|im_end|>
@@ -51,7 +51,7 @@ Write a short paragraph about the Eiffel Tower in Paris.<|im_end|>
 def test_batched_generation_two_threads(model_kit):
     """Test batched generation with two concurrent threads."""
 
-    assert isinstance(model_kit, BatchedModelKit)
+    assert isinstance(model_kit, BatchedVisionModelKit)
 
     # Define two different prompts with different topics
     prompts = [

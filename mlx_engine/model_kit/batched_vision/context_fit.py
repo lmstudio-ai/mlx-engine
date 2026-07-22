@@ -120,11 +120,27 @@ def fit_batched_vlm_context(
                 "leaving context unchanged"
             )
             return None
+
         if not validated_family and max_context_length <= MIN_FITTED_CONTEXT_TOKENS:
             logger.info(
                 "Model family %s reports a %s token maximum; leaving context unchanged",
                 family,
                 f"{max_context_length:,}",
+            )
+            return None
+
+        query_attention_heads = None
+        for key in ("num_attention_heads", "n_heads"):
+            for source in config_sources:
+                query_attention_heads = _config_value(source, key)
+                if query_attention_heads is not None:
+                    break
+            if query_attention_heads is not None:
+                break
+        if query_attention_heads is None:
+            logger.error(
+                "Model context auto-fit could not find the query attention head count; "
+                "leaving context unchanged"
             )
             return None
 
@@ -134,6 +150,7 @@ def fit_batched_vlm_context(
                 language_model=language_model,
                 family=family,
                 max_context_length=max_context_length,
+                query_attention_heads=query_attention_heads,
                 prefill_step_size=prefill_step_size,
             )
         finally:
@@ -280,6 +297,7 @@ def _probe_cache_fit_profile(
     language_model: Any,
     family: str,
     max_context_length: int,
+    query_attention_heads: int,
     prefill_step_size: int,
 ) -> CacheFitProfile | None:
     prompt_cache = make_prompt_cache(language_model)
@@ -298,16 +316,6 @@ def _probe_cache_fit_profile(
         prompt_input_bytes_per_token += per_layer_inputs.nbytes
     # Attention uses the same activation dtype as the token embeddings.
     activation_dtype_bytes = inputs_embeds.itemsize
-
-    language_config = getattr(language_model, "config", None)
-    language_args = getattr(language_model, "args", None)
-    query_attention_heads = _config_value(
-        language_config, "num_attention_heads"
-    ) or _config_value(language_args, "num_attention_heads")
-    if query_attention_heads is None:
-        query_attention_heads = _config_value(
-            language_config, "n_heads"
-        ) or _config_value(language_args, "n_heads")
 
     language_model(
         input_ids,
