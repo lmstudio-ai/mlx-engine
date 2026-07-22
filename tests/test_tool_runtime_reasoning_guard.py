@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -335,13 +336,28 @@ def test_qwen35_reasoning_guard_does_not_decode_during_generation():
     assert tokenizer.decode_count == decode_count_after_setup
 
 
-def test_qwen35_structure_bridges_after_tool_call_start():
-    processor = _qwen_processor()
-    context = _mx_context()
+def test_qwen35_structure_bridges_after_tool_call_start_for_all_logits_dtypes():
+    for logits_dtype in (mx.float16, mx.bfloat16, mx.float32):
+        processor = _qwen_processor()
+        context = _mx_context()
 
-    logits = _process_token(processor, context, 4)
+        sampled_token_id = _sample_bridge_token(processor, context, logits_dtype)
+        logits = _process_token(processor, context, sampled_token_id)
 
-    assert _forced_token_ids(logits) == [6]
+        assert _forced_token_ids(logits) == [7]
+
+
+def test_qwen35_structure_bridges_adjacent_tool_calls_for_all_logits_dtypes():
+    for logits_dtype in (mx.float16, mx.bfloat16, mx.float32):
+        processor = _qwen_processor()
+        context = _mx_context()
+        for token_id in [4, 6, 7, 8, 9, 10, 11, 12, 5]:
+            _process_token(processor, context, token_id)
+
+        sampled_token_id = _sample_bridge_token(processor, context, logits_dtype)
+        logits = _process_token(processor, context, sampled_token_id)
+
+        assert _forced_token_ids(logits) == [7]
 
 
 def _mx_context():
@@ -360,6 +376,22 @@ def _process_token(processor, context, token_id, logits=None):
 
 def _mx_logits():
     return mx.zeros((1, 24), dtype=mx.float32)
+
+
+def _sample_bridge_token(processor, context, logits_dtype):
+    logits = _process_token(
+        processor,
+        context,
+        4,
+        mx.zeros((1, 24), dtype=logits_dtype),
+    )
+    assert _finite_token_ids(logits) == [6]
+
+    logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+    sampled_token_id = int(mx.argmax(logprobs, axis=-1).item())
+    assert sampled_token_id == 6
+    assert math.isfinite(logprobs[0, sampled_token_id].item())
+    return sampled_token_id
 
 
 def _post_tool_logits():
@@ -389,12 +421,20 @@ def _forced_token_ids(logits):
     ]
 
 
+def _finite_token_ids(logits):
+    return [
+        token_id
+        for token_id, value in enumerate(logits.reshape(-1).tolist())
+        if math.isfinite(value)
+    ]
+
+
 def test_gemma4_structure_constrains_header_after_tool_call_start():
     processor = _processor()
     context = _mx_context()
 
     logits = _process_token(processor, context, 4)
-    assert _forced_token_ids(logits) == [6]
+    assert _finite_token_ids(logits) == [6]
 
     logits = _process_token(processor, context, 6)
     assert _forced_token_ids(logits) == [7]
