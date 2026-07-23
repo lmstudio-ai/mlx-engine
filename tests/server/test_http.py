@@ -164,7 +164,18 @@ def test_chat_stream_forwards_generation_settings_and_returns_usage():
             port,
             "POST",
             "/v1/chat/completions",
-            body=_request_body(),
+            body={
+                **_request_body(),
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"answer": {"type": "string"}},
+                        }
+                    },
+                },
+            },
         )
 
     assert status == 200
@@ -208,6 +219,33 @@ def test_chat_stream_forwards_generation_settings_and_returns_usage():
     assert generation_kwargs["top_k"] == 20
     assert generation_kwargs["min_p"] == 0.03
     assert generation_kwargs["repetition_penalty"] == 1.05
+    assert json.loads(generation_kwargs["json_schema"]) == {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+    }
+
+
+def test_tools_are_rejected_before_streaming():
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+    body = _request_body()
+    body["tools"] = [{"type": "function", "function": {"name": "search"}}]
+
+    with _running_server(runtime) as port:
+        status, response_body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 400
+    assert json.loads(response_body) == {
+        "error": {"message": "Tools are not supported yet."}
+    }
 
 
 def test_generation_error_is_returned_inside_the_stream():

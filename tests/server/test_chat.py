@@ -1,4 +1,7 @@
+import json
+
 import pytest
+from pydantic import ValidationError
 
 from mlx_engine.server.chat import (
     ChatMessage,
@@ -57,20 +60,7 @@ def test_prepare_text_request_uses_only_supported_generation_settings():
     tokenization_calls = []
 
     request = prepare_chat_generation_request(
-        _base_request(
-            chat_template_kwargs={"reasoning_effort": "medium"},
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "search",
-                        "description": "Search",
-                        "parameters": {"type": "object"},
-                    },
-                }
-            ],
-            tool_choice="auto",
-        ),
+        _base_request(chat_template_kwargs={"reasoning_effort": "medium"}),
         model_kit=model_kit,
         supports_vision=False,
         tokenize=lambda received_model_kit, prompt: tokenization_calls.append(
@@ -96,8 +86,83 @@ def test_prepare_text_request_uses_only_supported_generation_settings():
     assert messages == [{"role": "user", "content": "Hello"}]
     assert template_kwargs["tokenize"] is False
     assert template_kwargs["add_generation_prompt"] is True
+    assert "continue_final_message" not in template_kwargs
     assert template_kwargs["reasoning_effort"] == "medium"
-    assert template_kwargs["tools"][0]["function"]["name"] == "search"
+
+
+def test_tools_are_rejected():
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match="Tools are not supported yet"):
+        prepare_chat_generation_request(
+            _base_request(
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {"name": "search"},
+                    }
+                ]
+            ),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
+def test_json_schema_is_forwarded_to_generation():
+    renderer = _FakeRenderer()
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema},
+            }
+        ),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert json.loads(request.generation_kwargs["json_schema"]) == schema
+
+
+def test_unsupported_response_format_is_rejected():
+    with pytest.raises(ValidationError, match="json_schema"):
+        prepare_chat_generation_request(
+            _base_request(response_format={"type": "json_object"}),
+            model_kit=_FakeTextModelKit(_FakeRenderer()),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+
+def test_final_assistant_message_is_rendered_as_a_prefill():
+    renderer = _FakeRenderer()
+
+    prepare_chat_generation_request(
+        _base_request(
+            messages=[
+                {"role": "user", "content": "Respond with JSON"},
+                {"role": "assistant", "content": '{"answer":'},
+            ]
+        ),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    messages, template_kwargs = renderer.calls[0]
+    assert messages[-1] == {"role": "assistant", "content": '{"answer":'}
+    assert template_kwargs["add_generation_prompt"] is False
+    assert template_kwargs["continue_final_message"] is True
 
 
 @pytest.mark.parametrize(

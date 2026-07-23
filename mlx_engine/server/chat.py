@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from typing import Annotated, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,6 +45,15 @@ class ChatMessage(BaseModel):
     content: str | list[_ContentPart] | None = None
 
 
+class _JsonSchemaDefinition(BaseModel):
+    schema_: object = Field(alias="schema")
+
+
+class _JsonSchemaResponseFormat(BaseModel):
+    type: Literal["json_schema"]
+    json_schema: _JsonSchemaDefinition
+
+
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -57,6 +67,7 @@ class ChatCompletionRequest(BaseModel):
     min_p: float | None = None
     repeat_penalty: float | None = None
     tools: list[dict] | None = None
+    response_format: _JsonSchemaResponseFormat | None = None
     chat_template_kwargs: dict = Field(default_factory=dict)
 
 
@@ -115,6 +126,9 @@ def prepare_chat_generation_request(
     tokenize: Callable[[object, str], list[int]],
 ) -> ChatGenerationRequest:
     request = ChatCompletionRequest.model_validate(body)
+    if request.tools:
+        raise ChatRequestError("Tools are not supported yet.")
+
     normalized_messages, images_b64 = normalize_messages(request.messages)
     if images_b64 and not supports_vision:
         raise ChatRequestError("The loaded model does not support images.")
@@ -129,15 +143,19 @@ def prepare_chat_generation_request(
         )
 
     template_kwargs = dict(request.chat_template_kwargs)
-    if request.tools:
-        template_kwargs["tools"] = request.tools
+    if request.messages and request.messages[-1].role == "assistant":
+        template_kwargs["continue_final_message"] = True
+        add_generation_prompt = False
+    else:
+        add_generation_prompt = True
+
     prompt = _get_chat_template(
         model_kit,
         supports_vision=supports_vision,
     )(
         normalized_messages,
         tokenize=False,
-        add_generation_prompt=True,
+        add_generation_prompt=add_generation_prompt,
         **template_kwargs,
     )
 
@@ -146,6 +164,10 @@ def prepare_chat_generation_request(
         "temp": request.temperature,
         "top_k": request.top_k,
     }
+    if request.response_format is not None:
+        generation_kwargs["json_schema"] = json.dumps(
+            request.response_format.json_schema.schema_
+        )
     for name, value in (
         ("max_tokens", request.max_tokens),
         ("stop_strings", request.stop),
