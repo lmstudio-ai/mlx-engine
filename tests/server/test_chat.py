@@ -100,6 +100,30 @@ def test_prepare_text_request_uses_only_supported_generation_settings():
     assert template_kwargs["tools"][0]["function"]["name"] == "search"
 
 
+@pytest.mark.parametrize(
+    "control_name",
+    [
+        "add_generation_prompt",
+        "chat_template",
+        "continue_final_message",
+        "tokenize",
+        "tools",
+    ],
+)
+def test_chat_template_kwargs_cannot_override_server_controls(control_name):
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match="server rendering controls"):
+        prepare_chat_generation_request(
+            _base_request(chat_template_kwargs={control_name: "override"}),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
 def test_normalize_images_preserves_user_and_tool_result_order():
     messages = [
         {

@@ -4,6 +4,15 @@ from typing import Annotated, Callable, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+_CHAT_TEMPLATE_CONTROL_KEYS = {
+    "add_generation_prompt",
+    "chat_template",
+    "continue_final_message",
+    "tokenize",
+    "tools",
+}
+
+
 class ChatRequestError(ValueError):
     """The chat request does not match the server contract."""
 
@@ -109,6 +118,15 @@ def prepare_chat_generation_request(
     normalized_messages, images_b64 = normalize_messages(request.messages)
     if images_b64 and not supports_vision:
         raise ChatRequestError("The loaded model does not support images.")
+
+    overridden_controls = _CHAT_TEMPLATE_CONTROL_KEYS.intersection(
+        request.chat_template_kwargs
+    )
+    if overridden_controls:
+        names = ", ".join(sorted(overridden_controls))
+        raise ChatRequestError(
+            f"chat_template_kwargs cannot override server rendering controls: {names}."
+        )
 
     template_kwargs = dict(request.chat_template_kwargs)
     if request.tools:
