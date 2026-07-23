@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
-from queue import Queue
 import threading
 from typing import Callable, Iterator
 import uuid
@@ -35,34 +33,6 @@ from .chat import (
 
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _PromptProgressEvent:
-    total_prompt_tokens: int | None = None
-
-
-@dataclass(frozen=True)
-class _GenerationResultEvent:
-    result: GenerationResult
-
-
-@dataclass(frozen=True)
-class _GenerationErrorEvent:
-    error: Exception
-
-
-class _GenerationDoneEvent:
-    pass
-
-
-_GENERATION_DONE = _GenerationDoneEvent()
-GenerationEvent = (
-    _PromptProgressEvent
-    | _GenerationResultEvent
-    | _GenerationErrorEvent
-    | _GenerationDoneEvent
-)
 
 
 class EngineRuntime:
@@ -122,59 +92,16 @@ class EngineRuntime:
         self._unload(self.model_kit)
 
 
-class _QueuePromptProgressReporter(PromptProgressReporter):
-    def __init__(
-        self,
-        events: Queue[GenerationEvent],
-        cancelled: threading.Event,
-    ):
-        self._events = events
-        self._cancelled = cancelled
-
-    def begin(
-        self,
-        is_draft: bool,
-        cached_tokens: int,
-        total_prompt_tokens: int,
-        prefill_tokens_processed: int,
-    ) -> bool:
-        if not is_draft:
-            self._events.put(
-                _PromptProgressEvent(total_prompt_tokens=total_prompt_tokens)
-            )
-        return not self._cancelled.is_set()
-
-    def update(self, is_draft: bool, prefill_tokens_processed: int) -> bool:
-        if not is_draft:
-            self._events.put(_PromptProgressEvent())
-        return not self._cancelled.is_set()
-
-    def finish(
-        self,
-        is_draft: bool,
-        prefill_tokens_processed: int | None = None,
-    ) -> bool:
-        if not is_draft:
-            self._events.put(_PromptProgressEvent())
-        return not self._cancelled.is_set()
-
-
 class GenerationSession:
-    def __init__(self, runtime: EngineRuntime, request: ChatGenerationRequest):
+    def __init__(self, runtime: EngineRuntime):
         self.request_id = str(uuid.uuid4())
-        self.events: Queue[GenerationEvent] = Queue()
         self._runtime = runtime
-        self._request = request
         self._cancelled = threading.Event()
         self._done = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"mlx-engine-http-generation-{self.request_id}",
-            daemon=True,
-        )
 
-    def start(self) -> None:
-        self._thread.start()
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
 
     def cancel(self) -> None:
         if self._cancelled.is_set() or self._done.is_set():
@@ -185,35 +112,47 @@ class GenerationSession:
         except Exception:
             logger.exception("Failed to cancel MLX generation %s", self.request_id)
 
-    def join(self, timeout: float | None = None) -> None:
-        self._thread.join(timeout)
+    def finish(self) -> None:
+        self._done.set()
 
-    def _run(self) -> None:
-        generator = None
-        try:
-            if self._cancelled.is_set():
-                return
-            reporter = _QueuePromptProgressReporter(self.events, self._cancelled)
-            generator = self._runtime.create_chat_generator(
-                self._request,
-                request_id=self.request_id,
-                prompt_progress_reporter=reporter,
-            )
-            if self._cancelled.is_set():
-                return
-            for result in generator:
-                self.events.put(_GenerationResultEvent(result))
-                if self._cancelled.is_set():
-                    return
-        except Exception as error:
-            self.events.put(_GenerationErrorEvent(error))
-        finally:
-            try:
-                if generator is not None:
-                    generator.close()
-            finally:
-                self._done.set()
-                self.events.put(_GENERATION_DONE)
+
+class _SsePromptProgressReporter(PromptProgressReporter):
+    def __init__(
+        self,
+        handler: MlxEngineRequestHandler,
+        session: GenerationSession,
+        prompt_tokens: int,
+    ):
+        self._handler = handler
+        self._session = session
+        self.prompt_tokens = prompt_tokens
+
+    def begin(
+        self,
+        is_draft: bool,
+        cached_tokens: int,
+        total_prompt_tokens: int,
+        prefill_tokens_processed: int,
+    ) -> bool:
+        if not is_draft:
+            self.prompt_tokens = total_prompt_tokens
+        return self._report(is_draft)
+
+    def update(self, is_draft: bool, prefill_tokens_processed: int) -> bool:
+        return self._report(is_draft)
+
+    def finish(
+        self,
+        is_draft: bool,
+        prefill_tokens_processed: int | None = None,
+    ) -> bool:
+        return self._report(is_draft)
+
+    def _report(self, is_draft: bool) -> bool:
+        if is_draft or self._session.cancelled:
+            return not self._session.cancelled
+        self._handler._write_bytes(b": prompt-progress\n\n")
+        return True
 
 
 class MlxEngineHttpServer(ThreadingHTTPServer):
@@ -285,8 +224,9 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
             return
 
-        session = GenerationSession(self.server.runtime, request)
+        session = GenerationSession(self.server.runtime)
         self.server.register_session(session)
+        generator = None
         normal_completion = False
         try:
             self.send_response(HTTPStatus.OK)
@@ -295,8 +235,17 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True
-            session.start()
-            self._stream_generation(session, request)
+            reporter = _SsePromptProgressReporter(
+                self,
+                session,
+                len(request.prompt_tokens),
+            )
+            generator = self.server.runtime.create_chat_generator(
+                request,
+                request_id=session.request_id,
+                prompt_progress_reporter=reporter,
+            )
+            self._stream_generation(generator, reporter)
             normal_completion = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             logger.debug("Generation client disconnected: %s", session.request_id)
@@ -307,56 +256,46 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
         finally:
-            if not normal_completion:
-                session.cancel()
-            session.join(timeout=1)
-            self.server.unregister_session(session)
+            try:
+                if not normal_completion:
+                    session.cancel()
+                if generator is not None:
+                    generator.close()
+            finally:
+                session.finish()
+                self.server.unregister_session(session)
 
     def _stream_generation(
         self,
-        session: GenerationSession,
-        request: ChatGenerationRequest,
+        generator: Iterator[GenerationResult],
+        reporter: _SsePromptProgressReporter,
     ) -> None:
-        prompt_tokens = len(request.prompt_tokens)
         completion_tokens = 0
         terminal_sent = False
 
-        while True:
-            event = session.events.get()
-            if isinstance(event, _PromptProgressEvent):
-                if event.total_prompt_tokens is not None:
-                    prompt_tokens = event.total_prompt_tokens
-                self._write_bytes(b": prompt-progress\n\n")
-                continue
-            if isinstance(event, _GenerationResultEvent):
-                result = event.result
-                completion_tokens += len(result.tokens)
-                if result.text != "":
-                    self._write_sse_json(
-                        {
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": result.text},
-                                    "finish_reason": None,
-                                }
-                            ]
-                        }
+        for result in generator:
+            completion_tokens += len(result.tokens)
+            if result.text != "":
+                self._write_sse_json(
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": result.text},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
+            if result.stop_condition is not None:
+                self._write_sse_json(
+                    self._terminal_payload(
+                        stop_condition=result.stop_condition,
+                        prompt_tokens=reporter.prompt_tokens,
+                        completion_tokens=completion_tokens,
                     )
-                if result.stop_condition is not None:
-                    self._write_sse_json(
-                        self._terminal_payload(
-                            stop_condition=result.stop_condition,
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                        )
-                    )
-                    terminal_sent = True
-                continue
-            if isinstance(event, _GenerationErrorEvent):
-                raise event.error
-            if isinstance(event, _GenerationDoneEvent):
-                break
+                )
+                terminal_sent = True
 
         if not terminal_sent:
             raise RuntimeError("MLX generation ended without a stop condition.")

@@ -6,7 +6,6 @@ import struct
 import threading
 import time
 
-from mlx_engine.server.chat import ChatGenerationRequest
 from mlx_engine.server.http import (
     EngineRuntime,
     GenerationSession,
@@ -300,52 +299,21 @@ def test_client_disconnect_stops_the_active_mlx_request():
 
 
 def test_generation_session_cancellation_stops_the_exact_request():
-    generation_stopped = threading.Event()
     stopped_request_ids = []
-
-    def create_generator(_model_kit, _prompt_tokens, **kwargs):
-        reporter = kwargs["prompt_progress_reporter"]
-        reporter.begin(
-            is_draft=False,
-            cached_tokens=0,
-            total_prompt_tokens=3,
-            prefill_tokens_processed=0,
-        )
-        generation_stopped.wait(timeout=2)
-        yield GenerationResult(
-            text="",
-            tokens=[],
-            top_logprobs=[],
-            stop_condition=GenerationStopCondition(
-                stop_reason="user_cancelled",
-                stop_string="",
-                stop_tokens=[],
-            ),
-        )
 
     def stop_generation(_model_kit, request_id):
         stopped_request_ids.append(request_id)
-        generation_stopped.set()
 
     runtime = EngineRuntime(
         _FakeModelKit(),
         supports_vision=False,
-        create_generator_fn=create_generator,
         stop_generation_fn=stop_generation,
     )
-    request = ChatGenerationRequest(
-        prompt_tokens=[1, 2, 3],
-        generation_kwargs={},
-    )
-    session = GenerationSession(runtime, request)
+    session = GenerationSession(runtime)
 
-    session.start()
-    session.events.get(timeout=1)
     session.cancel()
-    session.join(timeout=2)
 
     assert stopped_request_ids == [session.request_id]
-    assert generation_stopped.is_set()
 
 
 def test_cancellation_failure_does_not_break_cleanup():
@@ -360,11 +328,7 @@ def test_cancellation_failure_does_not_break_cleanup():
         supports_vision=False,
         stop_generation_fn=stop_generation,
     )
-    request = ChatGenerationRequest(
-        prompt_tokens=[1],
-        generation_kwargs={},
-    )
-    session = GenerationSession(runtime, request)
+    session = GenerationSession(runtime)
 
     session.cancel()
     session.cancel()
