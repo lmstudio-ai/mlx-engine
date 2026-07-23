@@ -8,7 +8,7 @@ class ChatRequestError(ValueError):
     """The chat request does not match the server contract."""
 
 
-class _ImageUrl(BaseModel):
+class _ImageDataUrl(BaseModel):
     url: str
 
 
@@ -17,13 +17,13 @@ class _TextContentPart(BaseModel):
     text: str
 
 
-class _ImageContentPart(BaseModel):
+class _InlineImageContentPart(BaseModel):
     type: Literal["image_url"]
-    image_url: _ImageUrl
+    image_url: _ImageDataUrl
 
 
 _ContentPart = Annotated[
-    _TextContentPart | _ImageContentPart,
+    _TextContentPart | _InlineImageContentPart,
     Field(discriminator="type"),
 ]
 
