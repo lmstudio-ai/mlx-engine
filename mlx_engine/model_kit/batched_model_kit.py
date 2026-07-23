@@ -385,7 +385,7 @@ class BatchedModelKit:
             time_budget = 0.5
             start = time.time()
             while True:
-                if time.time() - start > time_budget:
+                if not self._requests.empty() or time.time() - start > time_budget:
                     break
 
                 prompt_responses, generation_responses = batch_generator.next()
