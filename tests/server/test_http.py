@@ -99,6 +99,23 @@ def _request(port, method, path, *, body=None, authorized=True):
     return response.status, response_body
 
 
+def _request_with_content_length(port, content_length):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    connection.request(
+        "POST",
+        "/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer secret-token",
+            "Content-Type": "application/json",
+            "Content-Length": content_length,
+        },
+    )
+    response = connection.getresponse()
+    response_body = response.read().decode("utf-8")
+    connection.close()
+    return response.status, response_body
+
+
 def test_health_requires_auth_and_reports_actualized_context_length():
     runtime = EngineRuntime(
         _FakeModelKit(),
@@ -114,6 +131,31 @@ def test_health_requires_auth_and_reports_actualized_context_length():
         status, body = _request(port, "GET", "/health")
         assert status == 200
         assert json.loads(body) == {"status": "ok", "context_length": 8192}
+
+
+def test_invalid_and_oversized_content_lengths_are_rejected():
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+
+    with _running_server(runtime) as port:
+        for content_length in ("invalid", "-1", "0"):
+            status, body = _request_with_content_length(port, content_length)
+            assert status == 400
+            assert json.loads(body) == {
+                "error": {"message": "Content-Length must be a positive integer."}
+            }
+
+        status, body = _request_with_content_length(
+            port,
+            str(500 * 1024 * 1024 + 1),
+        )
+        assert status == 413
+        assert json.loads(body) == {
+            "error": {"message": "Request body exceeds the 500 MiB limit."}
+        }
 
 
 def test_chat_stream_forwards_generation_settings_and_returns_usage():

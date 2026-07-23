@@ -144,6 +144,32 @@ def test_unsupported_response_format_is_rejected():
         )
 
 
+def test_structured_output_with_assistant_prefill_is_rejected():
+    renderer = _FakeRenderer()
+
+    with pytest.raises(
+        ChatRequestError,
+        match="Structured output is not supported with assistant prefills",
+    ):
+        prepare_chat_generation_request(
+            _base_request(
+                messages=[
+                    {"role": "user", "content": "Respond with JSON"},
+                    {"role": "assistant", "content": '{"answer":'},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"schema": {"type": "object"}},
+                },
+            ),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
 def test_final_assistant_message_is_rendered_as_a_prefill():
     renderer = _FakeRenderer()
 

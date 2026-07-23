@@ -129,6 +129,14 @@ def prepare_chat_generation_request(
     if request.tools:
         raise ChatRequestError("Tools are not supported yet.")
 
+    has_assistant_prefill = bool(
+        request.messages and request.messages[-1].role == "assistant"
+    )
+    if request.response_format is not None and has_assistant_prefill:
+        raise ChatRequestError(
+            "Structured output is not supported with assistant prefills."
+        )
+
     normalized_messages, images_b64 = normalize_messages(request.messages)
     if images_b64 and not supports_vision:
         raise ChatRequestError("The loaded model does not support images.")
@@ -143,7 +151,7 @@ def prepare_chat_generation_request(
         )
 
     template_kwargs = dict(request.chat_template_kwargs)
-    if request.messages and request.messages[-1].role == "assistant":
+    if has_assistant_prefill:
         template_kwargs["continue_final_message"] = True
         add_generation_prompt = False
     else:
