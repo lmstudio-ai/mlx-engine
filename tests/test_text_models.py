@@ -105,9 +105,7 @@ Who is this passage about? Only say the name, and nothing else<|im_end|>
         # First generation should have no cached tokens
         begin_event = reporter.events[0]
         self.assertEqual(begin_event["type"], "begin")
-        # TODO: Implement proper cached_tokens tracking in batched model kit
-        # Currently hardcoded to 0 in BatchedMlxLmReporterAdapter
-        # self.assertEqual(begin_event["cached_tokens"], 0)
+        self.assertEqual(begin_event["cached_tokens"], 0)
         self.assertGreater(len(generated_text), 0, "Model failed to generate any text")
         ben_franklin_in_response = "Benjamin Franklin" in generated_text
         self.assertTrue(
@@ -131,7 +129,7 @@ repeat<|im_end|>
         # Second generation should have cached tokens from first generation
         begin_event = reporter.events[0]
         self.assertEqual(begin_event["type"], "begin")
-        # self.assertGreater(begin_event["cached_tokens"], 0)
+        self.assertGreater(begin_event["cached_tokens"], 0)
         self.assertGreater(len(generated_text), 0, "Model failed to generate any text")
         ben_franklin_in_response = "Benjamin Franklin" in generated_text
         self.assertTrue(
@@ -183,9 +181,7 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         # First generation should have no cached tokens
         begin_event = reporter.events[0]
         self.assertEqual(begin_event["type"], "begin")
-        # TODO: Implement proper cached_tokens tracking in batched model kit
-        # Currently hardcoded to 0 in BatchedMlxLmReporterAdapter
-        # self.assertEqual(begin_event["cached_tokens"], 0)
+        self.assertEqual(begin_event["cached_tokens"], 0)
         self.assertGreater(
             len(generated_text_1), 0, "Model failed to generate any text"
         )
@@ -214,13 +210,13 @@ Who is this passage about? Only say the name, and nothing else<end_of_turn>
         reporter.events.clear()
         generate(text_accumulator=generated_text_list_2)
         generated_text_2 = "".join(generated_text_list_2)
-        # Expect prompt cache to be intact for the first half of the file_content, so we should get 1
-        # intermediate update callback this time (begin + 1x update + finish = 4)
-        self.assertEqual(len(reporter.events), 3)
+        # The restored cache is not aligned to the prefill step grid, so mlx-vlm
+        # reports a short alignment update before the normal prefill update.
+        self.assertEqual(len(reporter.events), 4)
         # Second generation should have some cached tokens (partial cache hit after trim)
         begin_event = reporter.events[0]
         self.assertEqual(begin_event["type"], "begin")
-        # self.assertGreater(begin_event["cached_tokens"], 0)
+        self.assertGreater(begin_event["cached_tokens"], 0)
         self.assertGreater(
             len(generated_text_2), 0, "Model failed to generate any text"
         )

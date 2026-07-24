@@ -8,7 +8,6 @@ from mlx_engine.cache_wrapper import (
     PROMPT_PROCESSING_CHUNK_SIZE,
     validate_prefill_step_size,
 )
-from mlx_engine.model_kit.batched_model_kit import BatchedModelKit
 from mlx_engine.model_kit.batched_vision import BatchedVisionModelKit
 from mlx_engine.model_kit.model_kit import ModelKit
 from tests.shared import model_getter, RecordingReporter
@@ -39,21 +38,6 @@ def test_load_model_rejects_invalid_prefill_step_size(prefill_step_size):
         ValueError, match="prefill_step_size must be a positive integer"
     ):
         load_model(model_path="unused", prefill_step_size=prefill_step_size)
-
-
-def _expected_batched_prefill_updates(
-    num_prompt_tokens: int, prefill_step_size: int
-) -> int:
-    """Compute the expected number of 'update' events from BatchedMlxLmReporterAdapter.
-
-    BatchGenerator._process_prompts fires one progress callback per prefill chunk,
-    leaving prompt_checkpoint (1) token for the final step.
-    BatchedMlxLmReporterAdapter maps these callbacks to events: the first callback
-    emits both begin and update (no early return after begin), middle callbacks emit
-    update, and the last emits finish. So: num_updates = num_callbacks - 1.
-    """
-    prefillable_tokens = num_prompt_tokens - 1
-    return math.ceil(prefillable_tokens / prefill_step_size) - 1
 
 
 def _expected_batched_vision_prefill_updates(
@@ -151,12 +135,12 @@ def test_batched_prefill_step_size(batched_model_kit_custom_prefill):
     model_kit = batched_model_kit_custom_prefill
 
     # GIVEN
-    assert isinstance(model_kit, BatchedModelKit)
+    assert isinstance(model_kit, BatchedVisionModelKit)
     prompt_tokens = _long_prompt_tokens(model_kit)
-    expected_updates = _expected_batched_prefill_updates(
+    expected_updates = _expected_batched_vision_prefill_updates(
         len(prompt_tokens), CUSTOM_PREFILL_STEP_SIZE
     )
-    expected_at_default = _expected_batched_prefill_updates(
+    expected_at_default = _expected_batched_vision_prefill_updates(
         len(prompt_tokens), PROMPT_PROCESSING_CHUNK_SIZE
     )
     assert expected_updates != expected_at_default, (

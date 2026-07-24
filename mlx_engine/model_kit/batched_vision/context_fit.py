@@ -4,15 +4,18 @@ A model's native context limit does not account for its loaded weights or the
 memory needed to read a long prompt. Guessing by allocating progressively larger
 prompts is unsafe because a Metal out-of-memory error can terminate the process.
 Instead, a one-token probe reveals the loaded model's real cache shapes and
-dtypes, then uses the formula below. The formula is validated for Gemma 4 and
-Qwen 3.5, and is used as a best-effort fit for other measurable cache layouts.
+dtypes, then uses the formula below. The score term is validated for unfused
+Gemma 4 and Qwen 3.5 attention and fused 64-dimensional GPT-OSS attention. Other
+measurable cache layouts use the conservative unfused fit as a best effort.
 
     fixed = loaded baseline + rotating cache + recurrent state
-    bytes/token = full KV + retained prompt inputs + attention workspace
+    bytes/token = full KV + retained prompt inputs + attention scores
     context = (recommended working set - reserve - fixed) / bytes/token
 
 Long-prefill experiments on dense and MoE Qwen and Gemma models showed that
-attention memory matched `query heads * prefill chunk * activation dtype size`.
+unfused attention materialized scores matching
+`query heads * prefill chunk * activation dtype size`. GPT-OSS uses MLX's fused
+attention for its 64-dimensional heads, so it has no context-linear score term.
 The largest measured peak not explained by the formula was 2.41 GiB,
 motivating the 3 GiB reserve floor.
 
@@ -39,6 +42,7 @@ MIN_FITTED_CONTEXT_TOKENS = 4_096
 MIN_RUNTIME_RESERVE_BYTES = 3 * GIB
 
 _FAMILY_GEMMA4 = "gemma4"
+_FAMILY_GPT_OSS = "gpt_oss"
 _FAMILY_QWEN3_5 = "qwen3_5"
 _SUPPORTED_CACHE_TYPES = {"KVCache", "RotatingKVCache", "ArraysCache"}
 
@@ -55,6 +59,7 @@ class CacheFitProfile:
     allocation_step: int
     full_kv_bytes_per_token: int
     prompt_input_bytes_per_token: int
+    materializes_attention_scores: bool
     query_attention_heads: int
     activation_dtype_bytes: int
     prefill_step_size: int
@@ -78,8 +83,9 @@ def fit_batched_vlm_context(
     """Return a fitted token limit, or `None` to leave the limit unchanged.
 
     A one-token probe measures the model's cache, retained prompt inputs, and
-    activation layout. Gemma 4 and Qwen 3.5 use the validated fit. Other families
-    use the same fit when their memory layout can be measured without assumptions.
+    activation layout. Gemma 4 and Qwen 3.5 use the validated unfused fit;
+    64-dimensional GPT-OSS uses its validated fused fit. Other families use the
+    conservative unfused fit when their memory layout can be measured.
     """
     max_context_length = None
     validated_family = False
@@ -120,11 +126,47 @@ def fit_batched_vlm_context(
                 "leaving context unchanged"
             )
             return None
+
         if not validated_family and max_context_length <= MIN_FITTED_CONTEXT_TOKENS:
             logger.info(
                 "Model family %s reports a %s token maximum; leaving context unchanged",
                 family,
                 f"{max_context_length:,}",
+            )
+            return None
+
+        materializes_attention_scores = True
+        if family == _FAMILY_GPT_OSS:
+            query_head_dim = None
+            for source in config_sources:
+                query_head_dim = _config_value(source, "head_dim")
+                if query_head_dim is not None:
+                    break
+            # MLX 0.32 uses fused long-prefill SDPA for GPT-OSS's official
+            # 64-dimensional attention layout. Unexpected variants retain the
+            # conservative score-matrix estimate.
+            materializes_attention_scores = query_head_dim != 64
+            if not materializes_attention_scores:
+                validated_family = True
+            else:
+                logger.info(
+                    "GPT-OSS head_dim=%s is not the validated fused layout; "
+                    "retaining the conservative attention-score estimate",
+                    query_head_dim,
+                )
+
+        query_attention_heads = None
+        for key in ("num_attention_heads", "n_heads"):
+            for source in config_sources:
+                query_attention_heads = _config_value(source, key)
+                if query_attention_heads is not None:
+                    break
+            if query_attention_heads is not None:
+                break
+        if query_attention_heads is None:
+            logger.error(
+                "Model context auto-fit could not find the query attention head count; "
+                "leaving context unchanged"
             )
             return None
 
@@ -134,7 +176,9 @@ def fit_batched_vlm_context(
                 language_model=language_model,
                 family=family,
                 max_context_length=max_context_length,
+                query_attention_heads=query_attention_heads,
                 prefill_step_size=prefill_step_size,
+                materializes_attention_scores=materializes_attention_scores,
             )
         finally:
             # Release the temporary probe arrays before measuring the loaded model.
@@ -165,15 +209,11 @@ def fit_batched_vlm_context(
             )
             return None
 
-        attention_workspace_bytes_per_token = (
-            profile.query_attention_heads
-            * profile.prefill_step_size
-            * profile.activation_dtype_bytes
-        )
+        attention_scores_bytes_per_token = _attention_scores_bytes_per_token(profile)
         peak_bytes_per_token = (
             profile.full_kv_bytes_per_token
             + profile.prompt_input_bytes_per_token
-            + attention_workspace_bytes_per_token
+            + attention_scores_bytes_per_token
         )
         estimated_memory_bytes = (
             baseline_bytes
@@ -196,7 +236,7 @@ def fit_batched_vlm_context(
             baseline_bytes / GIB,
             profile.full_kv_bytes_per_token,
             profile.prompt_input_bytes_per_token,
-            attention_workspace_bytes_per_token,
+            attention_scores_bytes_per_token,
             profile.rotating_peak_bytes / GIB,
             profile.fixed_ssm_bytes / GIB,
             estimated_memory_bytes / GIB,
@@ -205,6 +245,16 @@ def fit_batched_vlm_context(
     except Exception:
         logger.exception("Model context auto-fit failed; leaving context unchanged")
         return None
+
+
+def _attention_scores_bytes_per_token(profile: CacheFitProfile) -> int:
+    if not profile.materializes_attention_scores:
+        return 0
+    return (
+        profile.query_attention_heads
+        * profile.prefill_step_size
+        * profile.activation_dtype_bytes
+    )
 
 
 def calculate_context_fit(
@@ -217,7 +267,7 @@ def calculate_context_fit(
 
     The fit subtracts the runtime reserve and fixed memory from the recommended
     working set. It divides what remains by the per-token peak for KV, retained
-    prompt inputs, and chunked attention work. The result contains the
+    prompt inputs, and any materialized attention scores. The result contains the
     chosen token limit and the reserve and safe ceiling used to calculate it.
     """
     # The modeled terms undercounted measured prefill peaks by at most 2.41 GiB.
@@ -229,18 +279,14 @@ def calculate_context_fit(
         baseline_bytes + profile.rotating_peak_bytes + profile.fixed_ssm_bytes
     )
 
-    # Long-prefill measurements matched one activation value per query head and
-    # prefill token for every context token. The dtype size is measured at runtime
-    # rather than assuming the tested models' two-byte BF16/FP16 activations.
-    attention_workspace_bytes_per_token = (
-        profile.query_attention_heads
-        * profile.prefill_step_size
-        * profile.activation_dtype_bytes
-    )
+    # Unfused long-prefill attention materializes one score value per query head
+    # and prefill token for every context token. Validated fused paths omit this
+    # context-linear allocation; their fixed-size workspace remains in the reserve.
+    attention_scores_bytes_per_token = _attention_scores_bytes_per_token(profile)
     peak_bytes_per_token = (
         profile.full_kv_bytes_per_token
         + profile.prompt_input_bytes_per_token
-        + attention_workspace_bytes_per_token
+        + attention_scores_bytes_per_token
     )
 
     # First find how many bytes remain for the prompt after paying the model's
@@ -280,7 +326,9 @@ def _probe_cache_fit_profile(
     language_model: Any,
     family: str,
     max_context_length: int,
+    query_attention_heads: int,
     prefill_step_size: int,
+    materializes_attention_scores: bool = True,
 ) -> CacheFitProfile | None:
     prompt_cache = make_prompt_cache(language_model)
     # One token is enough to allocate every cache in its real shape and dtype.
@@ -298,16 +346,6 @@ def _probe_cache_fit_profile(
         prompt_input_bytes_per_token += per_layer_inputs.nbytes
     # Attention uses the same activation dtype as the token embeddings.
     activation_dtype_bytes = inputs_embeds.itemsize
-
-    language_config = getattr(language_model, "config", None)
-    language_args = getattr(language_model, "args", None)
-    query_attention_heads = _config_value(
-        language_config, "num_attention_heads"
-    ) or _config_value(language_args, "num_attention_heads")
-    if query_attention_heads is None:
-        query_attention_heads = _config_value(
-            language_config, "n_heads"
-        ) or _config_value(language_args, "n_heads")
 
     language_model(
         input_ids,
@@ -387,6 +425,7 @@ def _probe_cache_fit_profile(
         allocation_step=next(iter(cache_allocation_steps)),
         full_kv_bytes_per_token=full_kv_bytes_per_token,
         prompt_input_bytes_per_token=prompt_input_bytes_per_token,
+        materializes_attention_scores=materializes_attention_scores,
         query_attention_heads=query_attention_heads,
         activation_dtype_bytes=activation_dtype_bytes,
         prefill_step_size=prefill_step_size,
