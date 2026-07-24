@@ -341,6 +341,21 @@ class TestCacheWrapper(unittest.TestCase):
             _, reporter = self._run_update_cache(session, prompt)
         self.assertEqual(reporter.events[0]["cached_tokens"], 0)
 
+    def test_get_num_tokens_in_cache_without_offset(self):
+        """Test that _get_num_tokens_in_cache falls back to len(self.tokens) when offset is unavailable"""
+        mock_cache = [object() for _ in range(10)]
+
+        wrapper = object.__new__(CacheWrapper)
+        wrapper.cache = mock_cache
+        wrapper.tokens = mx.array([1, 2, 3, 4, 5])
+
+        result = wrapper._get_num_tokens_in_cache()
+        self.assertEqual(result, 5)
+
+        wrapper.tokens = None
+        result = wrapper._get_num_tokens_in_cache()
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
