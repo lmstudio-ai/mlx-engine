@@ -90,6 +90,98 @@ def test_prepare_text_request_uses_only_supported_generation_settings():
     assert template_kwargs["reasoning_effort"] == "medium"
 
 
+def test_supported_generation_boundaries_and_unknown_future_fields_are_accepted():
+    renderer = _FakeRenderer()
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            temperature=0,
+            max_tokens=1,
+            top_p=1,
+            top_k=-1,
+            min_p=0,
+            repeat_penalty=0,
+            logprobs=False,
+            future_sampling_control={"enabled": True},
+        ),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.generation_kwargs == {
+        "images_b64": [],
+        "temp": 0,
+        "max_tokens": 1,
+        "stop_strings": ["END"],
+        "top_p": 1,
+        "top_k": -1,
+        "min_p": 0,
+        "repetition_penalty": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "control_name"),
+    [
+        ({"seed": 0}, "seed"),
+        ({"logprobs": True}, "logprobs"),
+        ({"top_logprobs": 5}, "top_logprobs"),
+        ({"logit_bias": {"1": 1}}, "logit_bias"),
+        ({"presence_penalty": 0}, "presence_penalty"),
+        ({"frequency_penalty": 0}, "frequency_penalty"),
+    ],
+)
+def test_unsupported_generation_controls_are_rejected(overrides, control_name):
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match=control_name):
+        prepare_chat_generation_request(
+            _base_request(**overrides),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"temperature": -0.1},
+        {"temperature": float("nan")},
+        {"temperature": float("inf")},
+        {"max_tokens": 0},
+        {"max_tokens": -1},
+        {"max_tokens": 1.5},
+        {"top_p": -0.1},
+        {"top_p": 1.1},
+        {"top_p": float("nan")},
+        {"top_k": -2},
+        {"top_k": 501},
+        {"top_k": 1.5},
+        {"min_p": -0.1},
+        {"min_p": 1.1},
+        {"min_p": float("nan")},
+        {"repeat_penalty": -0.1},
+        {"repeat_penalty": float("nan")},
+    ],
+)
+def test_invalid_generation_settings_are_rejected_before_rendering(overrides):
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ValidationError):
+        prepare_chat_generation_request(
+            _base_request(**overrides),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
 def test_tools_are_rejected():
     renderer = _FakeRenderer()
 

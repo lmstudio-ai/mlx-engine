@@ -1,6 +1,7 @@
 import unittest
 from typing import Optional
 from mlx_engine.utils.prompt_progress_reporter import (
+    BatchedMlxLmReporterAdapter,
     ForwardingReporter,
     MlxLmReporterAdapter,
 )
@@ -205,3 +206,27 @@ class TestMlxLmReporterAdapter(unittest.TestCase):
         adapter(0, 100)  # Begin - succeeds
         with self.assertRaises(StopPromptProcessing):
             adapter(50, 100)  # Update - cancels
+
+
+class TestBatchedMlxLmReporterAdapter(unittest.TestCase):
+    def test_reports_full_prompt_length_and_seed_excluded_prefill(self):
+        inner = MockReporter(return_value=True)
+        adapter = BatchedMlxLmReporterAdapter(inner, emit_begin=True)
+
+        adapter(0, 3)
+        adapter(2, 3)
+
+        self.assertEqual(inner.events[0]["type"], "begin")
+        self.assertEqual(inner.events[0]["total_prompt_tokens"], 3)
+        self.assertEqual(inner.events[-1]["type"], "finish")
+        self.assertEqual(inner.events[-1]["prefill_tokens_processed"], 2)
+
+    def test_one_token_prompt_reports_usage_without_prefill_work(self):
+        inner = MockReporter(return_value=True)
+        adapter = BatchedMlxLmReporterAdapter(inner, emit_begin=True)
+
+        adapter(0, 1)
+
+        self.assertEqual(inner.events[0]["total_prompt_tokens"], 1)
+        self.assertEqual(inner.events[-1]["type"], "finish")
+        self.assertEqual(inner.events[-1]["prefill_tokens_processed"], 0)

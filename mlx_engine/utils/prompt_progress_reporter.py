@@ -32,8 +32,10 @@ class PromptProgressReporter(ABC):
         Args:
             is_draft: True if this is for the draft model, False for main model.
             cached_tokens: Number of tokens already in the KV cache.
-            total_prompt_tokens: Total number of tokens in the prompt.
-            prefill_tokens_processed: Number of tokens processed so far (usually 0 at begin).
+            total_prompt_tokens: Full prompt token count, including the final token used
+                to seed autoregressive decoding.
+            prefill_tokens_processed: Number of tokens prefilled so far. This may finish
+                one token short of total_prompt_tokens because the final token seeds decoding.
 
         Returns:
             True to continue processing, False to cancel.
@@ -226,9 +228,8 @@ class BatchedMlxLmReporterAdapter:
     Adapts a PromptProgressReporter to the BatchedModelKit.generate callback.
 
     Converts (processed_tokens, total_tokens) -> None to reporter method calls.
-    Automatically calls finish() when processed_tokens - 1 >= total_tokens.
-    We need the off-by-one since mlx-lm prefills every token except for the last one,
-    since that token is needed to start the auto-regressive decoding
+    Reports the full prompt length while calling finish() after all but the final
+    decode seed token have been prefilled.
 
     Unlike MlxLmReporterAdapter, do not throw when we receive a stop request.
     Return False so batched schedulers can cooperatively cancel at chunk
@@ -246,8 +247,7 @@ class BatchedMlxLmReporterAdapter:
         if self._finished:
             return True
 
-        # mlx-lm tells us how many total prompt tokens there are. It leaves one unprocessed to seed the decode. Make that adjustment here
-        total_tokens = max(0, total_tokens - 1)
+        prefill_tokens = max(0, total_tokens - 1)
 
         if self._first_call:
             self._first_call = False
@@ -261,7 +261,7 @@ class BatchedMlxLmReporterAdapter:
                 if not should_continue:
                     return False
 
-        if processed_tokens >= total_tokens:
+        if processed_tokens >= prefill_tokens:
             self._finished = True
             return self._reporter.finish(
                 is_draft=False, prefill_tokens_processed=processed_tokens

@@ -36,6 +36,10 @@ _ContentPart = Annotated[
     _TextContentPart | _InlineImageContentPart,
     Field(discriminator="type"),
 ]
+_NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+_Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+_PositiveInt = Annotated[int, Field(gt=0, strict=True)]
+_TopK = Annotated[int, Field(ge=-1, le=500, strict=True)]
 
 
 class ChatMessage(BaseModel):
@@ -59,13 +63,19 @@ class ChatCompletionRequest(BaseModel):
 
     messages: list[ChatMessage]
     stream: Literal[True]
-    temperature: float
-    max_tokens: int | None = None
+    temperature: _NonNegativeFloat
+    max_tokens: _PositiveInt | None = None
     stop: list[str] | None = None
-    top_p: float | None = None
-    top_k: int
-    min_p: float | None = None
-    repeat_penalty: float | None = None
+    top_p: _Probability | None = None
+    top_k: _TopK
+    min_p: _Probability | None = None
+    repeat_penalty: _NonNegativeFloat | None = None
+    seed: int | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = None
+    logit_bias: dict | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
     tools: list[dict] | None = None
     response_format: _JsonSchemaResponseFormat | None = None
     chat_template_kwargs: dict = Field(default_factory=dict)
@@ -128,6 +138,22 @@ def prepare_chat_generation_request(
     request = ChatCompletionRequest.model_validate(body)
     if request.tools:
         raise ChatRequestError("Tools are not supported yet.")
+
+    unsupported_controls = [
+        name
+        for name, requested in (
+            ("seed", request.seed is not None),
+            ("logprobs", request.logprobs is True),
+            ("top_logprobs", request.top_logprobs is not None),
+            ("logit_bias", request.logit_bias is not None),
+            ("presence_penalty", request.presence_penalty is not None),
+            ("frequency_penalty", request.frequency_penalty is not None),
+        )
+        if requested
+    ]
+    if unsupported_controls:
+        names = ", ".join(unsupported_controls)
+        raise ChatRequestError(f"Unsupported generation controls: {names}.")
 
     has_assistant_prefill = bool(
         request.messages and request.messages[-1].role == "assistant"

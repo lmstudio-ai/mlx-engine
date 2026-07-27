@@ -15,6 +15,7 @@ from mlx_engine.utils.generation_result import (
     GenerationResult,
     GenerationStopCondition,
 )
+from mlx_engine.utils.prompt_progress_reporter import BatchedMlxLmReporterAdapter
 from mlx_engine.utils.token import Token
 
 
@@ -158,6 +159,39 @@ def test_invalid_and_oversized_content_lengths_are_rejected():
         }
 
 
+def test_invalid_generation_settings_are_rejected_before_streaming():
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+
+    with _running_server(runtime) as port:
+        invalid_body = _request_body()
+        invalid_body["temperature"] = -0.1
+        status, response_body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=invalid_body,
+        )
+        assert status == 400
+        assert "temperature" in json.loads(response_body)["error"]["message"]
+
+        unsupported_body = _request_body()
+        unsupported_body["seed"] = 0
+        status, response_body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=unsupported_body,
+        )
+        assert status == 400
+        assert json.loads(response_body) == {
+            "error": {"message": "Unsupported generation controls: seed."}
+        }
+
+
 def test_chat_stream_forwards_generation_settings_and_returns_usage():
     generation_calls = []
 
@@ -265,6 +299,46 @@ def test_chat_stream_forwards_generation_settings_and_returns_usage():
         "type": "object",
         "properties": {"answer": {"type": "string"}},
     }
+
+
+def test_batched_prompt_usage_includes_the_decode_seed_token():
+    def create_generator(_model_kit, prompt_tokens, **kwargs):
+        reporter = BatchedMlxLmReporterAdapter(
+            kwargs["prompt_progress_reporter"],
+            emit_begin=True,
+        )
+        assert reporter(0, len(prompt_tokens))
+        assert reporter(len(prompt_tokens) - 1, len(prompt_tokens))
+        yield GenerationResult(
+            text="",
+            tokens=[],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1, 2, 3],
+    )
+
+    with _running_server(runtime) as port:
+        status, response_text = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=_request_body(),
+        )
+
+    assert status == 200
+    terminal_event = _parse_sse(response_text)[0]
+    assert terminal_event["usage"]["prompt_tokens"] == 3
 
 
 def test_tools_are_rejected_before_streaming():

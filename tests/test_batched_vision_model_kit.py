@@ -12,6 +12,12 @@ import mlx_engine.model_kit.batched_vision.model_kit as model_kit_module
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptImageSpan,
 )
+from mlx_engine.model_kit.batched_vision.prompt_inputs import PreparedPrompt
+from mlx_engine.model_kit.batched_vision.request_lifecycle import (
+    GenerationRequest,
+    PreparedInsert,
+)
+from mlx_engine.utils.prompt_progress_events import PromptProgressBeginEvent
 
 
 def test_global_no_chunked_prefill_exempts_gemma4_visual_policy():
@@ -106,6 +112,68 @@ def test_load_model_forces_no_trust_remote_code(monkeypatch, tmp_path):
     assert call["model_path"] == tmp_path
     assert call["kwargs"] == {"lazy": False, "trust_remote_code": False}
     assert call["patched_model"] is loaded_model
+
+
+def test_insert_reports_full_prepared_prompt_length(monkeypatch):
+    class FakeBatchGenerator:
+        def insert(self, *_args, **_kwargs):
+            return 7
+
+    monkeypatch.setattr(
+        model_kit_module,
+        "build_prompt_kwargs",
+        lambda *_args, **_kwargs: {"inputs_embeds": "embeddings"},
+    )
+    monkeypatch.setattr(
+        model_kit_module,
+        "build_prefix_cache_chunks",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        model_kit_module,
+        "first_unsaved_prefix_cache_chunk_index",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    request = GenerationRequest(
+        rqueue=Queue(),
+        prompt_tokens=[1],
+        request_id="request",
+        images_b64=None,
+        sampler=lambda logits: logits,
+        logits_processors=[],
+        top_logprobs=0,
+        max_tokens=1,
+    )
+    prepared = PreparedInsert(
+        request=request,
+        prepared_prompt=PreparedPrompt(
+            prompt_input_ids=[1, 2, 3],
+            raw_inputs=None,
+            image_spans=[],
+        ),
+        restored=None,
+    )
+    kit = object.__new__(BatchedVisionModelKit)
+    kit._shutdown = SimpleNamespace(is_set=lambda: True)
+    kit.model = SimpleNamespace(no_chunked_prefill=False)
+    kit.model_type = "other_vlm"
+    kit._uses_gemma4_bidirectional_visual_attention = False
+    kit._vision_feature_memoizer = None
+    kit._prompt_cache_coordinator = SimpleNamespace(
+        save_prompt_cache_snapshot=lambda *_args, **_kwargs: None
+    )
+    kit._prompt_cache_store = SimpleNamespace(can_store_records=lambda: False)
+    kit._new_detokenizer = lambda: object()
+    active = {}
+
+    kit._insert_prepared_request(FakeBatchGenerator(), prepared, active)
+
+    progress = request.rqueue.get_nowait()
+    assert isinstance(progress, PromptProgressBeginEvent)
+    assert progress.total_prompt_tokens == 3
+    assert progress.cached_tokens == 0
+    assert active[7].request_id == "request"
 
 
 def test_generate_fatal_error_preserves_state_for_exception_propagation(monkeypatch):

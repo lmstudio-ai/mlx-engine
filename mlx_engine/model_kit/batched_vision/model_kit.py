@@ -512,12 +512,12 @@ class BatchedVisionModelKit:
         )
         detokenizer = self._new_detokenizer()
 
-        total_prompt_tokens = max(0, prompt_token_count - 1)
-        cached_tokens = min(cached_prefix_len, total_prompt_tokens)
+        prefill_tokens = max(0, prompt_token_count - 1)
+        cached_tokens = min(cached_prefix_len, prefill_tokens)
         request.rqueue.put(
             PromptProgressBeginEvent(
                 cached_tokens=cached_tokens,
-                total_prompt_tokens=total_prompt_tokens,
+                total_prompt_tokens=prompt_token_count,
                 prefill_tokens_processed=0,
             )
         )
