@@ -33,4 +33,6 @@ def test_api_key_environment_variable_is_required(monkeypatch, capsys):
         server_main.main()
 
     assert error.value.code == 2
-    assert "MLX_ENGINE_API_KEY environment variable is required" in capsys.readouterr().err
+    assert (
+        "MLX_ENGINE_API_KEY environment variable is required" in capsys.readouterr().err
+    )
