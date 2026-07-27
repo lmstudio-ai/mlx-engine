@@ -39,6 +39,7 @@ _ContentPart = Annotated[
 _NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 _Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 _PositiveInt = Annotated[int, Field(gt=0, strict=True)]
+_NonEmptyString = Annotated[str, Field(min_length=1)]
 _TopK = Annotated[int, Field(ge=-1, le=500, strict=True)]
 
 
@@ -65,7 +66,7 @@ class ChatCompletionRequest(BaseModel):
     stream: Literal[True]
     temperature: _NonNegativeFloat
     max_tokens: _PositiveInt | None = None
-    stop: list[str] | None = None
+    stop: list[_NonEmptyString] | None = None
     top_p: _Probability | None = None
     top_k: _TopK
     min_p: _Probability | None = None

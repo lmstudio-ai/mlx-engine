@@ -228,8 +228,8 @@ class BatchedMlxLmReporterAdapter:
     Adapts a PromptProgressReporter to the BatchedModelKit.generate callback.
 
     Converts (processed_tokens, total_tokens) -> None to reporter method calls.
-    Reports the full prompt length while calling finish() after all but the final
-    decode seed token have been prefilled.
+    Includes the decode seed in the token total but excludes it from prefill
+    progress.
 
     Unlike MlxLmReporterAdapter, do not throw when we receive a stop request.
     Return False so batched schedulers can cooperatively cancel at chunk
@@ -248,6 +248,7 @@ class BatchedMlxLmReporterAdapter:
             return True
 
         prefill_tokens = max(0, total_tokens - 1)
+        prefill_tokens_processed = min(processed_tokens, prefill_tokens)
 
         if self._first_call:
             self._first_call = False
@@ -256,7 +257,7 @@ class BatchedMlxLmReporterAdapter:
                     is_draft=False,
                     cached_tokens=0,
                     total_prompt_tokens=total_tokens,
-                    prefill_tokens_processed=processed_tokens,
+                    prefill_tokens_processed=prefill_tokens_processed,
                 )
                 if not should_continue:
                     return False
@@ -264,9 +265,11 @@ class BatchedMlxLmReporterAdapter:
         if processed_tokens >= prefill_tokens:
             self._finished = True
             return self._reporter.finish(
-                is_draft=False, prefill_tokens_processed=processed_tokens
+                is_draft=False,
+                prefill_tokens_processed=prefill_tokens_processed,
             )
 
         return self._reporter.update(
-            is_draft=False, prefill_tokens_processed=processed_tokens
+            is_draft=False,
+            prefill_tokens_processed=prefill_tokens_processed,
         )

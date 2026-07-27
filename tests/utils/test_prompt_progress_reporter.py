@@ -225,7 +225,7 @@ class TestBatchedMlxLmReporterAdapter(unittest.TestCase):
         inner = MockReporter(return_value=True)
         adapter = BatchedMlxLmReporterAdapter(inner, emit_begin=True)
 
-        adapter(0, 1)
+        adapter(1, 1)
 
         self.assertEqual(inner.events[0]["total_prompt_tokens"], 1)
         self.assertEqual(inner.events[-1]["type"], "finish")

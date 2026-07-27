@@ -155,6 +155,7 @@ def test_unsupported_generation_controls_are_rejected(overrides, control_name):
         {"max_tokens": 0},
         {"max_tokens": -1},
         {"max_tokens": 1.5},
+        {"stop": [""]},
         {"top_p": -0.1},
         {"top_p": 1.1},
         {"top_p": float("nan")},

@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import signal
 import threading
 
@@ -11,12 +12,17 @@ from .http import EngineRuntime, MlxEngineHttpServer
 logger = logging.getLogger(__name__)
 
 
+_API_KEY_ENV_VAR = "MLX_ENGINE_API_KEY"
+
+
 def _create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the private mlx-engine server.")
+    parser = argparse.ArgumentParser(
+        description="Run the private mlx-engine server.",
+        epilog=f"Authentication is configured through {_API_KEY_ENV_VAR}.",
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--api-key", required=True)
     parser.add_argument("--context-length", required=True, type=int)
     parser.add_argument("--parallel-sessions", required=True, type=int)
     parser.add_argument("--seed", type=int)
@@ -24,7 +30,11 @@ def _create_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = _create_parser().parse_args()
+    parser = _create_parser()
+    args = parser.parse_args()
+    api_key = os.environ.get(_API_KEY_ENV_VAR)
+    if not api_key:
+        parser.error(f"{_API_KEY_ENV_VAR} environment variable is required")
 
     logger.info("Loading MLX model from %s", args.model)
     model_kit = load_model(
@@ -40,7 +50,7 @@ def main() -> None:
     try:
         server = MlxEngineHttpServer(
             (args.host, args.port),
-            api_key=args.api_key,
+            api_key=api_key,
             runtime=runtime,
         )
 

@@ -129,9 +129,11 @@ class _SsePromptProgressReporter(PromptProgressReporter):
         handler: MlxEngineRequestHandler,
         session: GenerationSession,
         prompt_tokens: int,
+        use_reported_prompt_tokens: bool,
     ):
         self._handler = handler
         self._session = session
+        self._use_reported_prompt_tokens = use_reported_prompt_tokens
         self.prompt_tokens = prompt_tokens
 
     def begin(
@@ -141,7 +143,7 @@ class _SsePromptProgressReporter(PromptProgressReporter):
         total_prompt_tokens: int,
         prefill_tokens_processed: int,
     ) -> bool:
-        if not is_draft:
+        if not is_draft and self._use_reported_prompt_tokens:
             self.prompt_tokens = total_prompt_tokens
         return self._report(is_draft)
 
@@ -249,6 +251,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
                 self,
                 session,
                 len(request.prompt_tokens),
+                use_reported_prompt_tokens=self.server.runtime.supports_vision,
             )
             generator = self.server.runtime.create_chat_generator(
                 request,
