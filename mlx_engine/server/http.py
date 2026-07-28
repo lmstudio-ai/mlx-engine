@@ -393,13 +393,26 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _send_error(self, status: HTTPStatus, message: str) -> None:
-        self._send_json(status, {"error": {"message": message}})
+        self._send_json(
+            status,
+            {"error": {"message": message}},
+            close_connection=True,
+        )
 
-    def _send_json(self, status: HTTPStatus, body: dict) -> None:
+    def _send_json(
+        self,
+        status: HTTPStatus,
+        body: dict,
+        *,
+        close_connection: bool = False,
+    ) -> None:
         encoded_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded_body)))
+        if close_connection:
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.end_headers()
         self.wfile.write(encoded_body)
 

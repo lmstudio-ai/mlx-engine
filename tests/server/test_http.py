@@ -141,6 +141,35 @@ def test_health_requires_auth_and_reports_actualized_context_length():
         assert json.loads(body) == {"status": "ok", "context_length": 8192}
 
 
+def test_rejected_post_closes_connection_before_unread_body_can_be_reused():
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+    body = b'{"messages":[]}'
+
+    with _running_server(runtime) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            client.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+                + body
+                + b"GET /health HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer secret-token\r\n\r\n"
+            )
+            response = b""
+            while chunk := client.recv(4096):
+                response += chunk
+
+    assert response.count(b"HTTP/1.1") == 1
+    assert b"HTTP/1.1 401 Unauthorized" in response
+    assert b"\r\nConnection: close\r\n" in response
+
+
 def test_invalid_and_oversized_content_lengths_are_rejected():
     runtime = EngineRuntime(
         _FakeModelKit(),

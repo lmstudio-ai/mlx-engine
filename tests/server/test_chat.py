@@ -2,6 +2,7 @@ import json
 
 import pytest
 from pydantic import ValidationError
+from transformers.utils.chat_template_utils import render_jinja_template
 
 from mlx_engine.server.chat import (
     ChatMessage,
@@ -19,6 +20,23 @@ class _FakeRenderer:
     def apply_chat_template(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
         return "rendered prompt"
+
+
+class _TransformersTextRenderer:
+    chat_template = (
+        "{% for message in messages %}"
+        "{{ message['content'] | trim }}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}assistant{% endif %}"
+    )
+
+    def apply_chat_template(self, messages, **kwargs):
+        rendered, _generation_indices = render_jinja_template(
+            conversations=[messages],
+            chat_template=self.chat_template,
+            **kwargs,
+        )
+        return rendered[0]
 
 
 class _FakeTokenizerWrapper:
@@ -88,6 +106,35 @@ def test_prepare_text_request_uses_only_supported_generation_settings():
     assert template_kwargs["add_generation_prompt"] is True
     assert "continue_final_message" not in template_kwargs
     assert template_kwargs["reasoning_effort"] == "medium"
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_prompt"),
+    [
+        (
+            [
+                {"type": "text", "text": "First"},
+                {"type": "text", "text": "Second"},
+            ],
+            "FirstSecondassistant",
+        ),
+        ([], "assistant"),
+    ],
+)
+def test_text_content_parts_are_strings_before_transformers_template(
+    content,
+    expected_prompt,
+):
+    rendered_prompts = []
+
+    prepare_chat_generation_request(
+        _base_request(messages=[{"role": "user", "content": content}]),
+        model_kit=_FakeTextModelKit(_TransformersTextRenderer()),
+        supports_vision=False,
+        tokenize=lambda _model_kit, prompt: rendered_prompts.append(prompt) or [],
+    )
+
+    assert rendered_prompts == [expected_prompt]
 
 
 def test_supported_generation_boundaries_and_unknown_future_fields_are_accepted():
@@ -360,7 +407,8 @@ def test_normalize_images_preserves_user_and_tool_result_order():
     ]
 
     normalized, images_b64 = normalize_messages(
-        [ChatMessage.model_validate(message) for message in messages]
+        [ChatMessage.model_validate(message) for message in messages],
+        supports_vision=True,
     )
 
     assert images_b64 == ["first-image", "second-image", "first-image"]
@@ -449,7 +497,8 @@ def test_non_base64_image_url_is_rejected():
                         ],
                     }
                 )
-            ]
+            ],
+            supports_vision=True,
         )
 
 

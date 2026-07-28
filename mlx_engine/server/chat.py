@@ -99,7 +99,11 @@ def _base64_image_data(url: str) -> str:
     return data
 
 
-def normalize_messages(messages: list[ChatMessage]) -> tuple[list[dict], list[str]]:
+def normalize_messages(
+    messages: list[ChatMessage],
+    *,
+    supports_vision: bool,
+) -> tuple[list[dict], list[str]]:
     normalized_messages: list[dict] = []
     images_b64: list[str] = []
 
@@ -107,13 +111,17 @@ def normalize_messages(messages: list[ChatMessage]) -> tuple[list[dict], list[st
         normalized_message = message.model_dump(exclude_unset=True)
         if isinstance(message.content, list):
             normalized_parts: list[dict] = []
+            text_parts: list[str] = []
             for part in message.content:
                 if isinstance(part, _TextContentPart):
+                    text_parts.append(part.text)
                     normalized_parts.append({"type": "text", "text": part.text})
                 else:
                     images_b64.append(_base64_image_data(part.image_url.url))
                     normalized_parts.append({"type": "image"})
-            normalized_message["content"] = normalized_parts
+            normalized_message["content"] = (
+                normalized_parts if supports_vision else "".join(text_parts)
+            )
         normalized_messages.append(normalized_message)
 
     return normalized_messages, images_b64
@@ -164,7 +172,10 @@ def prepare_chat_generation_request(
             "Structured output is not supported with assistant prefills."
         )
 
-    normalized_messages, images_b64 = normalize_messages(request.messages)
+    normalized_messages, images_b64 = normalize_messages(
+        request.messages,
+        supports_vision=supports_vision,
+    )
     if images_b64 and not supports_vision:
         raise ChatRequestError("The loaded model does not support images.")
 
