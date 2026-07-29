@@ -337,8 +337,20 @@ def test_final_assistant_message_is_rendered_as_a_prefill():
         "add_generation_prompt",
         "chat_template",
         "continue_final_message",
+        "conversation",
+        "documents",
+        "load_audio_from_video",
+        "max_length",
+        "messages",
+        "padding",
+        "processor_kwargs",
+        "return_assistant_tokens_mask",
+        "return_dict",
+        "return_tensors",
         "tokenize",
+        "tokenizer_kwargs",
         "tools",
+        "truncation",
     ],
 )
 def test_chat_template_kwargs_cannot_override_server_controls(control_name):
@@ -364,7 +376,7 @@ def test_normalize_images_preserves_user_and_tool_result_order():
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "data:image/jpeg;base64,first-image",
+                        "url": "data:image/jpeg;base64,Zmlyc3QtaW1hZ2U=",
                         "detail": "auto",
                     },
                 },
@@ -391,14 +403,14 @@ def test_normalize_images_preserves_user_and_tool_result_order():
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "data:image/png;base64,second-image",
+                        "url": "data:image/png;base64,c2Vjb25kLWltYWdl",
                         "detail": "auto",
                     },
                 },
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "data:image/jpeg;base64,first-image",
+                        "url": "data:image/jpeg;base64,Zmlyc3QtaW1hZ2U=",
                         "detail": "auto",
                     },
                 },
@@ -411,7 +423,11 @@ def test_normalize_images_preserves_user_and_tool_result_order():
         supports_vision=True,
     )
 
-    assert images_b64 == ["first-image", "second-image", "first-image"]
+    assert images_b64 == [
+        "Zmlyc3QtaW1hZ2U=",
+        "c2Vjb25kLWltYWdl",
+        "Zmlyc3QtaW1hZ2U=",
+    ]
     assert normalized[0]["content"] == [
         {"type": "text", "text": "First"},
         {"type": "image"},
@@ -439,7 +455,7 @@ def test_prepare_vision_request_forwards_base64_to_generation_boundary():
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": "data:image/jpeg;base64,image-payload",
+                                "url": "data:image/jpeg;base64,aW1hZ2UtcGF5bG9hZA==",
                                 "detail": "auto",
                             },
                         },
@@ -452,7 +468,7 @@ def test_prepare_vision_request_forwards_base64_to_generation_boundary():
         tokenize=lambda _model_kit, _prompt: [7, 8],
     )
 
-    assert request.generation_kwargs["images_b64"] == ["image-payload"]
+    assert request.generation_kwargs["images_b64"] == ["aW1hZ2UtcGF5bG9hZA=="]
     assert renderer.calls[0][0][0]["content"] == [
         {"type": "text", "text": "Describe this"},
         {"type": "image"},
@@ -502,6 +518,39 @@ def test_non_base64_image_url_is_rejected():
         )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "data:image/jpeg;base64,",
+        "data:image/jpeg;base64,not-valid-base64!",
+    ],
+)
+def test_invalid_base64_image_data_is_rejected_before_rendering(url):
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match="valid base64 data"):
+        prepare_chat_generation_request(
+            _base_request(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": url},
+                            }
+                        ],
+                    }
+                ]
+            ),
+            model_kit=_FakeVisionModelKit(renderer),
+            supports_vision=True,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
 def test_text_model_rejects_image_request():
     renderer = _FakeRenderer()
     with pytest.raises(ChatRequestError, match="does not support images"):
@@ -514,7 +563,7 @@ def test_text_model_rejects_image_request():
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": "data:image/jpeg;base64,image-payload"
+                                    "url": "data:image/jpeg;base64,aW1hZ2UtcGF5bG9hZA=="
                                 },
                             }
                         ],

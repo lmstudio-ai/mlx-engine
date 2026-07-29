@@ -1,3 +1,5 @@
+import base64
+import binascii
 from dataclasses import dataclass
 import json
 from typing import Annotated, Callable, Literal
@@ -9,8 +11,20 @@ _CHAT_TEMPLATE_CONTROL_KEYS = {
     "add_generation_prompt",
     "chat_template",
     "continue_final_message",
+    "conversation",
+    "documents",
+    "load_audio_from_video",
+    "max_length",
+    "messages",
+    "padding",
+    "processor_kwargs",
+    "return_assistant_tokens_mask",
+    "return_dict",
+    "return_tensors",
     "tokenize",
+    "tokenizer_kwargs",
     "tools",
+    "truncation",
 }
 
 
@@ -96,6 +110,12 @@ def _base64_image_data(url: str) -> str:
         or not header.endswith(";base64")
     ):
         raise ChatRequestError("Images must use inline base64 data URLs.")
+    if data == "":
+        raise ChatRequestError("Images must contain valid base64 data.")
+    try:
+        base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ChatRequestError("Images must contain valid base64 data.") from error
     return data
 
 

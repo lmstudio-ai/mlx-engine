@@ -5,6 +5,7 @@ import socket
 import struct
 import threading
 import time
+import weakref
 
 import mlx_engine.server.http as server_http
 from mlx_engine.server.http import (
@@ -190,12 +191,66 @@ def test_invalid_and_oversized_content_lengths_are_rejected():
 
         status, body = _request_with_content_length(
             port,
-            str(500 * 1024 * 1024 + 1),
+            str(server_http._MAX_REQUEST_BODY_BYTES + 1),
         )
         assert status == 413
         assert json.loads(body) == {
-            "error": {"message": "Request body exceeds the 500 MiB limit."}
+            "error": {
+                "message": (
+                    "Request body exceeds the "
+                    f"{server_http._MAX_REQUEST_BODY_MIB} MiB limit."
+                )
+            }
         }
+
+
+def test_parsed_request_body_is_released_before_generation(monkeypatch):
+    class WeakReferenceableDict(dict):
+        pass
+
+    pending_bodies = [WeakReferenceableDict(_request_body())]
+    body_reference = weakref.ref(pending_bodies[0])
+    body_released_before_generation = []
+    original_json_loads = json.loads
+
+    def parse_request_body(value):
+        if isinstance(value, bytes):
+            return pending_bodies.pop()
+        return original_json_loads(value)
+
+    monkeypatch.setattr(server_http.json, "loads", parse_request_body)
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        body_released_before_generation.append(body_reference() is None)
+        yield GenerationResult(
+            text="",
+            tokens=[],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+
+    with _running_server(runtime) as port:
+        status, _response_body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=_request_body(),
+        )
+
+    assert status == 200
+    assert body_released_before_generation == [True]
 
 
 def test_invalid_generation_settings_are_rejected_before_streaming():
@@ -240,6 +295,39 @@ def test_invalid_generation_settings_are_rejected_before_streaming():
         assert json.loads(response_body) == {
             "error": {"message": "Unsupported generation controls: seed."}
         }
+
+
+def test_invalid_base64_image_is_rejected_before_streaming():
+    runtime = EngineRuntime(
+        _FakeVisionModelKit(),
+        supports_vision=True,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+    body = _request_body()
+    body["messages"] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64,not-valid-base64!"},
+                }
+            ],
+        }
+    ]
+
+    with _running_server(runtime) as port:
+        status, response_body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 400
+    assert json.loads(response_body) == {
+        "error": {"message": "Images must contain valid base64 data."}
+    }
 
 
 def test_chat_stream_forwards_generation_settings_and_returns_usage():

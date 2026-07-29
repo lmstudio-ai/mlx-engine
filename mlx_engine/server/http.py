@@ -35,7 +35,8 @@ from .chat import (
 logger = logging.getLogger(__name__)
 
 
-_MAX_REQUEST_BODY_BYTES = 500 * 1024 * 1024
+_MAX_REQUEST_BODY_MIB = 64
+_MAX_REQUEST_BODY_BYTES = _MAX_REQUEST_BODY_MIB * 1024 * 1024
 _SSE_WRITE_TIMEOUT_SECONDS = 30.0
 
 
@@ -228,8 +229,9 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            body = self._read_json_body()
-            request = self.server.runtime.prepare_chat_generation(body)
+            request = self.server.runtime.prepare_chat_generation(
+                self._read_json_body()
+            )
         except _RequestBodyTooLargeError as error:
             self._send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(error))
             return
@@ -369,7 +371,9 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         if content_length <= 0:
             raise ChatRequestError("Content-Length must be a positive integer.")
         if content_length > _MAX_REQUEST_BODY_BYTES:
-            raise _RequestBodyTooLargeError("Request body exceeds the 500 MiB limit.")
+            raise _RequestBodyTooLargeError(
+                f"Request body exceeds the {_MAX_REQUEST_BODY_MIB} MiB limit."
+            )
 
         try:
             encoded_body = self.rfile.read(content_length)
