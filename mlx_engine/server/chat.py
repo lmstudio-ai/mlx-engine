@@ -105,22 +105,26 @@ class ChatGenerationRequest:
     generation_kwargs: dict[str, object]
 
 
-def _validate_image_data(data: bytes) -> None:
+def _validate_image_pixel_count(pixel_count: int) -> None:
+    max_image_pixels = Image.MAX_IMAGE_PIXELS
+    if max_image_pixels is not None and pixel_count > max_image_pixels:
+        raise ChatRequestError("Image dimensions are too large.")
+
+
+def _validate_image_data(data: bytes) -> int:
     try:
         with Image.open(BytesIO(data)) as image:
-            max_image_pixels = Image.MAX_IMAGE_PIXELS
-            if (
-                max_image_pixels is not None
-                and image.width * image.height > max_image_pixels
-            ):
-                raise ChatRequestError("Image dimensions are too large.")
+            pixel_count = image.width * image.height
+            _validate_image_pixel_count(pixel_count)
+            image.verify()
+            return pixel_count
     except Image.DecompressionBombError as error:
         raise ChatRequestError("Image dimensions are too large.") from error
-    except OSError as error:
+    except (OSError, SyntaxError) as error:
         raise ChatRequestError("Images must contain supported image data.") from error
 
 
-def _base64_image_data(url: str) -> str:
+def _base64_image_data(url: str) -> tuple[str, int]:
     header, separator, data = url.partition(",")
     if (
         separator == ""
@@ -134,8 +138,7 @@ def _base64_image_data(url: str) -> str:
         image_data = base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError) as error:
         raise ChatRequestError("Images must contain valid base64 data.") from error
-    _validate_image_data(image_data)
-    return data
+    return data, _validate_image_data(image_data)
 
 
 def normalize_messages(
@@ -145,6 +148,7 @@ def normalize_messages(
 ) -> tuple[list[dict], list[str]]:
     normalized_messages: list[dict] = []
     images_b64: list[str] = []
+    total_image_pixels = 0
 
     for message in messages:
         normalized_message = message.model_dump(exclude_unset=True)
@@ -156,7 +160,10 @@ def normalize_messages(
                     text_parts.append(part.text)
                     normalized_parts.append({"type": "text", "text": part.text})
                 else:
-                    images_b64.append(_base64_image_data(part.image_url.url))
+                    image_b64, image_pixels = _base64_image_data(part.image_url.url)
+                    total_image_pixels += image_pixels
+                    _validate_image_pixel_count(total_image_pixels)
+                    images_b64.append(image_b64)
                     normalized_parts.append({"type": "image"})
             normalized_message["content"] = (
                 normalized_parts if supports_vision else "".join(text_parts)

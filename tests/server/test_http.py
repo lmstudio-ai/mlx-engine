@@ -25,6 +25,7 @@ from mlx_engine.utils.token import Token
 _DECOMPRESSION_BOMB_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAJxAAACcQCAIAAAA1LPVwAAAAAElFTkSuQmCC"
 )
+_TRUNCATED_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQ="
 
 
 class _FakeRenderer:
@@ -373,6 +374,7 @@ def test_invalid_generation_settings_are_rejected_before_streaming():
     [
         ("not-valid-base64!", "Images must contain valid base64 data."),
         ("bm90IGFuIGltYWdl", "Images must contain supported image data."),
+        (_TRUNCATED_PNG_B64, "Images must contain supported image data."),
         (_DECOMPRESSION_BOMB_PNG_B64, "Image dimensions are too large."),
     ],
 )
@@ -662,6 +664,50 @@ def test_generation_errors_are_returned_inside_the_stream():
         assert _parse_sse(response_text) == [
             {"error": {"message": str(generation_error)}}
         ]
+
+
+def test_mid_stream_generation_errors_emit_a_recognized_error_frame():
+    generation_error = RuntimeError("generation failed after output")
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text="partial output",
+            tokens=[Token(id=10, text="partial output", logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=None,
+        )
+        raise generation_error
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+
+    with _running_server(runtime) as port:
+        status, response_text = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=_request_body(),
+        )
+
+    assert status == 200
+    assert _parse_sse(response_text) == [
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "partial output"},
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {"error": {"message": str(generation_error)}},
+    ]
+    assert "data: [DONE]" not in response_text
 
 
 def test_stalled_sse_write_cancels_the_active_mlx_request(monkeypatch):

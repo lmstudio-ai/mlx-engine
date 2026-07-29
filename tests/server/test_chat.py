@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from PIL import Image
 from pydantic import ValidationError
 from transformers.utils.chat_template_utils import render_jinja_template
 
@@ -24,6 +25,7 @@ _BLUE_PNG_B64 = (
 _DECOMPRESSION_BOMB_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAJxAAACcQCAIAAAA1LPVwAAAAAElFTkSuQmCC"
 )
+_TRUNCATED_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQ="
 
 
 class _FakeRenderer:
@@ -541,6 +543,10 @@ def test_non_base64_image_url_is_rejected():
         ("data:image/jpeg;base64,not-valid-base64!", "valid base64 data"),
         ("data:image/png;base64,bm90IGFuIGltYWdl", "supported image data"),
         (
+            f"data:image/png;base64,{_TRUNCATED_PNG_B64}",
+            "supported image data",
+        ),
+        (
             f"data:image/png;base64,{_DECOMPRESSION_BOMB_PNG_B64}",
             "Image dimensions are too large",
         ),
@@ -561,6 +567,32 @@ def test_invalid_image_data_is_rejected_before_rendering(url, error_message):
                                 "image_url": {"url": url},
                             }
                         ],
+                    }
+                ]
+            ),
+            model_kit=_FakeVisionModelKit(renderer),
+            supports_vision=True,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
+def test_aggregate_image_pixels_are_bounded_before_rendering(monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 2)
+    renderer = _FakeRenderer()
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/png;base64,{_RED_PNG_B64}"},
+    }
+
+    with pytest.raises(ChatRequestError, match="Image dimensions are too large"):
+        prepare_chat_generation_request(
+            _base_request(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [image_part, image_part, image_part],
                     }
                 ]
             ),
