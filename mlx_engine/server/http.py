@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_REQUEST_BODY_MIB = 64
 _MAX_REQUEST_BODY_BYTES = _MAX_REQUEST_BODY_MIB * 1024 * 1024
+_REQUEST_READ_TIMEOUT_SECONDS = 30.0
 _SSE_WRITE_TIMEOUT_SECONDS = 30.0
 
 
@@ -45,6 +46,10 @@ class _ClientConnectionError(Exception):
 
 
 class _RequestBodyTooLargeError(ValueError):
+    pass
+
+
+class _RequestReadTimeoutError(TimeoutError):
     pass
 
 
@@ -187,6 +192,11 @@ class MlxEngineHttpServer(ThreadingHTTPServer):
         self._active_sessions_lock = threading.Lock()
         super().__init__(server_address, MlxEngineRequestHandler)
 
+    def get_request(self):
+        connection, client_address = super().get_request()
+        connection.settimeout(_REQUEST_READ_TIMEOUT_SECONDS)
+        return connection, client_address
+
     def register_session(self, session: GenerationSession) -> None:
         with self._active_sessions_lock:
             self._active_sessions.add(session)
@@ -234,6 +244,9 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             )
         except _RequestBodyTooLargeError as error:
             self._send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(error))
+            return
+        except _RequestReadTimeoutError as error:
+            self._send_error(HTTPStatus.REQUEST_TIMEOUT, str(error))
             return
         except (ChatRequestError, ValidationError) as error:
             self._send_error(HTTPStatus.BAD_REQUEST, str(error))
@@ -377,16 +390,17 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
 
         try:
             encoded_body = self.rfile.read(content_length)
+        except TimeoutError as error:
+            raise _RequestReadTimeoutError("Request body read timed out.") from error
+        try:
             return json.loads(encoded_body)
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
             raise ChatRequestError("The request body must be valid JSON.") from error
 
     def _is_authorized(self) -> bool:
-        authorization = self.headers.get("Authorization", "")
-        return hmac.compare_digest(
-            authorization,
-            f"Bearer {self.server.api_key}",
-        )
+        authorization = self.headers.get("Authorization", "").encode()
+        expected = f"Bearer {self.server.api_key}".encode()
+        return hmac.compare_digest(authorization, expected)
 
     def _start_sse_response(self) -> None:
         try:

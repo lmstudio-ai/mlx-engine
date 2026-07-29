@@ -171,6 +171,7 @@ def test_supported_generation_boundaries_and_unknown_future_fields_are_accepted(
 @pytest.mark.parametrize(
     ("overrides", "control_name"),
     [
+        ({"max_completion_tokens": 1}, "max_completion_tokens"),
         ({"seed": 0}, "seed"),
         ({"logprobs": True}, "logprobs"),
         ({"top_logprobs": 5}, "top_logprobs"),

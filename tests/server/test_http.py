@@ -145,6 +145,68 @@ def test_health_requires_auth_and_reports_actualized_context_length():
         assert json.loads(body) == {"status": "ok", "context_length": 8192}
 
 
+def test_non_ascii_authorization_is_rejected():
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+
+    with _running_server(runtime) as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request(
+            "GET",
+            "/health",
+            headers={"Authorization": "Bearer \xff"},
+        )
+        response = connection.getresponse()
+        response_body = response.read().decode("utf-8")
+        connection.close()
+
+    assert response.status == 401
+    assert json.loads(response_body) == {"error": {"message": "Unauthorized."}}
+
+
+def test_partial_headers_time_out(monkeypatch):
+    monkeypatch.setattr(server_http, "_REQUEST_READ_TIMEOUT_SECONDS", 0.05)
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+
+    with _running_server(runtime) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            client.sendall(b"GET /health HTTP/1.1\r\n")
+            assert client.recv(1) == b""
+
+
+def test_partial_request_body_returns_request_timeout(monkeypatch):
+    monkeypatch.setattr(server_http, "_REQUEST_READ_TIMEOUT_SECONDS", 0.05)
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+
+    with _running_server(runtime) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            client.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer secret-token\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 2\r\n\r\n"
+                b"{"
+            )
+            response = b""
+            while chunk := client.recv(4096):
+                response += chunk
+
+    assert b"HTTP/1.1 408 Request Timeout" in response
+    assert b"Request body read timed out." in response
+
+
 def test_rejected_post_closes_connection_before_unread_body_can_be_reused():
     runtime = EngineRuntime(
         _FakeModelKit(),
@@ -284,7 +346,7 @@ def test_invalid_generation_settings_are_rejected_before_streaming():
         assert "stop" in json.loads(response_body)["error"]["message"]
 
         unsupported_body = _request_body()
-        unsupported_body["seed"] = 0
+        unsupported_body["max_completion_tokens"] = 1
         status, response_body = _request(
             port,
             "POST",
@@ -293,7 +355,9 @@ def test_invalid_generation_settings_are_rejected_before_streaming():
         )
         assert status == 400
         assert json.loads(response_body) == {
-            "error": {"message": "Unsupported generation controls: seed."}
+            "error": {
+                "message": "Unsupported generation controls: max_completion_tokens."
+            }
         }
 
 

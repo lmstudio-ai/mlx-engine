@@ -80,6 +80,7 @@ class ChatCompletionRequest(BaseModel):
     stream: Literal[True]
     temperature: _NonNegativeFloat
     max_tokens: _PositiveInt | None = None
+    max_completion_tokens: _PositiveInt | None = None
     stop: list[_NonEmptyString] | None = None
     top_p: _Probability | None = None
     top_k: _TopK
@@ -171,6 +172,7 @@ def prepare_chat_generation_request(
     unsupported_controls = [
         name
         for name, requested in (
+            ("max_completion_tokens", request.max_completion_tokens is not None),
             ("seed", request.seed is not None),
             ("logprobs", request.logprobs is True),
             ("top_logprobs", request.top_logprobs is not None),
