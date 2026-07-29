@@ -222,7 +222,7 @@ def load_model(
         quantized_kv_start (Optional[int]): Step to begin KV cache quantization when enabled.
         prefill_step_size (Optional[int]): Number of tokens to process per prefill chunk.
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
-        auto_fit_context (bool): Whether vision models should fit context length to available memory.
+        auto_fit_context (bool): Whether batched models should fit context length to available memory.
 
     Returns:
         LoadedModelKit: An initialized model instance:
@@ -310,6 +310,7 @@ def load_model(
                 prefill_step_size=prefill_step_size,
                 trust_remote_code=trust_remote_code,
                 seed=seed,
+                auto_fit_context=auto_fit_context,
             )
         else:
             model_kit = ModelKit(
