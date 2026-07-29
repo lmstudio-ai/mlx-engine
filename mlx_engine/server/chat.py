@@ -1,9 +1,11 @@
 import base64
 import binascii
 from dataclasses import dataclass
+from io import BytesIO
 import json
 from typing import Annotated, Callable, Literal
 
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -103,6 +105,21 @@ class ChatGenerationRequest:
     generation_kwargs: dict[str, object]
 
 
+def _validate_image_data(data: bytes) -> None:
+    try:
+        with Image.open(BytesIO(data)) as image:
+            max_image_pixels = Image.MAX_IMAGE_PIXELS
+            if (
+                max_image_pixels is not None
+                and image.width * image.height > max_image_pixels
+            ):
+                raise ChatRequestError("Image dimensions are too large.")
+    except Image.DecompressionBombError as error:
+        raise ChatRequestError("Image dimensions are too large.") from error
+    except OSError as error:
+        raise ChatRequestError("Images must contain supported image data.") from error
+
+
 def _base64_image_data(url: str) -> str:
     header, separator, data = url.partition(",")
     if (
@@ -114,9 +131,10 @@ def _base64_image_data(url: str) -> str:
     if data == "":
         raise ChatRequestError("Images must contain valid base64 data.")
     try:
-        base64.b64decode(data, validate=True)
+        image_data = base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError) as error:
         raise ChatRequestError("Images must contain valid base64 data.") from error
+    _validate_image_data(image_data)
     return data
 
 

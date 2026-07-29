@@ -12,6 +12,20 @@ from mlx_engine.server.chat import (
 )
 
 
+_RED_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ"
+    "/pLvAAAAAElFTkSuQmCC"
+)
+_BLUE_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAI"
+    "icLsAAAAAElFTkSuQmCC"
+)
+# A 10,000 x 10,000 PNG header with no allocated pixel data.
+_DECOMPRESSION_BOMB_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAJxAAACcQCAIAAAA1LPVwAAAAAElFTkSuQmCC"
+)
+
+
 class _FakeRenderer:
     def __init__(self):
         self.chat_template = "model template"
@@ -377,7 +391,7 @@ def test_normalize_images_preserves_user_and_tool_result_order():
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "data:image/jpeg;base64,Zmlyc3QtaW1hZ2U=",
+                        "url": f"data:image/png;base64,{_RED_PNG_B64}",
                         "detail": "auto",
                     },
                 },
@@ -404,14 +418,14 @@ def test_normalize_images_preserves_user_and_tool_result_order():
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "data:image/png;base64,c2Vjb25kLWltYWdl",
+                        "url": f"data:image/png;base64,{_BLUE_PNG_B64}",
                         "detail": "auto",
                     },
                 },
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "data:image/jpeg;base64,Zmlyc3QtaW1hZ2U=",
+                        "url": f"data:image/png;base64,{_RED_PNG_B64}",
                         "detail": "auto",
                     },
                 },
@@ -425,9 +439,9 @@ def test_normalize_images_preserves_user_and_tool_result_order():
     )
 
     assert images_b64 == [
-        "Zmlyc3QtaW1hZ2U=",
-        "c2Vjb25kLWltYWdl",
-        "Zmlyc3QtaW1hZ2U=",
+        _RED_PNG_B64,
+        _BLUE_PNG_B64,
+        _RED_PNG_B64,
     ]
     assert normalized[0]["content"] == [
         {"type": "text", "text": "First"},
@@ -456,7 +470,7 @@ def test_prepare_vision_request_forwards_base64_to_generation_boundary():
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": "data:image/jpeg;base64,aW1hZ2UtcGF5bG9hZA==",
+                                "url": f"data:image/png;base64,{_RED_PNG_B64}",
                                 "detail": "auto",
                             },
                         },
@@ -469,7 +483,7 @@ def test_prepare_vision_request_forwards_base64_to_generation_boundary():
         tokenize=lambda _model_kit, _prompt: [7, 8],
     )
 
-    assert request.generation_kwargs["images_b64"] == ["aW1hZ2UtcGF5bG9hZA=="]
+    assert request.generation_kwargs["images_b64"] == [_RED_PNG_B64]
     assert renderer.calls[0][0][0]["content"] == [
         {"type": "text", "text": "Describe this"},
         {"type": "image"},
@@ -519,17 +533,23 @@ def test_non_base64_image_url_is_rejected():
         )
 
 
+@pytest.mark.filterwarnings("ignore::PIL.Image.DecompressionBombWarning")
 @pytest.mark.parametrize(
-    "url",
+    ("url", "error_message"),
     [
-        "data:image/jpeg;base64,",
-        "data:image/jpeg;base64,not-valid-base64!",
+        ("data:image/jpeg;base64,", "valid base64 data"),
+        ("data:image/jpeg;base64,not-valid-base64!", "valid base64 data"),
+        ("data:image/png;base64,bm90IGFuIGltYWdl", "supported image data"),
+        (
+            f"data:image/png;base64,{_DECOMPRESSION_BOMB_PNG_B64}",
+            "Image dimensions are too large",
+        ),
     ],
 )
-def test_invalid_base64_image_data_is_rejected_before_rendering(url):
+def test_invalid_image_data_is_rejected_before_rendering(url, error_message):
     renderer = _FakeRenderer()
 
-    with pytest.raises(ChatRequestError, match="valid base64 data"):
+    with pytest.raises(ChatRequestError, match=error_message):
         prepare_chat_generation_request(
             _base_request(
                 messages=[
@@ -564,7 +584,7 @@ def test_text_model_rejects_image_request():
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": "data:image/jpeg;base64,aW1hZ2UtcGF5bG9hZA=="
+                                    "url": f"data:image/png;base64,{_RED_PNG_B64}"
                                 },
                             }
                         ],

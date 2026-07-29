@@ -8,6 +8,7 @@ import time
 import weakref
 
 import mlx_engine.server.http as server_http
+import pytest
 from mlx_engine.server.http import (
     EngineRuntime,
     GenerationSession,
@@ -19,6 +20,11 @@ from mlx_engine.utils.generation_result import (
 )
 from mlx_engine.utils.prompt_progress_reporter import BatchedMlxLmReporterAdapter
 from mlx_engine.utils.token import Token
+
+
+_DECOMPRESSION_BOMB_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAJxAAACcQCAIAAAA1LPVwAAAAAElFTkSuQmCC"
+)
 
 
 class _FakeRenderer:
@@ -361,7 +367,16 @@ def test_invalid_generation_settings_are_rejected_before_streaming():
         }
 
 
-def test_invalid_base64_image_is_rejected_before_streaming():
+@pytest.mark.filterwarnings("ignore::PIL.Image.DecompressionBombWarning")
+@pytest.mark.parametrize(
+    ("image_data", "error_message"),
+    [
+        ("not-valid-base64!", "Images must contain valid base64 data."),
+        ("bm90IGFuIGltYWdl", "Images must contain supported image data."),
+        (_DECOMPRESSION_BOMB_PNG_B64, "Image dimensions are too large."),
+    ],
+)
+def test_invalid_image_is_rejected_before_streaming(image_data, error_message):
     runtime = EngineRuntime(
         _FakeVisionModelKit(),
         supports_vision=True,
@@ -374,7 +389,7 @@ def test_invalid_base64_image_is_rejected_before_streaming():
             "content": [
                 {
                     "type": "image_url",
-                    "image_url": {"url": "data:image/jpeg;base64,not-valid-base64!"},
+                    "image_url": {"url": f"data:image/png;base64,{image_data}"},
                 }
             ],
         }
@@ -389,9 +404,7 @@ def test_invalid_base64_image_is_rejected_before_streaming():
         )
 
     assert status == 400
-    assert json.loads(response_body) == {
-        "error": {"message": "Images must contain valid base64 data."}
-    }
+    assert json.loads(response_body) == {"error": {"message": error_message}}
 
 
 def test_chat_stream_forwards_generation_settings_and_returns_usage():
