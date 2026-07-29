@@ -52,13 +52,21 @@ class PromptProgressCallbackReporter(PromptProgressReporter):
         self._percent_callback = percent_callback
         self._context: Optional[ProgressContext] = None
 
-    def _emit_percent(self, prefill_tokens_processed: int) -> None:
+    def _emit_percent(
+        self,
+        prefill_tokens_processed: int,
+        *,
+        is_final: bool = False,
+    ) -> None:
         if self._percent_callback is None or self._context is None:
             return
-        tokens_to_prefill = (
-            self._context.total_prompt_tokens - self._context.cached_tokens
-        )
-        if tokens_to_prefill <= 0:
+        if is_final:
+            self._percent_callback(100.0)
+            return
+
+        prefill_tokens = max(0, self._context.total_prompt_tokens - 1)
+        tokens_to_prefill = max(0, prefill_tokens - self._context.cached_tokens)
+        if tokens_to_prefill == 0:
             self._percent_callback(100.0)
         else:
             percent = (prefill_tokens_processed / tokens_to_prefill) * 100.0
@@ -104,5 +112,5 @@ class PromptProgressCallbackReporter(PromptProgressReporter):
         )
         should_continue = self._progress_callback(event, is_draft)
         if not is_draft and prefill_tokens_processed is not None:
-            self._emit_percent(prefill_tokens_processed)
+            self._emit_percent(prefill_tokens_processed, is_final=True)
         return should_continue

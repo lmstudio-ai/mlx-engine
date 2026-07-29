@@ -6,6 +6,7 @@ import struct
 import threading
 import time
 
+import mlx_engine.server.http as server_http
 from mlx_engine.server.http import (
     EngineRuntime,
     GenerationSession,
@@ -73,12 +74,14 @@ def _parse_sse(response_text):
 
 
 @contextmanager
-def _running_server(runtime):
+def _running_server(runtime, *, send_buffer_size=None):
     server = MlxEngineHttpServer(
         ("127.0.0.1", 0),
         api_key="secret-token",
         runtime=runtime,
     )
+    if send_buffer_size is not None:
+        server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, send_buffer_size)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -464,29 +467,84 @@ def test_tools_are_rejected_before_streaming():
     }
 
 
-def test_generation_error_is_returned_inside_the_stream():
+def test_generation_errors_are_returned_inside_the_stream():
+    for generation_error in (
+        RuntimeError("generation failed"),
+        OSError("backend I/O failed"),
+    ):
+
+        def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+            raise generation_error
+            yield
+
+        runtime = EngineRuntime(
+            _FakeModelKit(),
+            supports_vision=False,
+            create_generator_fn=create_generator,
+            get_runtime_load_info_fn=lambda _model_kit: {},
+            tokenize_fn=lambda _model_kit, _prompt: [1],
+        )
+
+        with _running_server(runtime) as port:
+            status, response_text = _request(
+                port,
+                "POST",
+                "/v1/chat/completions",
+                body=_request_body(),
+            )
+
+        assert status == 200
+        assert _parse_sse(response_text) == [
+            {"error": {"message": str(generation_error)}}
+        ]
+
+
+def test_stalled_sse_write_cancels_the_active_mlx_request(monkeypatch):
+    monkeypatch.setattr(server_http, "_SSE_WRITE_TIMEOUT_SECONDS", 0.05)
+    generation_stopped = threading.Event()
+    stopped_request_ids = []
+    large_text = "x" * (1024 * 1024)
+
     def create_generator(_model_kit, _prompt_tokens, **_kwargs):
-        raise RuntimeError("generation failed")
-        yield
+        while not generation_stopped.is_set():
+            yield GenerationResult(
+                text=large_text,
+                tokens=[],
+                top_logprobs=[],
+                stop_condition=None,
+            )
+
+    def stop_generation(_model_kit, request_id):
+        stopped_request_ids.append(request_id)
+        generation_stopped.set()
 
     runtime = EngineRuntime(
         _FakeModelKit(),
         supports_vision=False,
         create_generator_fn=create_generator,
         get_runtime_load_info_fn=lambda _model_kit: {},
-        tokenize_fn=lambda _model_kit, _prompt: [1],
+        stop_generation_fn=stop_generation,
+        tokenize_fn=lambda _model_kit, _prompt: [1, 2, 3],
     )
 
-    with _running_server(runtime) as port:
-        status, response_text = _request(
-            port,
-            "POST",
-            "/v1/chat/completions",
-            body=_request_body(),
-        )
+    with _running_server(runtime, send_buffer_size=4096) as port:
+        encoded_body = json.dumps(_request_body()).encode("utf-8")
+        with socket.socket() as client:
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            client.settimeout(2)
+            client.connect(("127.0.0.1", port))
+            client.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer secret-token\r\n"
+                b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(encoded_body)}\r\n\r\n".encode("ascii")
+                + encoded_body
+            )
+            assert generation_stopped.wait(timeout=2)
 
-    assert status == 200
-    assert _parse_sse(response_text) == [{"error": {"message": "generation failed"}}]
+    assert len(stopped_request_ids) == 1
+    assert stopped_request_ids[0] != ""
 
 
 def test_client_disconnect_stops_the_active_mlx_request():

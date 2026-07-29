@@ -4,6 +4,7 @@ from mlx_engine.utils.prompt_progress_events import (
     PromptProgressBeginEvent,
     PromptProgressEvent,
 )
+from mlx_engine.utils.prompt_progress_reporter import BatchedMlxLmReporterAdapter
 
 
 class TestPromptProgressCallbackReporter(unittest.TestCase):
@@ -85,12 +86,12 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.begin(
             is_draft=False,
             cached_tokens=50,
-            total_prompt_tokens=100,
+            total_prompt_tokens=101,
             prefill_tokens_processed=10,
         )
 
         self.assertEqual(len(self.percents), 1)
-        # percent = prefill / (total - cached) * 100 = 10 / 50 * 100 = 20
+        # percent = prefill / (total - seed - cached) * 100 = 10 / 50 * 100
         self.assertEqual(self.percents[0], 20.0)
 
     def test_percent_callback_emitted_on_update(self):
@@ -100,7 +101,7 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.begin(
             is_draft=False,
             cached_tokens=20,
-            total_prompt_tokens=100,
+            total_prompt_tokens=101,
             prefill_tokens_processed=0,
         )
         self.percents.clear()
@@ -108,7 +109,7 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.update(is_draft=False, prefill_tokens_processed=40)
 
         self.assertEqual(len(self.percents), 1)
-        # percent = prefill / (total - cached) * 100 = 40 / 80 * 100 = 50
+        # percent = prefill / (total - seed - cached) * 100 = 40 / 80 * 100
         self.assertEqual(self.percents[0], 50.0)
 
     def test_percent_callback_emitted_on_finish(self):
@@ -118,7 +119,7 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.begin(
             is_draft=False,
             cached_tokens=20,
-            total_prompt_tokens=100,
+            total_prompt_tokens=101,
             prefill_tokens_processed=0,
         )
         self.percents.clear()
@@ -126,17 +127,16 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.finish(is_draft=False, prefill_tokens_processed=80)
 
         self.assertEqual(len(self.percents), 1)
-        # percent = prefill / (total - cached) * 100 = 80 / 80 * 100 = 100
         self.assertEqual(self.percents[0], 100.0)
 
-    def test_percent_emitted_on_finish_using_last_value(self):
+    def test_finish_uses_last_processed_value_and_emits_100_percent(self):
         reporter = PromptProgressCallbackReporter(
             self.progress_callback, percent_callback=self.percent_callback
         )
         reporter.begin(
             is_draft=False,
             cached_tokens=20,
-            total_prompt_tokens=100,
+            total_prompt_tokens=101,
             prefill_tokens_processed=0,
         )
         reporter.update(is_draft=False, prefill_tokens_processed=60)
@@ -144,9 +144,33 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
 
         reporter.finish(is_draft=False, prefill_tokens_processed=None)
 
-        self.assertEqual(len(self.percents), 1)
-        # percent = prefill / (total - cached) * 100 = 60 / 80 * 100 = 75
-        self.assertEqual(self.percents[0], 75.0)
+        self.assertEqual(self.events[-1]["event"].prefill_tokens_processed, 60)
+        self.assertEqual(self.percents, [100.0])
+
+    def test_batched_adapter_reaches_100_without_processing_decode_seed(self):
+        reporter = PromptProgressCallbackReporter(
+            self.progress_callback, percent_callback=self.percent_callback
+        )
+        adapter = BatchedMlxLmReporterAdapter(reporter, emit_begin=True)
+
+        adapter(0, 3)
+        adapter(2, 3)
+
+        self.assertEqual(self.percents[-1], 100.0)
+        final_event = self.events[-1]["event"]
+        self.assertTrue(final_event.is_final)
+        self.assertEqual(final_event.prefill_tokens_processed, 2)
+
+    def test_one_token_batched_prompt_has_no_prefill_work(self):
+        reporter = PromptProgressCallbackReporter(
+            self.progress_callback, percent_callback=self.percent_callback
+        )
+        adapter = BatchedMlxLmReporterAdapter(reporter, emit_begin=True)
+
+        adapter(1, 1)
+
+        self.assertEqual(self.percents, [100.0, 100.0])
+        self.assertEqual(self.events[-1]["event"].prefill_tokens_processed, 0)
 
     def test_draft_events_do_not_emit_percent(self):
         reporter = PromptProgressCallbackReporter(
@@ -205,7 +229,7 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.begin(
             is_draft=False,
             cached_tokens=80,
-            total_prompt_tokens=100,
+            total_prompt_tokens=101,
             prefill_tokens_processed=0,
         )
         self.percents.clear()
@@ -222,7 +246,7 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.begin(
             is_draft=False,
             cached_tokens=-10,  # edge case
-            total_prompt_tokens=100,
+            total_prompt_tokens=101,
             prefill_tokens_processed=0,
         )
         self.percents.clear()
@@ -239,7 +263,7 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         reporter.begin(
             is_draft=False,
             cached_tokens=20,
-            total_prompt_tokens=100,
+            total_prompt_tokens=101,
             prefill_tokens_processed=0,
         )
         reporter.update(is_draft=False, prefill_tokens_processed=40)
@@ -252,7 +276,7 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         begin_event = self.events[0]["event"]
         self.assertIsInstance(begin_event, PromptProgressBeginEvent)
         self.assertEqual(begin_event.cached_tokens, 20)
-        self.assertEqual(begin_event.total_prompt_tokens, 100)
+        self.assertEqual(begin_event.total_prompt_tokens, 101)
         self.assertEqual(begin_event.prefill_tokens_processed, 0)
         self.assertFalse(self.events[0]["is_draft"])
 
@@ -325,11 +349,11 @@ class TestPromptProgressCallbackReporter(unittest.TestCase):
         )
         reporter.begin(
             is_draft=False,
-            cached_tokens=100,
+            cached_tokens=99,
             total_prompt_tokens=100,
             prefill_tokens_processed=0,
         )
 
-        # tokens_to_prefill = 0, so returns 100% (everything cached)
+        # The 99 prefill tokens are cached; the remaining token seeds decode.
         self.assertEqual(len(self.percents), 1)
         self.assertEqual(self.percents[0], 100.0)

@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_REQUEST_BODY_BYTES = 500 * 1024 * 1024
+_SSE_WRITE_TIMEOUT_SECONDS = 30.0
+
+
+class _ClientConnectionError(Exception):
+    pass
 
 
 class _RequestBodyTooLargeError(ValueError):
@@ -241,12 +246,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         generator = None
         normal_completion = False
         try:
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.close_connection = True
+            self._start_sse_response()
             reporter = _SsePromptProgressReporter(
                 self,
                 session,
@@ -260,13 +260,13 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             )
             self._stream_generation(generator, reporter)
             normal_completion = True
-        except (BrokenPipeError, ConnectionResetError, OSError):
+        except _ClientConnectionError:
             logger.debug("Generation client disconnected: %s", session.request_id)
         except Exception as error:
             logger.exception("MLX generation failed")
             try:
                 self._write_sse_json({"error": {"message": str(error)}})
-            except (BrokenPipeError, ConnectionResetError, OSError):
+            except _ClientConnectionError:
                 pass
         finally:
             try:
@@ -384,13 +384,28 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             f"Bearer {self.server.api_key}",
         )
 
+    def _start_sse_response(self) -> None:
+        try:
+            self.connection.settimeout(_SSE_WRITE_TIMEOUT_SECONDS)
+            self.close_connection = True
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        except OSError as error:
+            raise _ClientConnectionError from error
+
     def _write_sse_json(self, body: dict) -> None:
         encoded_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
         self._write_bytes(b"data: " + encoded_body + b"\n\n")
 
     def _write_bytes(self, content: bytes) -> None:
-        self.wfile.write(content)
-        self.wfile.flush()
+        try:
+            self.wfile.write(content)
+            self.wfile.flush()
+        except OSError as error:
+            raise _ClientConnectionError from error
 
     def _send_error(self, status: HTTPStatus, message: str) -> None:
         self._send_json(
