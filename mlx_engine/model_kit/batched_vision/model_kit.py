@@ -127,6 +127,7 @@ class BatchedVisionModelKit:
         max_seq_nums: int | None = DEFAULT_MAX_SEQ_NUMS,
         trust_remote_code: bool = False,
         seed: int | None = None,
+        auto_fit_context: bool = True,
     ):
         # External requests and internal generation events share one queue so
         # restore completions wake the generation thread without polling.
@@ -147,6 +148,7 @@ class BatchedVisionModelKit:
         self._max_seq_nums = max_seq_nums
         self._trust_remote_code = trust_remote_code
         self._seed = seed
+        self._auto_fit_context = auto_fit_context
 
         fix_qwen2_5_vl_image_processor(model_path)
         fix_qwen2_vl_preprocessor(model_path)
@@ -232,7 +234,10 @@ class BatchedVisionModelKit:
         mx.synchronize()
         mx.clear_cache()
 
-        if _requires_global_no_chunked_prefill(
+        if not self._auto_fit_context:
+            logger.info("Context auto-fit disabled; leaving context unchanged")
+            self._effective_context_length = None
+        elif _requires_global_no_chunked_prefill(
             self.model,
             self.model_type,
             self._uses_gemma4_bidirectional_visual_attention,

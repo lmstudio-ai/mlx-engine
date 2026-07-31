@@ -50,7 +50,12 @@ def _disable_eos_sanitization(monkeypatch) -> None:
     monkeypatch.setattr(generate_module, "sanitize_eos_tokens", lambda _model_kit: None)
 
 
-def test_batchable_text_model_uses_mlx_vlm_kit(monkeypatch, tmp_path):
+@pytest.mark.parametrize("auto_fit_context", [True, False])
+def test_batchable_text_model_uses_mlx_vlm_kit(
+    monkeypatch,
+    tmp_path,
+    auto_fit_context,
+):
     model_path = _write_text_config(tmp_path)
     fake_kit_class, created_kits = _install_fake_kit(
         monkeypatch,
@@ -76,6 +81,7 @@ def test_batchable_text_model_uses_mlx_vlm_kit(monkeypatch, tmp_path):
         max_seq_nums=3,
         trust_remote_code=True,
         seed=7,
+        auto_fit_context=auto_fit_context,
     )
 
     assert isinstance(model_kit, fake_kit_class)
@@ -88,6 +94,7 @@ def test_batchable_text_model_uses_mlx_vlm_kit(monkeypatch, tmp_path):
         "prefill_step_size": 2_048,
         "trust_remote_code": True,
         "seed": 7,
+        "auto_fit_context": auto_fit_context,
     }
 
 
