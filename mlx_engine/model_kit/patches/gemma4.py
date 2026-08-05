@@ -41,8 +41,8 @@ def config_uses_bidirectional_visual_attention(config: dict) -> bool:
     )
 
 
-def _contains_token_type(token_types: mx.array | None, value: int) -> bool:
-    return token_types is not None and bool(mx.any(token_types == value).item())
+def _contains_video_tokens(token_types: mx.array | None) -> bool:
+    return token_types is not None and bool(mx.any(token_types == 2).item())
 
 
 def image_prefill_sections(
@@ -65,7 +65,7 @@ def image_prefill_sections(
         return None
 
     token_types = prompt_kwargs.get("mm_token_type_ids")
-    if _contains_token_type(token_types, 2):
+    if _contains_video_tokens(token_types):
         raise ValueError("Gemma 4 video input is not supported by the MLX backend")
 
     sections: list[tuple[int, int]] = []
@@ -95,13 +95,10 @@ def image_prefill_sections(
 
 
 def prepare_cached_suffix_prompt_kwargs(prompt_kwargs: dict, key_len: int) -> dict:
-    """Pad image token types so a Gemma 4 suffix lines up with cached keys."""
-    token_types = prompt_kwargs.get("mm_token_type_ids")
-    if token_types is None:
-        return prompt_kwargs
-
+    """Pad a known image slice's token types to line up with cached keys."""
+    token_types = prompt_kwargs["mm_token_type_ids"]
     prefix_len = key_len - token_types.shape[1]
-    if prefix_len == 0 or not _contains_token_type(token_types, 1):
+    if prefix_len == 0:
         return prompt_kwargs
 
     prepared = dict(prompt_kwargs)
@@ -133,8 +130,10 @@ def patch_loaded_model(model: Any) -> None:
     original_make_masks = text_model._make_masks
 
     def _make_masks(self, h, cache, mm_token_type_ids=None):
-        if not _contains_token_type(mm_token_type_ids, 1):
-            return original_make_masks(h, cache, mm_token_type_ids)
+        # The batcher omits token types from image-free slices, so non-None is a
+        # known image slice and does not require a synchronous value scan here.
+        if mm_token_type_ids is None:
+            return original_make_masks(h, cache, None)
 
         # Transformers keeps full attention causal and adds the bidirectional
         # image-block overlay only to sliding attention.

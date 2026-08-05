@@ -521,8 +521,9 @@ def test_batch_generator_chunks_gemma4_around_image_boundaries(monkeypatch):
         generator.close()
 
     assert [len(call["input_ids"][0]) for call in model.calls] == [512, 512, 276]
-    assert model.calls[0]["mm_token_type_ids"] == [[0] * 512]
+    assert model.calls[0]["mm_token_type_ids"] is None
     assert model.calls[1]["mm_token_type_ids"] == [[0] * 600 + [1] * 100 + [0] * 324]
+    assert model.calls[2]["mm_token_type_ids"] is None
 
 
 def test_batch_generator_aligns_gemma4_image_sections_to_cache_boundaries(
@@ -575,7 +576,10 @@ def test_batch_generator_aligns_gemma4_image_sections_to_cache_boundaries(
     assert [len(call["input_ids"][0]) for call in model.calls] == [256, 512, 256, 176]
     assert snapshot_lengths == [256, 768, 1024]
     assert all(length % 256 == 0 for length in snapshot_lengths)
+    assert model.calls[0]["mm_token_type_ids"] is None
     assert model.calls[1]["mm_token_type_ids"] == [[0] * 400 + [1] * 200 + [0] * 168]
+    assert model.calls[2]["mm_token_type_ids"] is None
+    assert model.calls[3]["mm_token_type_ids"] is None
 
 
 def test_batch_generator_keeps_multiple_gemma4_images_whole(monkeypatch):
@@ -688,6 +692,8 @@ def test_batch_generator_long_gemma4_prompt_never_uses_visual_prefix(monkeypatch
         assert boundary % 256 == 0
         assert not image_start < boundary < image_end
 
+    assert sum(call["mm_token_type_ids"] is not None for call in model.calls) == 1
+
 
 def test_batch_generator_chunks_gemma4_text_only_normally(monkeypatch):
     """Gemma4 unified text-only prompts keep the configured prefill size."""
@@ -727,6 +733,7 @@ def test_batch_generator_chunks_gemma4_text_only_normally(monkeypatch):
         generator.close()
 
     assert [len(call["input_ids"][0]) for call in model.calls] == [4, 4, 2]
+    assert all(call["mm_token_type_ids"] is None for call in model.calls)
 
 
 def test_batch_generator_keeps_trailing_gemma4_image_whole(monkeypatch):
@@ -836,6 +843,7 @@ def test_batch_generator_restores_immediately_before_gemma4_image(monkeypatch):
 
     assert [len(call["input_ids"][0]) for call in model.calls] == [512, 288]
     assert model.calls[0]["mm_token_type_ids"] == [[0] * 512 + [1] * 188 + [0] * 324]
+    assert model.calls[1]["mm_token_type_ids"] is None
 
 
 def test_batch_generator_pads_gemma4_token_types_for_final_prefill(monkeypatch):

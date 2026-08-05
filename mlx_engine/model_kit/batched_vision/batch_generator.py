@@ -916,7 +916,7 @@ class _PromptPrefill:
             n,
             mask_key_end=self._processed_prefix_len + n,
         )
-        return self._prepare_cached_suffix_prompt_kwargs(
+        return self._prepare_gemma4_prompt_kwargs(
             prompt_kwargs,
             self._processed_prefix_len + n,
         )
@@ -1022,19 +1022,32 @@ class _PromptPrefill:
             self._inputs_embeds.shape[1],
             mask_key_end=self._processed_prefix_len + self._inputs_embeds.shape[1],
         )
-        return self._prepare_cached_suffix_prompt_kwargs(
+        return self._prepare_gemma4_prompt_kwargs(
             prompt_kwargs,
             self._processed_prefix_len + self._inputs_embeds.shape[1],
         )
 
-    def _prepare_cached_suffix_prompt_kwargs(
+    def _prepare_gemma4_prompt_kwargs(
         self,
         prompt_kwargs: dict,
         key_len: int,
     ) -> dict:
         if self._gemma4_image_prefill_sections is None:
             return prompt_kwargs
-        return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
+
+        # Prepared image spans exactly match type-1 runs. Keep token types only
+        # for image queries so the mask patch need not scan an MLX array.
+        query_start = self._processed_prefix_len
+        has_image = any(
+            span.start < key_len and query_start < span.end
+            for span in self._prefix_cache_save_state.image_spans
+        )
+        if has_image:
+            return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
+
+        prepared = dict(prompt_kwargs)
+        prepared.pop("mm_token_type_ids", None)
+        return prepared
 
 
 class BatchGenerator:

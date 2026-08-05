@@ -71,15 +71,14 @@ def test_gemma4_cached_suffix_prompt_kwargs_pad_visual_token_types_to_key_len():
     assert prepared["unchanged"] == "value"
 
 
-def test_gemma4_cached_suffix_prompt_kwargs_keeps_text_only_token_types():
+def test_gemma4_image_prompt_kwargs_without_cached_prefix_are_unchanged():
     prompt_kwargs = {
-        "mm_token_type_ids": mx.array([[0, 0, 0, 0]], dtype=mx.int32),
+        "mm_token_type_ids": mx.array([[0, 1, 1, 0]], dtype=mx.int32),
     }
 
-    prepared = prepare_cached_suffix_prompt_kwargs(prompt_kwargs, key_len=7)
+    prepared = prepare_cached_suffix_prompt_kwargs(prompt_kwargs, key_len=4)
 
     assert prepared is prompt_kwargs
-    assert prepared["mm_token_type_ids"].tolist() == [[0, 0, 0, 0]]
 
 
 def test_gemma4_suffix_visual_mask_patch_uses_query_rows_only():
