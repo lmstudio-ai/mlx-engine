@@ -884,9 +884,9 @@ class _PromptPrefill:
             if target_prefix_len > self._processed_prefix_len:
                 next_step = target_prefix_len - self._processed_prefix_len
 
-        return self._step_without_splitting_gemma4_image(next_step)
+        return self._step_without_splitting_gemma4_image_run(next_step)
 
-    def _step_without_splitting_gemma4_image(self, proposed_step: int) -> int:
+    def _step_without_splitting_gemma4_image_run(self, proposed_step: int) -> int:
         if proposed_step == 0 or self._gemma4_image_prefill_sections is None:
             return proposed_step
 
