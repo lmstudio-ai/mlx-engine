@@ -61,9 +61,13 @@ def image_prefill_sections(
 
     sections: list[tuple[int, int]] = []
     for span in image_spans:
+        # Restores never end inside an image run, so an image that starts before
+        # the restored prefix is already cached in full.
         if span.start < cached_prefix_len:
             continue
 
+        # Expand the raw image run to its surrounding 256-token cache chunks.
+        # Adjusted model-call endpoints then remain valid cache checkpoints.
         section_start = max(
             cached_prefix_len,
             (span.start // DEFAULT_PREFIX_CHUNK_SIZE) * DEFAULT_PREFIX_CHUNK_SIZE,
@@ -73,10 +77,13 @@ def image_prefill_sections(
             // DEFAULT_PREFIX_CHUNK_SIZE
             * DEFAULT_PREFIX_CHUNK_SIZE
         )
+        # Prompt prefill indexes the uncached suffix, not the full prompt.
         relative_section = (
             section_start - cached_prefix_len,
             section_end - cached_prefix_len,
         )
+        # Nearby images can expand into overlapping or touching cache-aligned
+        # envelopes. Coalesce them into one protected prefill section.
         if sections and relative_section[0] <= sections[-1][1]:
             sections[-1] = (sections[-1][0], relative_section[1])
         else:
