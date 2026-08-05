@@ -27,7 +27,7 @@ def is_unified_model(model: Any) -> bool:
 
 
 def uses_bidirectional_visual_attention(model: Any) -> bool:
-    """Return true for Gemma4-family language models with visual bidir masks."""
+    """Return true for Gemma 4 language models with visual bidirectional masks."""
     language_model = _language_model(model)
     if not is_gemma4_model_type(getattr(language_model, "model_type", None)):
         return False
@@ -49,43 +49,58 @@ def config_uses_bidirectional_visual_attention(config: dict | Any) -> bool:
     return is_gemma4_model_type(model_type) and attention_mode == "vision"
 
 
-def visual_prefill_prefix_len(
+def image_prefill_spans(
     model: Any,
     prompt_kwargs: dict,
     image_spans: list[Any],
     cached_prefix_len: int,
-) -> int | None:
-    """Return the visual prefix Gemma4 bidir masks need in one model call.
+) -> list[tuple[int, int]] | None:
+    """Return request-relative image runs that prefill must not split.
 
-    Gemma4 derives its bidirectional visual attention overlay from token-type ids
-    visible to the current language-model call. Keep the first prefill anchored
-    at the current suffix start through the last visual token; trailing text can
-    go back to ordinary chunked prefill.
+    Gemma 4 local-attention layers are bidirectional within each image block, so
+    every contiguous image run must be visible in one model call. Token type ids
+    are authoritative when present; prepared image spans are the fallback.
     """
-    if not uses_bidirectional_visual_attention(model):
-        return None
-
     token_types = prompt_kwargs.get("mm_token_type_ids")
     if token_types is None:
         token_types = prompt_kwargs.get("token_type_ids")
-    if not isinstance(token_types, mx.array):
-        # Token types are authoritative when present. Image spans are a fallback
-        # for processor/model combinations that omit them but still carry images.
-        last_visual_end = max((span.end for span in image_spans), default=0)
-        relative_visual_end = last_visual_end - cached_prefix_len
-        return relative_visual_end if relative_visual_end > 0 else None
 
-    values = token_types.reshape(-1).tolist()
-    last_visual_idx = -1
-    for idx, value in enumerate(values):
-        if value in (1, 2):
-            last_visual_idx = idx
+    if isinstance(token_types, mx.array):
+        values = token_types.reshape(-1).tolist()
+        if is_gemma4_model_type(_model_type(model)) and 2 in values:
+            raise ValueError("Gemma 4 video input is not supported by the MLX backend")
+    else:
+        values = None
 
-    return None if last_visual_idx < 0 else last_visual_idx + 1
+    if not uses_bidirectional_visual_attention(model):
+        return None
+
+    if values is not None:
+        spans = []
+        image_start = None
+        for index, value in enumerate(values):
+            if value == 1 and image_start is None:
+                image_start = index
+            elif value != 1 and image_start is not None:
+                spans.append((image_start, index))
+                image_start = None
+        if image_start is not None:
+            spans.append((image_start, len(values)))
+        return spans
+
+    spans = []
+    for span in image_spans:
+        if span.start < cached_prefix_len < span.end:
+            raise ValueError("A restored Gemma 4 prompt cache splits an image block")
+        relative_start = span.start - cached_prefix_len
+        relative_end = span.end - cached_prefix_len
+        if relative_end > 0:
+            spans.append((max(relative_start, 0), relative_end))
+    return sorted(spans)
 
 
 def prepare_cached_suffix_prompt_kwargs(prompt_kwargs: dict, key_len: int) -> dict:
-    """Pad visual token-type ids so Gemma4 masks can line up with cached keys."""
+    """Pad visual token-type ids so Gemma 4 masks can line up with cached keys."""
     prepared = prompt_kwargs
     for name in ("mm_token_type_ids", "token_type_ids"):
         token_type_ids = prepared.get(name)
@@ -98,21 +113,26 @@ def prepare_cached_suffix_prompt_kwargs(prompt_kwargs: dict, key_len: int) -> di
 
 
 def patch_loaded_model(model: Any) -> None:
-    """Patch loaded Gemma4 bidir models for cached visual suffix masks."""
+    """Match Transformers Gemma 4 visual masks for cached, chunked prefill."""
     language_model = _language_model(model)
     if not uses_bidirectional_visual_attention(language_model):
         return
     text_model = getattr(language_model, "model", language_model)
-    if getattr(text_model, "_mlx_engine_suffix_visual_mask_patch", False):
+    if getattr(text_model, "_mlx_engine_gemma4_visual_mask_patch", False):
         return
     if not hasattr(text_model, "_apply_blockwise_bidirectional_overlay"):
         return
 
-    # Upstream builds Gemma4's visual overlay from token types over the key
-    # length. With a restored prefix, only the suffix is queried; with sliding
-    # layers, only a recent key window is visible. Compare current query rows
-    # against the key rows covered by this layer's mask.
-    def _apply_blockwise_bidirectional_overlay(self, base_mask, mm_token_type_ids):
+    # mlx-vlm requires square masks and applies the visual overlay to full
+    # attention. Transformers keeps full attention causal and applies the
+    # overlay only to sliding attention. This version also aligns cached suffix
+    # query rows with the keys visible to the current layer.
+    def _apply_blockwise_bidirectional_overlay(
+        self,
+        base_mask,
+        mm_token_type_ids,
+        window_size=None,
+    ):
         if mm_token_type_ids is None:
             return base_mask
         key_len = base_mask.shape[-1]
@@ -124,16 +144,61 @@ def patch_loaded_model(model: Any) -> None:
         block_sequence_ids = self._block_sequence_ids_for_mask(mm_token_type_ids)
         query_len = base_mask.shape[-2]
         query_block_sequence_ids = block_sequence_ids[:, -query_len:]
-        q_blocks = mx.expand_dims(query_block_sequence_ids, -1)
-        k_blocks = mx.expand_dims(block_sequence_ids, -2)
-        same_block = (q_blocks != -1) & (q_blocks == k_blocks)
+        query_blocks = mx.expand_dims(query_block_sequence_ids, -1)
+        key_blocks = mx.expand_dims(block_sequence_ids, -2)
+        same_block = (query_blocks != -1) & (query_blocks == key_blocks)
+        if window_size is not None:
+            query_positions = mx.arange(key_len - query_len, key_len)[:, None]
+            key_positions = mx.arange(key_len)[None, :]
+            same_block = same_block & (key_positions > query_positions - window_size)
         return base_mask | mx.expand_dims(same_block, 1)
 
     text_model._apply_blockwise_bidirectional_overlay = MethodType(
         _apply_blockwise_bidirectional_overlay,
         text_model,
     )
-    text_model._mlx_engine_suffix_visual_mask_patch = True
+
+    if hasattr(text_model, "_make_masks"):
+        from mlx_vlm.models.cache import create_causal_mask
+
+        original_make_masks = text_model._make_masks
+
+        def _make_masks(self, h, cache, mm_token_type_ids=None):
+            if mm_token_type_ids is None:
+                return original_make_masks(h, cache, mm_token_type_ids)
+            if int(mx.sum(mm_token_type_ids == 2).item()) > 0:
+                raise ValueError(
+                    "Gemma 4 video input is not supported by the MLX backend"
+                )
+
+            has_image_tokens = int(mx.sum(mm_token_type_ids == 1).item()) > 0
+            if not has_image_tokens or h.shape[1] <= 1:
+                return original_make_masks(h, cache, mm_token_type_ids)
+
+            masks = original_make_masks(h, cache, None)
+            patched_sliding_mask = None
+            patched_masks = []
+            for layer, base_mask in zip(self.layers, masks):
+                if layer.layer_type != "sliding_attention":
+                    patched_masks.append(base_mask)
+                    continue
+                if patched_sliding_mask is None:
+                    if isinstance(base_mask, str) and base_mask == "causal":
+                        base_mask = create_causal_mask(
+                            h.shape[1],
+                            window_size=self.window_size,
+                        )
+                    patched_sliding_mask = self._apply_blockwise_bidirectional_overlay(
+                        base_mask,
+                        mm_token_type_ids,
+                        window_size=self.window_size,
+                    )
+                patched_masks.append(patched_sliding_mask)
+            return patched_masks
+
+        text_model._make_masks = MethodType(_make_masks, text_model)
+
+    text_model._mlx_engine_gemma4_visual_mask_patch = True
 
 
 def _pad_visual_token_type_ids_to_key_len(

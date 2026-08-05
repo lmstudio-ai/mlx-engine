@@ -24,8 +24,8 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     slice_prompt_kwargs,
 )
 from mlx_engine.model_kit.patches.gemma4 import (
+    image_prefill_spans as gemma4_image_prefill_spans,
     prepare_cached_suffix_prompt_kwargs as prepare_gemma4_cached_suffix_prompt_kwargs,
-    visual_prefill_prefix_len as gemma4_visual_prefill_prefix_len,
 )
 from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
@@ -786,7 +786,7 @@ class _PromptPrefill:
         self._all_tokens = list(all_tokens) if all_tokens is not None else []
         self._processed_prefix_len = len(self._all_tokens)
         self._prefix_cache_save_state = prefix_cache_save_state
-        self._visual_prefill_prefix_len = gemma4_visual_prefill_prefix_len(
+        self._gemma4_image_prefill_spans = gemma4_image_prefill_spans(
             model,
             prompt_kwargs,
             prefix_cache_save_state.image_spans,
@@ -854,28 +854,24 @@ class _PromptPrefill:
         if remaining_tokens <= 1:
             return 0
 
-        # Apply the Gemma4 visual-prefix rule before normal cache-boundary
-        # alignment. If a restore lands before a new image, token-type padding
-        # lets the image suffix build its mask against the restored KV prefix.
-        visual_prefix_remaining = self._visual_prefill_prefix_remaining()
-        if visual_prefix_remaining is not None:
-            if visual_prefix_remaining < remaining_tokens:
-                return visual_prefix_remaining
-            return 0
-
+        next_step = 0
         saving_prompt_cache = self._prefix_cache_save_state.callback is not None
         processed_remainder = self._processed_prefix_len % self.prefill_step_size
         if saving_prompt_cache and processed_remainder:
             # After a partial restore, land on the next normal prefill boundary.
             alignment_step = self.prefill_step_size - processed_remainder
             if alignment_step < remaining_tokens:
-                return min(alignment_step, remaining_tokens - 1)
+                next_step = min(alignment_step, remaining_tokens - 1)
 
-        if remaining_tokens > self.prefill_step_size:
-            return min(self.prefill_step_size, remaining_tokens - 1)
+        if next_step == 0 and remaining_tokens > self.prefill_step_size:
+            next_step = min(self.prefill_step_size, remaining_tokens - 1)
 
-        if saving_prompt_cache and any(
-            type(cache).__name__ == "ArraysCache" for cache in self.prompt_cache
+        if (
+            next_step == 0
+            and saving_prompt_cache
+            and any(
+                type(cache).__name__ == "ArraysCache" for cache in self.prompt_cache
+            )
         ):
             # Opaque state caches are restorable only at exact saved boundaries.
             max_reusable_prefix_len = self._processed_prefix_len + remaining_tokens - 1
@@ -883,18 +879,38 @@ class _PromptPrefill:
                 max_reusable_prefix_len // DEFAULT_PREFIX_CHUNK_SIZE
             ) * DEFAULT_PREFIX_CHUNK_SIZE
             if target_prefix_len > self._processed_prefix_len:
-                return target_prefix_len - self._processed_prefix_len
+                next_step = target_prefix_len - self._processed_prefix_len
 
-        return 0
+        return self._step_without_splitting_gemma4_image(
+            next_step,
+            remaining_tokens,
+        )
 
-    def _visual_prefill_prefix_remaining(self) -> int | None:
-        if self._visual_prefill_prefix_len is None:
-            return None
+    def _step_without_splitting_gemma4_image(
+        self,
+        proposed_step: int,
+        remaining_tokens: int,
+    ) -> int:
+        if proposed_step == 0 or self._gemma4_image_prefill_spans is None:
+            return proposed_step
+
         processed_prompt_len = self._processed_prefix_len - len(self._all_tokens)
-        remaining = self._visual_prefill_prefix_len - processed_prompt_len
-        if remaining <= 0:
-            return None
-        return remaining
+        proposed_boundary = processed_prompt_len + proposed_step
+        for image_start, image_end in self._gemma4_image_prefill_spans:
+            if not image_start < proposed_boundary < image_end:
+                continue
+            tokens_before_image = image_start - processed_prompt_len
+            if tokens_before_image > 0:
+                return tokens_before_image
+
+            image_tokens_remaining = image_end - processed_prompt_len
+            if image_tokens_remaining < remaining_tokens:
+                return image_tokens_remaining
+            # The final model call must retain at least one prompt token. If the
+            # image reaches the prompt end, let final prefill process it whole.
+            return 0
+
+        return proposed_step
 
     def _prompt_kwargs_for_next(self, n: int) -> dict:
         # Slice locally instead of relying on model-specific n_to_process hacks.
@@ -1020,7 +1036,7 @@ class _PromptPrefill:
         prompt_kwargs: dict,
         key_len: int,
     ) -> dict:
-        if self._visual_prefill_prefix_len is None:
+        if self._gemma4_image_prefill_spans is None:
             return prompt_kwargs
         return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
 
