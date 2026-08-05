@@ -513,7 +513,7 @@ def test_batch_generator_chunks_gemma4_around_image_boundaries(monkeypatch):
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[PromptImageSpan(start=5, end=8, image_hash="image")],
         )
 
         generator.next()
@@ -559,7 +559,7 @@ def test_batch_generator_moves_boundary_before_gemma4_image(monkeypatch):
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[PromptImageSpan(start=2, end=7, image_hash="image")],
         )
 
         generator.next()
@@ -602,7 +602,10 @@ def test_batch_generator_keeps_multiple_gemma4_images_whole(monkeypatch):
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[
+                PromptImageSpan(start=2, end=5, image_hash="first"),
+                PromptImageSpan(start=10, end=15, image_hash="second"),
+            ],
         )
 
         for _ in range(6):
@@ -656,7 +659,13 @@ def test_batch_generator_long_gemma4_prompt_never_uses_visual_prefix(monkeypatch
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[
+                PromptImageSpan(
+                    start=image_start,
+                    end=image_end,
+                    image_hash="image",
+                )
+            ],
         )
 
         while sum(len(call["input_ids"][0]) for call in model.calls) < prompt_len:
@@ -714,46 +723,8 @@ def test_batch_generator_chunks_gemma4_text_only_normally(monkeypatch):
     assert [len(call["input_ids"][0]) for call in model.calls] == [4, 4, 2]
 
 
-def test_batch_generator_does_not_split_gemma4_visual_prompt_tail(monkeypatch):
-    """If the last visual token is also the last prompt token, use final prefill."""
-    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
-    monkeypatch.setattr(
-        batcher,
-        "make_prompt_cache",
-        lambda _model: [_FakeBatchCache()],
-    )
-    model = _gemma4_unified_model()
-    generator = BatchGenerator(
-        model=model,
-        stop_criteria=lambda _token: False,
-        prefill_step_size=4,
-    )
-    prompt = list(range(8))
-    mm_token_type_ids = mx.array([[0, 0, 0, 0, 0, 1, 1, 1]], dtype=mx.int32)
-
-    try:
-        generator.insert(
-            prompt,
-            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
-            sampler=_argmax_sampler,
-            logits_processors=[],
-            prompt_kwargs={"mm_token_type_ids": mm_token_type_ids},
-            prefix_cache_chunks=[],
-            all_tokens=[],
-            next_prefix_cache_chunk_idx=0,
-            image_spans=[],
-        )
-
-        generator.next()
-        generator.next()
-    finally:
-        generator.close()
-
-    assert [len(call["input_ids"][0]) for call in model.calls] == [4, 4]
-
-
-def test_batch_generator_uses_image_spans_without_gemma4_token_types(monkeypatch):
-    """Image spans provide a fallback boundary if Gemma4 token types are absent."""
+def test_batch_generator_keeps_trailing_gemma4_image_whole(monkeypatch):
+    """The image run remains whole with its required trailing EOI token."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
@@ -767,6 +738,7 @@ def test_batch_generator_uses_image_spans_without_gemma4_token_types(monkeypatch
         prefill_step_size=4,
     )
     prompt = list(range(10))
+    mm_token_type_ids = mx.array([[0, 0, 0, 0, 0, 0, 1, 1, 1, 0]], dtype=mx.int32)
 
     try:
         generator.insert(
@@ -774,11 +746,11 @@ def test_batch_generator_uses_image_spans_without_gemma4_token_types(monkeypatch
             inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
             sampler=_argmax_sampler,
             logits_processors=[],
-            prompt_kwargs={},
+            prompt_kwargs={"mm_token_type_ids": mm_token_type_ids},
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[PromptImageSpan(start=5, end=8, image_hash="image")],
+            image_spans=[PromptImageSpan(start=6, end=9, image_hash="image")],
         )
 
         generator.next()
@@ -787,7 +759,7 @@ def test_batch_generator_uses_image_spans_without_gemma4_token_types(monkeypatch
     finally:
         generator.close()
 
-    assert [len(call["input_ids"][0]) for call in model.calls] == [4, 4, 2]
+    assert [len(call["input_ids"][0]) for call in model.calls] == [4, 2, 4]
 
 
 def test_batch_generator_pads_gemma4_token_types_after_restore(monkeypatch):
@@ -817,7 +789,7 @@ def test_batch_generator_pads_gemma4_token_types_after_restore(monkeypatch):
             cache=[_FakeScalarCache()],
             all_tokens=[100, 101, 102, 103, 104],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[PromptImageSpan(start=7, end=9, image_hash="image")],
         )
 
         generator.next()
@@ -854,7 +826,7 @@ def test_batch_generator_restores_immediately_before_gemma4_image(monkeypatch):
             cache=[_FakeScalarCache()],
             all_tokens=[100, 101, 102, 103, 104],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[PromptImageSpan(start=5, end=8, image_hash="image")],
         )
 
         generator.next()
@@ -889,7 +861,7 @@ def test_batch_generator_pads_gemma4_token_types_for_final_prefill(monkeypatch):
             cache=[_FakeScalarCache()],
             all_tokens=[100, 101, 102, 103, 104],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[PromptImageSpan(start=6, end=8, image_hash="image")],
         )
 
         generator.next()
@@ -930,7 +902,7 @@ def test_batch_generator_chunks_bidir_gemma4_around_images(monkeypatch):
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[PromptImageSpan(start=5, end=8, image_hash="image")],
         )
 
         generator.next()
@@ -972,7 +944,7 @@ def test_batch_generator_chunks_non_bidir_gemma4_normally(monkeypatch):
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[],
+            image_spans=[PromptImageSpan(start=5, end=8, image_hash="image")],
         )
 
         generator.next()

@@ -4,6 +4,7 @@ import mlx.core as mx
 import pytest
 from mlx_vlm.models.cache import create_causal_mask
 
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
 from mlx_engine.model_kit.patches.gemma4 import (
     config_uses_bidirectional_visual_attention,
     image_prefill_spans,
@@ -30,14 +31,18 @@ class _Gemma4TextModel:
         group_ids = mx.cumsum(starts.astype(mx.int32), axis=1) - 1
         return mx.where(is_vision, group_ids, mx.zeros_like(group_ids) - 1)
 
-    def _apply_blockwise_bidirectional_overlay(self, base_mask, mm_token_type_ids):
-        raise AssertionError("unpatched")
-
     def _make_masks(self, h, cache, mm_token_type_ids=None):
-        del cache, mm_token_type_ids
+        del mm_token_type_ids
         return [
-            create_causal_mask(h.shape[1]),
-            create_causal_mask(h.shape[1], window_size=self.window_size),
+            create_causal_mask(
+                h.shape[1],
+                offset=getattr(cache[0], "offset", 0),
+            ),
+            create_causal_mask(
+                h.shape[1],
+                offset=getattr(cache[1], "offset", 0),
+                window_size=self.window_size,
+            ),
         ]
 
 
@@ -80,26 +85,19 @@ def test_gemma4_cached_suffix_prompt_kwargs_keeps_text_only_token_types():
 def test_gemma4_suffix_visual_mask_patch_uses_query_rows_only():
     text_model = _Gemma4TextModel()
     patch_loaded_model(_gemma4_model(text_model))
+    cache = SimpleNamespace(offset=5)
+    token_types = mx.array([[0, 0, 0, 0, 0, 0, 0, 1, 1]], dtype=mx.int32)
 
-    base_mask = create_causal_mask(4, offset=5)
-    token_types = mx.array([[0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]], dtype=mx.int32)
-    patched = text_model._apply_blockwise_bidirectional_overlay(
-        base_mask,
+    _, patched = text_model._make_masks(
+        mx.zeros((1, 4, 4), dtype=mx.float32),
+        [cache, cache],
         token_types,
     )
+    causal_mask = create_causal_mask(4, offset=5, window_size=text_model.window_size)
 
     assert patched.shape == (1, 1, 4, 9)
     assert bool(patched[0, 0, 2, 8].item())
-    assert not bool(base_mask[2, 8].item())
-
-    short_token_types = mx.array([[0, 1]], dtype=mx.int32)
-    assert (
-        text_model._apply_blockwise_bidirectional_overlay(
-            base_mask,
-            short_token_types,
-        )
-        is base_mask
-    )
+    assert not bool(causal_mask[2, 8].item())
 
 
 def test_gemma4_mask_patch_matches_transformers_attention_topology():
@@ -124,20 +122,19 @@ def test_gemma4_mask_patch_matches_transformers_attention_topology():
     assert not bool(sliding_mask[0, 0, 1, 4].item())
 
 
-def test_gemma4_image_prefill_spans_follow_token_type_runs():
+def test_gemma4_image_prefill_spans_are_relative_to_cached_prefix():
     spans = image_prefill_spans(
         _gemma4_model(),
-        {
-            "mm_token_type_ids": mx.array(
-                [[0, 1, 1, 0, 1, 0]],
-                dtype=mx.int32,
-            )
-        },
-        [],
-        cached_prefix_len=0,
+        {},
+        [
+            PromptImageSpan(start=2, end=5, image_hash="cached"),
+            PromptImageSpan(start=10, end=13, image_hash="first"),
+            PromptImageSpan(start=20, end=25, image_hash="second"),
+        ],
+        cached_prefix_len=8,
     )
 
-    assert spans == [(1, 3), (4, 5)]
+    assert spans == [(2, 5), (12, 17)]
 
 
 def test_gemma4_image_prefill_rejects_video_tokens():
@@ -148,23 +145,6 @@ def test_gemma4_image_prefill_rejects_video_tokens():
             [],
             cached_prefix_len=0,
         )
-
-
-def test_non_gemma_image_prefill_ignores_video_token_type():
-    model = SimpleNamespace(
-        model_type="other",
-        config=SimpleNamespace(use_bidirectional_attention=None),
-    )
-
-    assert (
-        image_prefill_spans(
-            model,
-            {"mm_token_type_ids": mx.array([[0, 2, 2]], dtype=mx.int32)},
-            [],
-            cached_prefix_len=0,
-        )
-        is None
-    )
 
 
 def test_gemma4_bidirectional_visual_detection_accepts_top_and_text_config():

@@ -881,34 +881,20 @@ class _PromptPrefill:
             if target_prefix_len > self._processed_prefix_len:
                 next_step = target_prefix_len - self._processed_prefix_len
 
-        return self._step_without_splitting_gemma4_image(
-            next_step,
-            remaining_tokens,
-        )
+        return self._step_without_splitting_gemma4_image(next_step)
 
-    def _step_without_splitting_gemma4_image(
-        self,
-        proposed_step: int,
-        remaining_tokens: int,
-    ) -> int:
+    def _step_without_splitting_gemma4_image(self, proposed_step: int) -> int:
         if proposed_step == 0 or self._gemma4_image_prefill_spans is None:
             return proposed_step
 
         processed_prompt_len = self._processed_prefix_len - len(self._all_tokens)
         proposed_boundary = processed_prompt_len + proposed_step
         for image_start, image_end in self._gemma4_image_prefill_spans:
-            if not image_start < proposed_boundary < image_end:
-                continue
-            tokens_before_image = image_start - processed_prompt_len
-            if tokens_before_image > 0:
-                return tokens_before_image
-
-            image_tokens_remaining = image_end - processed_prompt_len
-            if image_tokens_remaining < remaining_tokens:
-                return image_tokens_remaining
-            # The final model call must retain at least one prompt token. If the
-            # image reaches the prompt end, let final prefill process it whole.
-            return 0
+            if image_start < proposed_boundary < image_end:
+                safe_boundary = (
+                    image_start if processed_prompt_len < image_start else image_end
+                )
+                return safe_boundary - processed_prompt_len
 
         return proposed_step
 
