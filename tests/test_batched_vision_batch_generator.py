@@ -125,6 +125,7 @@ class _FakeModel:
                     None if inputs_embeds is None else inputs_embeds.shape
                 ),
                 "n_to_process": kwargs.get("n_to_process"),
+                "logits_to_keep": kwargs.get("logits_to_keep"),
                 "position_ids": (
                     None
                     if kwargs.get("position_ids") is None
@@ -174,6 +175,35 @@ def test_batch_generator_uses_vlm_prompt_cache_factory():
     prompt_cache = batcher.make_prompt_cache(model)
 
     assert type(prompt_cache[0]) is KVCache
+
+
+def test_prefill_and_decode_honor_model_logits_to_keep(monkeypatch):
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _FakeModel()
+    model.supports_logits_to_keep = True
+    prompt_prefill = batcher._PromptPrefill(
+        model=model,
+        uid=1,
+        input_ids=[1, 2, 3],
+        max_tokens=1,
+        top_logprobs=0,
+        sampler=_argmax_sampler,
+        logits_processors=[],
+        inputs_embeds=mx.zeros((1, 3, 2), dtype=mx.float32),
+        prompt_kwargs={},
+        prefix_cache_save_state=_prefix_cache_save_states(1)[0],
+        prefill_step_size=2,
+    )
+
+    assert prompt_prefill.prompt_step() == 2
+    generation_batch, _ = prompt_prefill.generate(lambda _token: False)
+    generation_batch.next()
+
+    assert [call["logits_to_keep"] for call in model.calls] == [1, 1, 1]
 
 
 def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
