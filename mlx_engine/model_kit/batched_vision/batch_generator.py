@@ -863,9 +863,9 @@ class _PromptPrefill:
 
         segment_capacity = max(0, segment_end - self._processed_prefix_len)
         next_chunk_size = min(
-            step_size,
-            segment_capacity,
-            remaining_tokens - 1,
+            step_size,  # Normal maximum chunk size.
+            segment_capacity,  # Tokens until the step-size policy changes.
+            remaining_tokens - 1,  # Preserve a final model call for logits.
         )
         next_step = 0
         saving_prompt_cache = self._prefix_cache_save_state.callback is not None
