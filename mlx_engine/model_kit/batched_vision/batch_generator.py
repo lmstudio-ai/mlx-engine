@@ -1046,6 +1046,8 @@ class _PromptPrefill:
         if has_image:
             return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
 
+        # Multimodal text slices still carry an all-zero token-type array. Drop
+        # it so None remains the no-image sentinel for the patched mask builder.
         prepared = dict(prompt_kwargs)
         prepared.pop("mm_token_type_ids", None)
         return prepared
