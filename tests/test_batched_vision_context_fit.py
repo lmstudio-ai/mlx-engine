@@ -508,17 +508,14 @@ def test_dynamic_fit_builds_request_specific_prefill_segments():
         (1_024, 165_632),
         (512, 231_680),
     )
-    assert result.context_length == 191_232
+    assert result.context_length == 231_680
     assert [
         (segment.step_size, segment.end_context_length) for segment in plan.segments
     ] == [
-        (2_048, 98_048),
-        (1_024, 162_560),
-        (512, 191_232),
+        (2_048, 95_488),
+        (1_024, 158_208),
+        (512, 231_680),
     ]
-    compaction_context = result.context_length * 15 // 16
-    tokens_at_step_512 = compaction_context - plan.segments[-2].end_context_length
-    assert tokens_at_step_512 / compaction_context < 0.10
 
 
 def test_dynamic_fit_keeps_short_request_at_largest_step():
@@ -569,31 +566,6 @@ def test_dynamic_fit_respects_custom_maximum_prefill_step():
 
     assert result.prefill_step_sizes == (1_024, 512)
     assert [step for step, _limit in result.step_context_limits] == [1_024, 512]
-
-
-def test_dynamic_fit_tail_policy_uses_custom_predecessor_step():
-    result = context_fit.calculate_dynamic_context_fit(
-        _profile(
-            max_context_length=262_144,
-            full_kv_bytes_per_token=20_480,
-            prompt_input_bytes_per_token=5_632,
-            query_attention_heads=16,
-            rotating_constant_bytes=128 * MIB,
-            rotating_bytes_per_prefill_token=64 * KIB,
-        ),
-        working_set_bytes=10 * GIB,
-        baseline_bytes=5 * GIB,
-        maximum_prefill_step_size=1_000,
-    )
-    plan = result.make_request_prefill_plan(prompt_context_length=result.context_length)
-
-    assert result.prefill_step_sizes == (1_000, 512)
-    assert plan.segments[-1].step_size == 512
-    smallest_step_start = plan.segments[-2].end_context_length
-    assert smallest_step_start * 100 >= (
-        result.context_length * context_fit.SMALLEST_STEP_START_CONTEXT_PERCENT
-        - result.profile.allocation_step * 100
-    )
 
 
 def test_one_token_probe_uses_token_zero_and_reports_fit(monkeypatch):

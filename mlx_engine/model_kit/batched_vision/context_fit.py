@@ -13,8 +13,8 @@ step ``S``, the peak estimate is:
 The fitted maximum is solved once at load. At request admission, the same
 coefficients are solved once for cache-length boundaries and compiled into an
 immutable schedule: use the configured step (normally 2,048) while it fits,
-then 1,024, and use 512 only near the fitted maximum. Prompt callbacks only
-look up those boundaries; they do not rerun the memory formula.
+then 1,024 and 512 only when their lower peak memory is required. Prompt
+callbacks only look up those boundaries; they do not rerun the memory formula.
 
 The fixed 3 GiB reserve covers the largest measured residual between this
 formula and actual prefill peaks. Measurements showed that residual follows
@@ -44,9 +44,6 @@ MIN_FITTED_CONTEXT_TOKENS = 4_096
 # Round the largest 2.41 GiB unexplained experimental peak up to 3 GiB.
 MIN_RUNTIME_RESERVE_BYTES = 3 * GIB
 PREFILL_STEP_CANDIDATES = (2_048, 1_024, 512)
-# Bionic compacts at 15/16. Starting the smallest chunks no earlier than 85%
-# of the reported maximum limits them to about 9.3% of the pre-compaction range.
-SMALLEST_STEP_START_CONTEXT_PERCENT = 85
 
 _FAMILY_GEMMA4 = "gemma4"
 _FAMILY_GPT_OSS = "gpt_oss"
@@ -148,14 +145,22 @@ class ContextFitResult:
                 break
 
         if previous_end < prompt_context_length:
-            # The reported maximum is constrained by the smallest candidate, so
-            # this is only reachable through allocation-boundary rounding.
-            segments.append(
-                PrefillSegment(
+            # The fitted limit rounds to a cache-allocation boundary, while the
+            # request boundary rounds down. Extend the final candidate through
+            # that sub-block difference without creating a duplicate segment.
+            final_step_size = self.prefill_step_sizes[-1]
+            if segments and segments[-1].step_size == final_step_size:
+                segments[-1] = PrefillSegment(
                     end_context_length=prompt_context_length,
-                    step_size=self.prefill_step_sizes[-1],
+                    step_size=final_step_size,
                 )
-            )
+            else:
+                segments.append(
+                    PrefillSegment(
+                        end_context_length=prompt_context_length,
+                        step_size=final_step_size,
+                    )
+                )
 
         return PrefillPlan(
             prompt_context_length=prompt_context_length,
@@ -412,32 +417,6 @@ def _request_cache_limit_for_step(
     return tokens_that_fit // profile.allocation_step * profile.allocation_step
 
 
-def _tail_limited_context(
-    profile: CacheFitProfile,
-    *,
-    step_size: int,
-    safe_ceiling_bytes: int,
-    baseline_bytes: int,
-) -> int:
-    """Cap context so ``step_size`` stays safe through the fast-step region."""
-    fixed_memory_bytes = (
-        baseline_bytes
-        + profile.fixed_ssm_bytes
-        + profile.rotating_peak_bytes_for_step(step_size)
-    )
-    available_bytes = max(0, safe_ceiling_bytes - fixed_memory_bytes)
-    cached_bytes_per_token = (
-        profile.full_kv_bytes_per_token
-        + _attention_scores_bytes_per_token(profile, step_size)
-    )
-    denominator = (
-        profile.prompt_input_bytes_per_token * 100
-        + cached_bytes_per_token * SMALLEST_STEP_START_CONTEXT_PERCENT
-    )
-    tokens_that_fit = available_bytes * 100 // denominator
-    return tokens_that_fit // profile.allocation_step * profile.allocation_step
-
-
 def calculate_dynamic_context_fit(
     profile: CacheFitProfile,
     *,
@@ -463,19 +442,9 @@ def calculate_dynamic_context_fit(
         for step_size in prefill_step_sizes
     )
 
+    # The smallest candidate defines the maximum memory-safe context. Request
+    # plans still use every larger candidate up to its exact safe boundary.
     context_length = step_context_limits[-1][1]
-    if len(prefill_step_sizes) >= 2 and prefill_step_sizes[-1] == 512:
-        # Keep the slowest candidate in the final 15% regardless of the
-        # caller's configured maximum (for example, 1,536 or 1,024).
-        context_length = min(
-            context_length,
-            _tail_limited_context(
-                profile,
-                step_size=prefill_step_sizes[-2],
-                safe_ceiling_bytes=safe_ceiling_bytes,
-                baseline_bytes=baseline_bytes,
-            ),
-        )
     if context_length < MIN_FITTED_CONTEXT_TOKENS:
         logger.warning(
             "Model context auto-fit calculated %s tokens; using the %s token minimum",
