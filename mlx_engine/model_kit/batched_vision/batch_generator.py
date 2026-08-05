@@ -1035,8 +1035,9 @@ class _PromptPrefill:
         if self._gemma4_image_prefill_sections is None:
             return prompt_kwargs
 
-        # Prepared image spans exactly match type-1 runs. Keep token types only
-        # for image queries so the mask patch need not scan an MLX array.
+        # Prepared image spans exactly match contiguous image soft-token runs
+        # (`mm_token_type_ids == 1`). Keep token types only for image queries so
+        # the mask patch need not scan an MLX array.
         query_start = self._processed_prefix_len
         has_image = any(
             span.start < key_len and query_start < span.end
