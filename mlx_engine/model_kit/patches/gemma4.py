@@ -5,7 +5,10 @@ from typing import Any
 
 import mlx.core as mx
 
-from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
+from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
+    DEFAULT_PREFIX_CHUNK_SIZE,
+    PromptImageSpan,
+)
 
 
 def is_unified_model_type(model_type: str | None) -> bool:
@@ -42,17 +45,21 @@ def _contains_token_type(token_types: mx.array | None, value: int) -> bool:
     return token_types is not None and bool(mx.any(token_types == value).item())
 
 
-def image_prefill_spans(
+def image_prefill_sections(
     model: Any,
     prompt_kwargs: dict,
     image_spans: list[PromptImageSpan],
     cached_prefix_len: int,
 ) -> list[tuple[int, int]] | None:
-    """Return suffix-relative image spans that prefill must not split.
+    """Return suffix-relative cache-aligned sections prefill must not split.
 
     Prepared image spans and Gemma 4 token types come from the same expanded
     image-token runs. Cache restore rejects positions inside those spans before
     constructing the suffix, so every remaining span starts at or after it.
+
+    Sections include the surrounding partial 256-token cache chunks. This keeps
+    model-call endpoints on the prompt-cache grid: opaque SSM state is reusable
+    only when its cache-chunk boundary is also an exact prefill endpoint.
     """
     if not uses_bidirectional_visual_attention(model):
         return None
@@ -61,11 +68,30 @@ def image_prefill_spans(
     if _contains_token_type(token_types, 2):
         raise ValueError("Gemma 4 video input is not supported by the MLX backend")
 
-    return [
-        (span.start - cached_prefix_len, span.end - cached_prefix_len)
-        for span in image_spans
-        if span.start >= cached_prefix_len
-    ]
+    sections: list[tuple[int, int]] = []
+    for span in image_spans:
+        if span.start < cached_prefix_len:
+            continue
+
+        section_start = max(
+            cached_prefix_len,
+            (span.start // DEFAULT_PREFIX_CHUNK_SIZE) * DEFAULT_PREFIX_CHUNK_SIZE,
+        )
+        section_end = (
+            (span.end + DEFAULT_PREFIX_CHUNK_SIZE - 1)
+            // DEFAULT_PREFIX_CHUNK_SIZE
+            * DEFAULT_PREFIX_CHUNK_SIZE
+        )
+        relative_section = (
+            section_start - cached_prefix_len,
+            section_end - cached_prefix_len,
+        )
+        if sections and relative_section[0] <= sections[-1][1]:
+            sections[-1] = (sections[-1][0], relative_section[1])
+        else:
+            sections.append(relative_section)
+
+    return sections
 
 
 def prepare_cached_suffix_prompt_kwargs(prompt_kwargs: dict, key_len: int) -> dict:

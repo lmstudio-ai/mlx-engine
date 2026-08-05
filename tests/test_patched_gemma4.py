@@ -7,7 +7,7 @@ from mlx_vlm.models.cache import create_causal_mask
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
 from mlx_engine.model_kit.patches.gemma4 import (
     config_uses_bidirectional_visual_attention,
-    image_prefill_spans,
+    image_prefill_sections,
     patch_loaded_model,
     prepare_cached_suffix_prompt_kwargs,
     uses_bidirectional_visual_attention,
@@ -122,24 +122,38 @@ def test_gemma4_mask_patch_matches_transformers_attention_topology():
     assert not bool(sliding_mask[0, 0, 1, 4].item())
 
 
-def test_gemma4_image_prefill_spans_are_relative_to_cached_prefix():
-    spans = image_prefill_spans(
+def test_gemma4_image_prefill_sections_are_cache_aligned_and_suffix_relative():
+    sections = image_prefill_sections(
         _gemma4_model(),
         {},
         [
-            PromptImageSpan(start=2, end=5, image_hash="cached"),
-            PromptImageSpan(start=10, end=13, image_hash="first"),
-            PromptImageSpan(start=20, end=25, image_hash="second"),
+            PromptImageSpan(start=300, end=400, image_hash="cached"),
+            PromptImageSpan(start=600, end=700, image_hash="first"),
+            PromptImageSpan(start=1_100, end=1_200, image_hash="second"),
         ],
-        cached_prefix_len=8,
+        cached_prefix_len=512,
     )
 
-    assert spans == [(2, 5), (12, 17)]
+    assert sections == [(0, 256), (512, 768)]
+
+
+def test_gemma4_image_prefill_sections_merge_shared_cache_chunks():
+    sections = image_prefill_sections(
+        _gemma4_model(),
+        {},
+        [
+            PromptImageSpan(start=300, end=400, image_hash="first"),
+            PromptImageSpan(start=500, end=600, image_hash="second"),
+        ],
+        cached_prefix_len=0,
+    )
+
+    assert sections == [(256, 768)]
 
 
 def test_gemma4_image_prefill_rejects_video_tokens():
     with pytest.raises(ValueError, match="video input is not supported"):
-        image_prefill_spans(
+        image_prefill_sections(
             _gemma4_model(),
             {"mm_token_type_ids": mx.array([[0, 2, 2]], dtype=mx.int32)},
             [],
