@@ -1,27 +1,25 @@
-"""Fit a model's context length to the available unified memory.
+"""Fit context and precompute memory-aware prompt-prefill schedules.
 
-A model's native context limit does not account for its loaded weights or the
-memory needed to read a long prompt. Guessing by allocating progressively larger
-prompts is unsafe because a Metal out-of-memory error can terminate the process.
-Instead, a one-token probe reveals the loaded model's real cache shapes and
-dtypes, then uses the formula below. The score term is validated for unfused
-Gemma 4 and Qwen 3.5 attention and fused 64-dimensional GPT-OSS attention. Other
-measurable cache layouts use the conservative unfused fit as a best effort.
+A one-token probe measures the loaded model's real cache shapes and dtypes. For
+a prepared prompt of ``P`` tokens, a post-chunk cache length ``K``, and prefill
+step ``S``, the peak estimate is:
 
-    fixed = loaded baseline + rotating cache + recurrent state
-    bytes/token = full KV + retained prompt inputs + attention scores
-    context = (recommended working set - reserve - fixed) / bytes/token
+    baseline + fixed SSM + rotating_constant + rotating_per_step * S
+    + prompt_input_bytes_per_token * P
+    + full_kv_bytes_per_token * K
+    + attention_bytes_per_context_per_step * S * K
+    + runtime reserve
 
-Long-prefill experiments on dense and MoE Qwen and Gemma models showed that
-unfused attention materialized scores matching
-`query heads * prefill chunk * activation dtype size`. GPT-OSS uses MLX's fused
-attention for its 64-dimensional heads, so it has no context-linear score term.
-The largest measured peak not explained by the formula was 2.41 GiB,
-motivating the 3 GiB reserve floor.
+The fitted maximum is solved once at load. At request admission, the same
+coefficients are solved once for cache-length boundaries and compiled into an
+immutable schedule: use the configured step (normally 2,048) while it fits,
+then 1,024, and use 512 only near the fitted maximum. Prompt callbacks only
+look up those boundaries; they do not rerun the memory formula.
 
-For example, Qwen 3.6 35B-A3B on a 27 GiB working set has about 19.06 GiB of
-fixed memory and uses 88 KiB per token. After the 3 GiB reserve, the formula
-fits 58,846 tokens, which rounds to a 58,880-token cache boundary.
+The fixed 3 GiB reserve covers the largest measured residual between this
+formula and actual prefill peaks. Measurements showed that residual follows
+model execution rather than installed RAM, so the reserve does not grow on
+larger-memory Macs and is not reduced to force a larger minimum context.
 """
 
 import gc
@@ -32,6 +30,11 @@ from typing import Any
 import mlx.core as mx
 from mlx_vlm.models.cache import make_prompt_cache
 
+from mlx_engine.model_kit.batched_vision.prefill_plan import (
+    PrefillPlan,
+    PrefillSegment,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +43,10 @@ GIB = 1024**3
 MIN_FITTED_CONTEXT_TOKENS = 4_096
 # Round the largest 2.41 GiB unexplained experimental peak up to 3 GiB.
 MIN_RUNTIME_RESERVE_BYTES = 3 * GIB
+PREFILL_STEP_CANDIDATES = (2_048, 1_024, 512)
+# Bionic compacts at 15/16. Starting the smallest chunks no earlier than 85%
+# of the reported maximum limits them to about 9.3% of the pre-compaction range.
+SMALLEST_STEP_START_CONTEXT_PERCENT = 85
 
 _FAMILY_GEMMA4 = "gemma4"
 _FAMILY_GPT_OSS = "gpt_oss"
@@ -63,9 +70,26 @@ class CacheFitProfile:
     query_attention_heads: int
     activation_dtype_bytes: int
     prefill_step_size: int
-    rotating_peak_bytes: int
+    rotating_constant_bytes: int
+    rotating_bytes_per_prefill_token: int
     fixed_ssm_bytes: int
     max_context_length: int
+
+    @property
+    def rotating_peak_bytes(self) -> int:
+        return self.rotating_peak_bytes_for_step(self.prefill_step_size)
+
+    def rotating_peak_bytes_for_step(self, prefill_step_size: int) -> int:
+        return (
+            self.rotating_constant_bytes
+            + self.rotating_bytes_per_prefill_token * prefill_step_size
+        )
+
+    @property
+    def attention_bytes_per_context_per_prefill_token(self) -> int:
+        if not self.materializes_attention_scores:
+            return 0
+        return self.query_attention_heads * self.activation_dtype_bytes
 
 
 @dataclass(frozen=True)
@@ -73,6 +97,70 @@ class ContextFitResult:
     context_length: int
     runtime_reserve_bytes: int
     safe_ceiling_bytes: int
+    profile: CacheFitProfile | None = None
+    baseline_bytes: int = 0
+    working_set_bytes: int = 0
+    prefill_step_sizes: tuple[int, ...] = ()
+    step_context_limits: tuple[tuple[int, int], ...] = ()
+
+    def make_request_prefill_plan(
+        self,
+        *,
+        prompt_context_length: int,
+    ) -> PrefillPlan | None:
+        """Build one segmented schedule from the prepared prompt length.
+
+        The full prompt inputs can be resident before its KV cache is complete,
+        so request planning keeps prompt length and post-chunk cache length as
+        separate terms. No memory calculation is needed while chunks execute.
+        """
+        if self.profile is None or not self.prefill_step_sizes:
+            return None
+        if prompt_context_length <= 0:
+            raise ValueError("Prompt context length must be positive")
+        if prompt_context_length > self.context_length:
+            raise ValueError(
+                f"Prepared prompt has {prompt_context_length:,} tokens, exceeding "
+                f"the fitted {self.context_length:,}-token context"
+            )
+
+        segments: list[PrefillSegment] = []
+        previous_end = 0
+        for step_size in self.prefill_step_sizes:
+            context_limit = _request_cache_limit_for_step(
+                self.profile,
+                step_size=step_size,
+                prompt_context_length=prompt_context_length,
+                safe_ceiling_bytes=self.safe_ceiling_bytes,
+                baseline_bytes=self.baseline_bytes,
+            )
+            segment_end = min(prompt_context_length, context_limit)
+            segment_end = max(previous_end, segment_end)
+            if segment_end > previous_end:
+                segments.append(
+                    PrefillSegment(
+                        end_context_length=segment_end,
+                        step_size=step_size,
+                    )
+                )
+                previous_end = segment_end
+            if previous_end >= prompt_context_length:
+                break
+
+        if previous_end < prompt_context_length:
+            # The reported maximum is constrained by the smallest candidate, so
+            # this is only reachable through allocation-boundary rounding.
+            segments.append(
+                PrefillSegment(
+                    end_context_length=prompt_context_length,
+                    step_size=self.prefill_step_sizes[-1],
+                )
+            )
+
+        return PrefillPlan(
+            prompt_context_length=prompt_context_length,
+            segments=tuple(segments),
+        )
 
 
 def fit_batched_vlm_context(
@@ -80,13 +168,34 @@ def fit_batched_vlm_context(
     model: Any,
     prefill_step_size: int,
 ) -> int | None:
-    """Return a fitted token limit, or `None` to leave the limit unchanged.
+    """Return the fitted token limit, preserving the existing integer API."""
+    result = _fit_batched_vlm_context(
+        model=model,
+        prefill_step_size=prefill_step_size,
+        dynamic_prefill=False,
+    )
+    return None if result is None else result.context_length
 
-    A one-token probe measures the model's cache, retained prompt inputs, and
-    activation layout. Gemma 4 and Qwen 3.5 use the validated unfused fit;
-    64-dimensional GPT-OSS uses its validated fused fit. Other families use the
-    conservative unfused fit when their memory layout can be measured.
-    """
+
+def fit_batched_vlm_context_result(
+    *,
+    model: Any,
+    prefill_step_size: int,
+) -> ContextFitResult | None:
+    """Probe a model and return its context plus request-planning coefficients."""
+    return _fit_batched_vlm_context(
+        model=model,
+        prefill_step_size=prefill_step_size,
+        dynamic_prefill=True,
+    )
+
+
+def _fit_batched_vlm_context(
+    *,
+    model: Any,
+    prefill_step_size: int,
+    dynamic_prefill: bool,
+) -> ContextFitResult | None:
     max_context_length = None
     validated_family = False
     try:
@@ -142,9 +251,6 @@ def fit_batched_vlm_context(
                 query_head_dim = _config_value(source, "head_dim")
                 if query_head_dim is not None:
                     break
-            # MLX 0.32 uses fused long-prefill SDPA for GPT-OSS's official
-            # 64-dimensional attention layout. Unexpected variants retain the
-            # conservative score-matrix estimate.
             materializes_attention_scores = query_head_dim != 64
             if not materializes_attention_scores:
                 validated_family = True
@@ -181,7 +287,6 @@ def fit_batched_vlm_context(
                 materializes_attention_scores=materializes_attention_scores,
             )
         finally:
-            # Release the temporary probe arrays before measuring the loaded model.
             mx.synchronize()
             gc.collect()
             mx.clear_cache()
@@ -190,16 +295,21 @@ def fit_batched_vlm_context(
         if profile is None:
             return None
 
-        # Active arrays and allocator cache both occupy unified memory. Together
-        # they are the starting cost before the prompt grows.
         baseline_bytes = mx.get_active_memory() + mx.get_cache_memory()
-        # Apple's recommended working set is the process budget, not total RAM.
         working_set_bytes = mx.device_info()["max_recommended_working_set_size"]
-        result = calculate_context_fit(
-            profile,
-            working_set_bytes=working_set_bytes,
-            baseline_bytes=baseline_bytes,
-        )
+        if dynamic_prefill:
+            result = calculate_dynamic_context_fit(
+                profile,
+                working_set_bytes=working_set_bytes,
+                baseline_bytes=baseline_bytes,
+                maximum_prefill_step_size=prefill_step_size,
+            )
+        else:
+            result = calculate_context_fit(
+                profile,
+                working_set_bytes=working_set_bytes,
+                baseline_bytes=baseline_bytes,
+            )
         if not validated_family and result.context_length <= MIN_FITTED_CONTEXT_TOKENS:
             logger.info(
                 "Best-effort context fit for model family %s was only %s tokens; "
@@ -209,51 +319,181 @@ def fit_batched_vlm_context(
             )
             return None
 
-        attention_scores_bytes_per_token = _attention_scores_bytes_per_token(profile)
-        peak_bytes_per_token = (
-            profile.full_kv_bytes_per_token
-            + profile.prompt_input_bytes_per_token
-            + attention_scores_bytes_per_token
-        )
-        estimated_memory_bytes = (
-            baseline_bytes
-            + profile.rotating_peak_bytes
-            + profile.fixed_ssm_bytes
-            + peak_bytes_per_token * result.context_length
-        )
         logger.info(
             "Model context auto-fit: family=%s max=%s fitted=%s "
-            "working_set=%.2fGiB reserve=%.2fGiB safe_ceiling=%.2fGiB "
-            "baseline=%.2fGiB full_kv=%dB/token prompt_inputs=%dB/token "
-            "attention=%dB/token rotating_peak=%.2fGiB fixed_ssm=%.2fGiB "
-            "estimated_peak=%.2fGiB",
+            "working_set=%.2fGiB reserve=%.2fGiB baseline=%.2fGiB "
+            "full_kv=%dB/token prompt_inputs=%dB/token "
+            "attention_coefficient=%dB/context/step rotating_constant=%.2fGiB "
+            "rotating_per_step=%dB steps=%s",
             profile.family,
             f"{max_context_length:,}",
             f"{result.context_length:,}",
             working_set_bytes / GIB,
             result.runtime_reserve_bytes / GIB,
-            result.safe_ceiling_bytes / GIB,
             baseline_bytes / GIB,
             profile.full_kv_bytes_per_token,
             profile.prompt_input_bytes_per_token,
-            attention_scores_bytes_per_token,
-            profile.rotating_peak_bytes / GIB,
-            profile.fixed_ssm_bytes / GIB,
-            estimated_memory_bytes / GIB,
+            profile.attention_bytes_per_context_per_prefill_token,
+            profile.rotating_constant_bytes / GIB,
+            profile.rotating_bytes_per_prefill_token,
+            ",".join(f"{step}:{limit:,}" for step, limit in result.step_context_limits),
         )
-        return result.context_length
+        return result
     except Exception:
         logger.exception("Model context auto-fit failed; leaving context unchanged")
         return None
 
 
-def _attention_scores_bytes_per_token(profile: CacheFitProfile) -> int:
-    if not profile.materializes_attention_scores:
-        return 0
-    return (
-        profile.query_attention_heads
-        * profile.prefill_step_size
-        * profile.activation_dtype_bytes
+def _candidate_prefill_steps(maximum_prefill_step_size: int) -> tuple[int, ...]:
+    if maximum_prefill_step_size <= 0:
+        raise ValueError("Prefill step size must be positive")
+    candidates = [maximum_prefill_step_size]
+    candidates.extend(
+        step for step in PREFILL_STEP_CANDIDATES if step < maximum_prefill_step_size
+    )
+    return tuple(dict.fromkeys(candidates))
+
+
+def _attention_scores_bytes_per_token(
+    profile: CacheFitProfile,
+    prefill_step_size: int | None = None,
+) -> int:
+    if prefill_step_size is None:
+        prefill_step_size = profile.prefill_step_size
+    return profile.attention_bytes_per_context_per_prefill_token * prefill_step_size
+
+
+def _context_fit_for_step(
+    profile: CacheFitProfile,
+    *,
+    step_size: int,
+    safe_ceiling_bytes: int,
+    baseline_bytes: int,
+) -> int:
+    fixed_memory_bytes = (
+        baseline_bytes
+        + profile.fixed_ssm_bytes
+        + profile.rotating_peak_bytes_for_step(step_size)
+    )
+    peak_bytes_per_token = (
+        profile.full_kv_bytes_per_token
+        + profile.prompt_input_bytes_per_token
+        + _attention_scores_bytes_per_token(profile, step_size)
+    )
+    available_prompt_bytes = max(0, safe_ceiling_bytes - fixed_memory_bytes)
+    tokens_that_fit = available_prompt_bytes // peak_bytes_per_token
+    allocation_step = profile.allocation_step
+    context_length = (
+        (tokens_that_fit + allocation_step - 1) // allocation_step * allocation_step
+    )
+    return min(profile.max_context_length, context_length)
+
+
+def _request_cache_limit_for_step(
+    profile: CacheFitProfile,
+    *,
+    step_size: int,
+    prompt_context_length: int,
+    safe_ceiling_bytes: int,
+    baseline_bytes: int,
+) -> int:
+    fixed_and_prompt_bytes = (
+        baseline_bytes
+        + profile.fixed_ssm_bytes
+        + profile.rotating_peak_bytes_for_step(step_size)
+        + profile.prompt_input_bytes_per_token * prompt_context_length
+    )
+    bytes_per_cached_token = (
+        profile.full_kv_bytes_per_token
+        + _attention_scores_bytes_per_token(profile, step_size)
+    )
+    available_cache_bytes = max(0, safe_ceiling_bytes - fixed_and_prompt_bytes)
+    tokens_that_fit = available_cache_bytes // bytes_per_cached_token
+    return tokens_that_fit // profile.allocation_step * profile.allocation_step
+
+
+def _tail_limited_context(
+    profile: CacheFitProfile,
+    *,
+    step_size: int,
+    safe_ceiling_bytes: int,
+    baseline_bytes: int,
+) -> int:
+    """Cap context so ``step_size`` stays safe through the fast-step region."""
+    fixed_memory_bytes = (
+        baseline_bytes
+        + profile.fixed_ssm_bytes
+        + profile.rotating_peak_bytes_for_step(step_size)
+    )
+    available_bytes = max(0, safe_ceiling_bytes - fixed_memory_bytes)
+    cached_bytes_per_token = (
+        profile.full_kv_bytes_per_token
+        + _attention_scores_bytes_per_token(profile, step_size)
+    )
+    denominator = (
+        profile.prompt_input_bytes_per_token * 100
+        + cached_bytes_per_token * SMALLEST_STEP_START_CONTEXT_PERCENT
+    )
+    tokens_that_fit = available_bytes * 100 // denominator
+    return tokens_that_fit // profile.allocation_step * profile.allocation_step
+
+
+def calculate_dynamic_context_fit(
+    profile: CacheFitProfile,
+    *,
+    working_set_bytes: int,
+    baseline_bytes: int,
+    maximum_prefill_step_size: int,
+) -> ContextFitResult:
+    """Fit context using a decreasing per-request prefill schedule."""
+    # The measured overhead is tied to model execution, not installed RAM.
+    runtime_reserve_bytes = MIN_RUNTIME_RESERVE_BYTES
+    safe_ceiling_bytes = working_set_bytes - runtime_reserve_bytes
+    prefill_step_sizes = _candidate_prefill_steps(maximum_prefill_step_size)
+    step_context_limits = tuple(
+        (
+            step_size,
+            _context_fit_for_step(
+                profile,
+                step_size=step_size,
+                safe_ceiling_bytes=safe_ceiling_bytes,
+                baseline_bytes=baseline_bytes,
+            ),
+        )
+        for step_size in prefill_step_sizes
+    )
+
+    context_length = step_context_limits[-1][1]
+    if len(prefill_step_sizes) >= 2 and prefill_step_sizes[-1] == 512:
+        # Keep the slowest candidate in the final 15% regardless of the
+        # caller's configured maximum (for example, 1,536 or 1,024).
+        context_length = min(
+            context_length,
+            _tail_limited_context(
+                profile,
+                step_size=prefill_step_sizes[-2],
+                safe_ceiling_bytes=safe_ceiling_bytes,
+                baseline_bytes=baseline_bytes,
+            ),
+        )
+    if context_length < MIN_FITTED_CONTEXT_TOKENS:
+        logger.warning(
+            "Model context auto-fit calculated %s tokens; using the %s token minimum",
+            f"{context_length:,}",
+            f"{MIN_FITTED_CONTEXT_TOKENS:,}",
+        )
+        context_length = MIN_FITTED_CONTEXT_TOKENS
+    context_length = min(profile.max_context_length, context_length)
+
+    return ContextFitResult(
+        context_length=context_length,
+        runtime_reserve_bytes=runtime_reserve_bytes,
+        safe_ceiling_bytes=safe_ceiling_bytes,
+        profile=profile,
+        baseline_bytes=baseline_bytes,
+        working_set_bytes=working_set_bytes,
+        prefill_step_sizes=prefill_step_sizes,
+        step_context_limits=step_context_limits,
     )
 
 
@@ -263,45 +503,14 @@ def calculate_context_fit(
     working_set_bytes: int,
     baseline_bytes: int,
 ) -> ContextFitResult:
-    """Calculate the context limit from the model's measured memory costs.
-
-    The fit subtracts the runtime reserve and fixed memory from the recommended
-    working set. It divides what remains by the per-token peak for KV, retained
-    prompt inputs, and any materialized attention scores. The result contains the
-    chosen token limit and the reserve and safe ceiling used to calculate it.
-    """
-    # The modeled terms undercounted measured prefill peaks by at most 2.41 GiB.
-    # Leave 3 GiB for that variation, or 5% on very large working sets.
-    runtime_reserve_bytes = max(MIN_RUNTIME_RESERVE_BYTES, working_set_bytes // 20)
+    """Calculate the legacy fixed-step context limit."""
+    runtime_reserve_bytes = MIN_RUNTIME_RESERVE_BYTES
     safe_ceiling_bytes = working_set_bytes - runtime_reserve_bytes
-    # These costs do not grow with the ordinary full-context KV cache.
-    fixed_memory_bytes = (
-        baseline_bytes + profile.rotating_peak_bytes + profile.fixed_ssm_bytes
-    )
-
-    # Unfused long-prefill attention materializes one score value per query head
-    # and prefill token for every context token. Validated fused paths omit this
-    # context-linear allocation; their fixed-size workspace remains in the reserve.
-    attention_scores_bytes_per_token = _attention_scores_bytes_per_token(profile)
-    peak_bytes_per_token = (
-        profile.full_kv_bytes_per_token
-        + profile.prompt_input_bytes_per_token
-        + attention_scores_bytes_per_token
-    )
-
-    # First find how many bytes remain for the prompt after paying the model's
-    # fixed costs. If those costs already exceed the ceiling, zero bytes remain.
-    available_prompt_bytes = max(0, safe_ceiling_bytes - fixed_memory_bytes)
-
-    # Dividing the remaining bytes by one token's peak cost gives the number of
-    # prompt tokens that fit in memory.
-    tokens_that_fit = available_prompt_bytes // peak_bytes_per_token
-
-    # MLX allocates KV in token blocks. Round to the measured block boundary;
-    # the reserve absorbs the less-than-one-block difference.
-    allocation_step = profile.allocation_step
-    context_length = (
-        (tokens_that_fit + allocation_step - 1) // allocation_step * allocation_step
+    context_length = _context_fit_for_step(
+        profile,
+        step_size=profile.prefill_step_size,
+        safe_ceiling_bytes=safe_ceiling_bytes,
+        baseline_bytes=baseline_bytes,
     )
     if context_length < MIN_FITTED_CONTEXT_TOKENS:
         logger.warning(
@@ -310,13 +519,16 @@ def calculate_context_fit(
             f"{MIN_FITTED_CONTEXT_TOKENS:,}",
         )
         context_length = MIN_FITTED_CONTEXT_TOKENS
-    # Available memory never permits extending the model beyond its native limit.
     context_length = min(profile.max_context_length, context_length)
-
     return ContextFitResult(
         context_length=context_length,
         runtime_reserve_bytes=runtime_reserve_bytes,
         safe_ceiling_bytes=safe_ceiling_bytes,
+        profile=profile,
+        baseline_bytes=baseline_bytes,
+        working_set_bytes=working_set_bytes,
+        prefill_step_sizes=(profile.prefill_step_size,),
+        step_context_limits=((profile.prefill_step_size, context_length),),
     )
 
 
@@ -331,7 +543,6 @@ def _probe_cache_fit_profile(
     materializes_attention_scores: bool = True,
 ) -> CacheFitProfile | None:
     prompt_cache = make_prompt_cache(language_model)
-    # One token is enough to allocate every cache in its real shape and dtype.
     input_ids = mx.zeros((1, 1), dtype=mx.int32)
     embedding_kwargs = {
         key: value
@@ -339,12 +550,10 @@ def _probe_cache_fit_profile(
         if value is not None
     }
     inputs_embeds = embedding_kwargs.pop("inputs_embeds")
-    # Gemma 4 keeps per-layer inputs alive for the full prompt too.
     prompt_input_bytes_per_token = inputs_embeds.nbytes
     per_layer_inputs = embedding_kwargs.get("per_layer_inputs")
     if per_layer_inputs is not None:
         prompt_input_bytes_per_token += per_layer_inputs.nbytes
-    # Attention uses the same activation dtype as the token embeddings.
     activation_dtype_bytes = inputs_embeds.itemsize
 
     language_model(
@@ -356,12 +565,10 @@ def _probe_cache_fit_profile(
     mx.eval([cache.state for cache in prompt_cache])
     mx.synchronize()
 
-    # Full KV grows with context. Rotating KV and Qwen SSM state are fixed costs.
     full_kv_bytes_per_token = 0
-    rotating_peak_bytes = 0
+    rotating_constant_bytes = 0
+    rotating_bytes_per_prefill_token = 0
     fixed_ssm_bytes = 0
-    # KV caches grow in token blocks. Every layer must use the same block size so
-    # one rounded context length describes the whole model.
     cache_allocation_steps = set()
 
     for cache in prompt_cache:
@@ -375,8 +582,6 @@ def _probe_cache_fit_profile(
             return None
 
         if cache_type == "KVCache":
-            # nbytes includes both keys and values. Divide by the allocated token
-            # width to get the cost of one token.
             full_kv_bytes_per_token += cache.nbytes // cache.keys.shape[2]
             cache_allocation_steps.add(cache.step)
         elif cache_type == "RotatingKVCache":
@@ -387,16 +592,11 @@ def _probe_cache_fit_profile(
                     cache.keep,
                 )
                 return None
-            # One layer can briefly hold its window plus the new prefill chunk,
-            # with one overlapping token: max_size + prefill_step_size - 1.
-            rotating_peak_bytes += (
-                cache.nbytes
-                // cache.keys.shape[2]
-                * (cache.max_size + prefill_step_size - 1)
-            )
+            rotating_bytes_per_token = cache.nbytes // cache.keys.shape[2]
+            rotating_constant_bytes += rotating_bytes_per_token * (cache.max_size - 1)
+            rotating_bytes_per_prefill_token += rotating_bytes_per_token
             cache_allocation_steps.add(cache.step)
         else:
-            # ArraysCache holds fixed-size convolution or recurrent state.
             if any(state is None for state in cache.cache):
                 logger.error(
                     "ArraysCache probe for %s left state uninitialized; "
@@ -429,7 +629,8 @@ def _probe_cache_fit_profile(
         query_attention_heads=query_attention_heads,
         activation_dtype_bytes=activation_dtype_bytes,
         prefill_step_size=prefill_step_size,
-        rotating_peak_bytes=rotating_peak_bytes,
+        rotating_constant_bytes=rotating_constant_bytes,
+        rotating_bytes_per_prefill_token=rotating_bytes_per_prefill_token,
         fixed_ssm_bytes=fixed_ssm_bytes,
         max_context_length=max_context_length,
     )
