@@ -4,6 +4,7 @@ from types import MethodType
 from typing import Any
 
 import mlx.core as mx
+from mlx_vlm.models.cache import create_causal_mask
 
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     DEFAULT_PREFIX_CHUNK_SIZE,
@@ -122,8 +123,6 @@ def patch_loaded_model(model: Any) -> None:
     text_model = language_model.model
     if getattr(text_model, "_mlx_engine_gemma4_visual_mask_patch", False):
         return
-
-    from mlx_vlm.models.cache import create_causal_mask
 
     original_make_masks = text_model._make_masks
 
