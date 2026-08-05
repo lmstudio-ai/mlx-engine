@@ -788,7 +788,6 @@ class _PromptPrefill:
         self._prefix_cache_save_state = prefix_cache_save_state
         self._gemma4_image_prefill_sections = gemma4_image_prefill_sections(
             model,
-            prompt_kwargs,
             prefix_cache_save_state.image_spans,
             len(self._all_tokens),
         )

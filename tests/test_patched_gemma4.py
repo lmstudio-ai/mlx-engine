@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import mlx.core as mx
-import pytest
 from mlx_vlm.models.cache import create_causal_mask
 
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
@@ -124,7 +123,6 @@ def test_gemma4_mask_patch_matches_transformers_attention_topology():
 def test_gemma4_image_prefill_sections_are_cache_aligned_and_suffix_relative():
     sections = image_prefill_sections(
         _gemma4_model(),
-        {},
         [
             PromptImageSpan(start=300, end=400, image_hash="cached"),
             PromptImageSpan(start=600, end=700, image_hash="first"),
@@ -139,7 +137,6 @@ def test_gemma4_image_prefill_sections_are_cache_aligned_and_suffix_relative():
 def test_gemma4_image_prefill_sections_merge_shared_cache_chunks():
     sections = image_prefill_sections(
         _gemma4_model(),
-        {},
         [
             PromptImageSpan(start=300, end=400, image_hash="first"),
             PromptImageSpan(start=500, end=600, image_hash="second"),
@@ -148,16 +145,6 @@ def test_gemma4_image_prefill_sections_merge_shared_cache_chunks():
     )
 
     assert sections == [(256, 768)]
-
-
-def test_gemma4_image_prefill_rejects_video_tokens():
-    with pytest.raises(ValueError, match="video input is not supported"):
-        image_prefill_sections(
-            _gemma4_model(),
-            {"mm_token_type_ids": mx.array([[0, 2, 2]], dtype=mx.int32)},
-            [],
-            cached_prefix_len=0,
-        )
 
 
 def test_gemma4_bidirectional_visual_detection_accepts_top_and_text_config():

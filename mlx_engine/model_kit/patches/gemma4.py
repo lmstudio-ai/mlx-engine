@@ -41,13 +41,8 @@ def config_uses_bidirectional_visual_attention(config: dict) -> bool:
     )
 
 
-def _contains_video_tokens(token_types: mx.array | None) -> bool:
-    return token_types is not None and bool(mx.any(token_types == 2).item())
-
-
 def image_prefill_sections(
     model: Any,
-    prompt_kwargs: dict,
     image_spans: list[PromptImageSpan],
     cached_prefix_len: int,
 ) -> list[tuple[int, int]] | None:
@@ -63,10 +58,6 @@ def image_prefill_sections(
     """
     if not uses_bidirectional_visual_attention(model):
         return None
-
-    token_types = prompt_kwargs.get("mm_token_type_ids")
-    if _contains_video_tokens(token_types):
-        raise ValueError("Gemma 4 video input is not supported by the MLX backend")
 
     sections: list[tuple[int, int]] = []
     for span in image_spans:
