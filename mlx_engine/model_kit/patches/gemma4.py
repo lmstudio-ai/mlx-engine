@@ -124,6 +124,12 @@ def patch_loaded_model(model: Any) -> None:
     if getattr(text_model, "_mlx_engine_gemma4_visual_mask_patch", False):
         return
 
+    # Transformers 5.14.1 is the source of truth for Gemma 4 mask composition:
+    # https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/gemma4/modeling_gemma4.py#L2112-L2162
+    # mlx-vlm requires square masks and applies the visual overlay to full
+    # attention. Transformers keeps full attention causal and applies the
+    # overlay only to sliding attention. This patch also aligns cached-suffix
+    # query rows with the keys visible to each sliding-attention layer.
     original_make_masks = text_model._make_masks
 
     def _make_masks(self, h, cache, mm_token_type_ids=None):
