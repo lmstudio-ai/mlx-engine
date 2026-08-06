@@ -135,6 +135,12 @@ def _clear_qwen3_5_text_rope_state(model: nn.Module, prompt_kwargs: dict) -> Non
     language_model._rope_deltas = None
 
 
+def _with_logits_to_keep(model: nn.Module, kwargs: dict) -> dict:
+    if getattr(model, "supports_logits_to_keep", False):
+        return {**kwargs, "logits_to_keep": 1}
+    return kwargs
+
+
 def _extend_cache(cache_a, cache_b):
     if not cache_a:
         return cache_b
@@ -446,6 +452,7 @@ class GenerationBatch:
             # external/src/mlx-vlm/mlx_vlm/models/qwen3_5/language.py.
             fwd_kwargs["rope_deltas"] = self._rope_deltas
             _sync_scalar_rope_deltas(self.model, self.prompt_cache, self._rope_deltas)
+        fwd_kwargs = _with_logits_to_keep(self.model, fwd_kwargs)
 
         output = self.model(inputs[:, None], cache=self.prompt_cache, **fwd_kwargs)
         logits = output.logits if hasattr(output, "logits") else output
@@ -809,7 +816,9 @@ class _PromptPrefill:
 
     def prompt_step(self) -> int:
         n = self._next_prompt_step_size()
-        prompt_kwargs = self._prompt_kwargs_for_next(n)
+        prompt_kwargs = _with_logits_to_keep(
+            self.model, self._prompt_kwargs_for_next(n)
+        )
         # Prompt kwargs with explicit MRoPE state belong to an image prompt; otherwise
         # this text-only chunk must not inherit state from the active decode batch.
         _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
@@ -935,7 +944,9 @@ class _PromptPrefill:
 
     def generate(self, stop_criteria) -> tuple[GenerationBatch, list[Response]]:
         # This final prompt pass runs after active batched decode in the same tick.
-        prompt_kwargs = self._prompt_kwargs_for_final()
+        prompt_kwargs = _with_logits_to_keep(
+            self.model, self._prompt_kwargs_for_final()
+        )
         _clear_qwen3_5_text_rope_state(self.model, prompt_kwargs)
         try:
             output = self.model(
