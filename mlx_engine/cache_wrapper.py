@@ -65,6 +65,7 @@ class CacheWrapper:
             quantized_kv_start=quantized_kv_start,
         )
 
+
         self._history = self._make_history()
         self._history_key = "session"
         # Keep token history host-side. Sequential requests can resume on a
@@ -92,6 +93,10 @@ class CacheWrapper:
         for entry in cache:
             if hasattr(entry, "offset"):
                 return entry.offset
+        # Fallback: use the length of tracked tokens if cache offset is unavailable
+        # This handles models where cache layers don't expose offset (e.g., GPT-OSS)
+        if self.tokens is not None:
+            return len(self.tokens)
         return None
 
     def _store_snapshot(
