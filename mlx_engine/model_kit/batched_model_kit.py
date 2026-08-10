@@ -334,10 +334,9 @@ class BatchedModelKit:
             timeout: None | float = None if (len(self._batch_results) > 0) else 0.1
             request = get_next_request(timeout=timeout)
 
-            # We got a request
+            # Handle at most one request before advancing the current batch.
             if request is not None:
                 if isinstance(request, CancelGenerationRequest):
-                    # Handle cancel request
                     found_request_id = False
                     request_id = request.request_id
                     for uid, entry in self._batch_results.items():
@@ -349,45 +348,40 @@ class BatchedModelKit:
                             break
                     if not found_request_id:
                         logger.warning(f"Could not cancel {request_id=} (id not found)")
-                    continue
+                else:
+                    with mx.stream(batch_generator.stream):
+                        cache, cached_prefix, rest = (
+                            _prepare_prompt_cache_for_generation(
+                                self._prompt_cache,
+                                current_model_key,
+                                request.prompt_tokens,
+                            )
+                        )
 
-                with mx.stream(batch_generator.stream):
-                    cache, cached_prefix, rest = _prepare_prompt_cache_for_generation(
-                        self._prompt_cache, current_model_key, request.prompt_tokens
-                    )
+                        # Keep cache allocation on the same MLX stream as generation.
+                        (uid,) = batch_generator.insert(
+                            [rest],
+                            [request.max_tokens],
+                            caches=[cache],
+                            all_tokens=[cached_prefix],
+                            samplers=[request.samplers],
+                            logits_processors=[request.logits_processors],
+                        )
 
-                    # Keep cache allocation on the same MLX stream as generation.
-                    (uid,) = batch_generator.insert(
-                        [rest],
-                        [request.max_tokens],
-                        caches=[cache],
-                        all_tokens=[cached_prefix],
-                        samplers=[request.samplers],
-                        logits_processors=[request.logits_processors],
-                    )
+                    self._batch_results[uid] = {
+                        "cache_key": request.prompt_tokens[:],
+                        "rqueue": request.rqueue,
+                        "detokenizer": self.tokenizer.detokenizer,
+                        "top_logprobs": request.top_logprobs,
+                        "request_id": request.request_id,
+                    }
 
-                # Track this request
-                self._batch_results[uid] = {
-                    "cache_key": request.prompt_tokens[:],
-                    "rqueue": request.rqueue,
-                    "detokenizer": self.tokenizer.detokenizer,
-                    "top_logprobs": request.top_logprobs,
-                    "request_id": request.request_id,
-                }
-
-                # Check for new requests
-                continue
-
-            # No request so serve from the current batch
-            if len(self._batch_results) == 0:
+            if self._shutdown.is_set() or len(self._batch_results) == 0:
                 continue
 
             time_budget = 0.5
             start = time.time()
             while True:
-                if time.time() - start > time_budget:
-                    break
-
                 prompt_responses, generation_responses = batch_generator.next()
                 if not prompt_responses and not generation_responses:
                     break
@@ -448,6 +442,9 @@ class BatchedModelKit:
                             current_model_key, result["cache_key"], r.prompt_cache
                         )
                         del self._batch_results[r.uid]
+
+                if not self._requests.empty() or time.time() - start > time_budget:
+                    break
 
         for entry in self._batch_results.values():
             entry["rqueue"].put(RequestCancelled("Model shutdown requested"))

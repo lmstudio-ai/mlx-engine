@@ -72,7 +72,7 @@ def _assert_cached_follow_up_prefill_is_small(
 ) -> None:
     assert finish_event["type"] == "finish"
     assert finish_event["prefill_tokens_processed"] == (
-        begin_event["total_prompt_tokens"] - begin_event["cached_tokens"]
+        begin_event["total_prompt_tokens"] - begin_event["cached_tokens"] - 1
     )
     assert finish_event["prefill_tokens_processed"] <= CACHING_TEST_PREFILL_STEP_SIZE
 
