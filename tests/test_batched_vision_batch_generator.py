@@ -288,7 +288,7 @@ def test_gemma4_reasoning_guard_uses_mlx_last_token_without_mutating_context():
         reasoning_open=False,
         reasoning_start_token_ids=(1, 2),
         reasoning_end_token_ids=(3,),
-        tool_call_start_token_id=5,
+        tool_call_start_token_ids=(5,),
         tool_grammar=_NoopToolGrammar(),
         eos_token_ids=(0,),
         whitespace_token_ids=(13,),

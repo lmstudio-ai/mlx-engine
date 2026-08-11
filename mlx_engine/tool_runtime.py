@@ -42,6 +42,9 @@ _QWEN35_TOOLS_RE = re.compile(
     re.DOTALL,
 )
 _GEMMA4_CALL_PREFIX = "call:"
+_MUSE_GLIMMER_SYSTEM_START = "<|start|>system<|message|>"
+_MUSE_GLIMMER_SYSTEM_END = "<|eot|>"
+_MUSE_GLIMMER_FUNCTION_SCHEMAS_START = "// Function schemas"
 _TOOL_WHITESPACE = (" ", "\n", "\t", "\r")
 _LLG_TOKENIZER_CACHE: dict[tuple[int, int, tuple[int, ...]], Any] = {}
 
@@ -114,17 +117,33 @@ def create_muse_glimmer_tool_context_from_prompt(
         return None
 
     prompt_text = tokenizer.decode(prompt_tokens)
-    if MUSE_GLIMMER_ATEM_START not in prompt_text:
+    system_start = prompt_text.find(_MUSE_GLIMMER_SYSTEM_START)
+    if system_start == -1:
+        return None
+    system_start += len(_MUSE_GLIMMER_SYSTEM_START)
+    system_end = prompt_text.find(_MUSE_GLIMMER_SYSTEM_END, system_start)
+    if system_end == -1:
         return None
 
+    system_text = prompt_text[system_start:system_end]
+    schemas_start = system_text.rfind(_MUSE_GLIMMER_FUNCTION_SCHEMAS_START)
+    if schemas_start == -1:
+        return None
+    schemas_start += len(_MUSE_GLIMMER_FUNCTION_SCHEMAS_START)
+
     tool_names: list[str] = []
-    for line in prompt_text.splitlines():
+    for line in system_text[schemas_start:].splitlines():
+        line = line.strip()
+        if line == "":
+            if len(tool_names) > 0:
+                break
+            continue
         try:
             tool = json.loads(line)
         except json.JSONDecodeError:
-            continue
+            break
         if not isinstance(tool, dict) or not isinstance(tool.get("parameters"), dict):
-            continue
+            break
         name = tool.get("name")
         if isinstance(name, str) and name != "":
             tool_names.append(name)
@@ -220,7 +239,7 @@ class NativeToolReasoningGuardLogitsProcessor:
         reasoning_open: bool,
         reasoning_start_token_ids: tuple[int, ...],
         reasoning_end_token_ids: tuple[int, ...],
-        tool_call_start_token_id: int,
+        tool_call_start_token_ids: tuple[int, ...],
         tool_grammar: Any,
         eos_token_ids: tuple[int, ...],
         whitespace_token_ids: tuple[int, ...],
@@ -241,13 +260,14 @@ class NativeToolReasoningGuardLogitsProcessor:
         self._reasoning_end_token_id = (
             reasoning_end_token_ids[0] if len(reasoning_end_token_ids) > 0 else None
         )
-        self._tool_call_start_token_id = tool_call_start_token_id
+        self._tool_call_start_token_ids = tool_call_start_token_ids
+        self._tool_call_start_token_id = tool_call_start_token_ids[0]
         self._tool_grammar = tool_grammar
         self._initial_tool_token_ids = tuple(tool_grammar.initial_token_ids)
         self._post_tool_token_ids = post_tool_token_ids or (
             *eos_token_ids,
             *whitespace_token_ids,
-            tool_call_start_token_id,
+            self._tool_call_start_token_id,
         )
         self._post_tool_reset_token_ids = post_tool_reset_token_ids
         self._previous_token_mx = mx.array(0)
@@ -278,7 +298,8 @@ class NativeToolReasoningGuardLogitsProcessor:
         logits: mx.array,
     ) -> mx.array:
         """Catch up from materialized context, then mask next-token logits."""
-        for token_id in token_context[self._context_token_count :]:
+        for index in range(self._context_token_count, len(token_context)):
+            token_id = token_context[index]
             if self._tool_state == self._STATE_TOOL:
                 # This token was already materialized by the batcher; feed it
                 # into llguidance so the grammar is caught up before masking.
@@ -288,16 +309,44 @@ class NativeToolReasoningGuardLogitsProcessor:
                 and token_id in self._post_tool_reset_token_ids
             ):
                 self._reset_tool_state()
-            elif token_id == self._tool_call_start_token_id:
-                # A materialized tool-call marker starts grammar tracking. The
-                # grammar itself begins after that protocol-specific marker.
+            elif self._context_ends_with_tool_call_start(token_context, index):
+                # A complete materialized tool-call marker starts grammar tracking.
+                # The grammar begins after that protocol-specific marker.
                 self._tool_state = self._STATE_TOOL
                 self._tool_matcher = self._tool_grammar.start_matcher(
                     int(logits.shape[-1])
                 )
         self._context_token_count = len(token_context)
 
-        return self._process_last_token_mx(last_token.reshape(-1)[0], logits)
+        return self._process_last_token_mx(
+            token_context,
+            last_token.reshape(-1)[0],
+            logits,
+        )
+
+    def _context_ends_with_tool_call_start(
+        self, token_context: list[int], index: int
+    ) -> bool:
+        marker_length = len(self._tool_call_start_token_ids)
+        if index + 1 < marker_length:
+            return False
+        return (
+            tuple(token_context[index + 1 - marker_length : index + 1])
+            == self._tool_call_start_token_ids
+        )
+
+    def _tool_call_start_condition(
+        self, token_context: list[int], token_id: mx.array
+    ) -> mx.array:
+        marker_prefix = self._tool_call_start_token_ids[:-1]
+        if len(marker_prefix) > len(token_context):
+            return mx.array(False)
+        if (
+            len(marker_prefix) > 0
+            and tuple(token_context[-len(marker_prefix) :]) != marker_prefix
+        ):
+            return mx.array(False)
+        return token_id == self._tool_call_start_token_ids[-1]
 
     def _reset_tool_state(self) -> None:
         """Return tool-grammar tracking to ordinary non-tool generation."""
@@ -311,7 +360,12 @@ class NativeToolReasoningGuardLogitsProcessor:
             self._tool_state = self._STATE_POST_TOOL
             self._tool_matcher = None
 
-    def _process_last_token_mx(self, token_id: mx.array, logits: mx.array) -> mx.array:
+    def _process_last_token_mx(
+        self,
+        token_context: list[int],
+        token_id: mx.array,
+        logits: mx.array,
+    ) -> mx.array:
         """Track reasoning state in MLX and apply next-token masks."""
         # Keep normal decode token handling in MLX: last_token.tolist() calls
         # eval()/wait and can create a per-token graph break. We only sync the
@@ -344,15 +398,14 @@ class NativeToolReasoningGuardLogitsProcessor:
             # Remember this token so the next step can detect two-token openers.
             self._previous_token_mx = token_id
 
+        tool_call_start = self._tool_call_start_condition(token_context, token_id)
+
         if self._tool_state == self._STATE_NORMAL:
-            # Bridge the first token after a tool-call start without syncing
-            # token_id to Python. Starting llguidance here would require
-            # token_id.item() on every normal decode step; instead, use an MLX
-            # condition to mask all but the grammar's valid first tokens when
-            # the tool-call marker was sampled.
+            # Bridge the first token after a complete tool-call marker without
+            # syncing token_id to Python on the normal decode path.
             logits = _mask_except_token_ids_mx(
                 logits,
-                token_id == self._tool_call_start_token_id,
+                tool_call_start,
                 self._initial_tool_token_ids,
             )
 
@@ -386,14 +439,14 @@ class NativeToolReasoningGuardLogitsProcessor:
                 # If another tool call was sampled, allow only its first grammar tokens.
                 logits = _mask_except_token_ids_mx(
                     logits,
-                    token_id == self._tool_call_start_token_id,
+                    tool_call_start,
                     self._initial_tool_token_ids,
                 )
                 # Otherwise stay in the protocol's configured post-tool lane.
                 # Preserve scores among those continuations.
                 logits = _mask_except_token_ids_mx(
                     logits,
-                    token_id != self._tool_call_start_token_id,
+                    mx.logical_not(tool_call_start),
                     self._post_tool_token_ids,
                 )
 
@@ -432,7 +485,7 @@ def create_gemma4_reasoning_guard_logits_processor(
         reasoning_open=context.reasoning_open,
         reasoning_start_token_ids=tokenizer.think_start_tokens,
         reasoning_end_token_ids=tokenizer.think_end_tokens,
-        tool_call_start_token_id=tool_call_start_token_id,
+        tool_call_start_token_ids=(tool_call_start_token_id,),
         tool_grammar=tool_grammar,
         eos_token_ids=tuple(int(token_id) for token_id in tokenizer.eos_token_ids),
         whitespace_token_ids=tuple(
@@ -461,7 +514,7 @@ def create_qwen35_reasoning_guard_logits_processor(
         reasoning_open=context.reasoning_open,
         reasoning_start_token_ids=tokenizer.think_start_tokens,
         reasoning_end_token_ids=tokenizer.think_end_tokens,
-        tool_call_start_token_id=tool_call_start_token_id,
+        tool_call_start_token_ids=(tool_call_start_token_id,),
         tool_grammar=tool_grammar,
         eos_token_ids=tuple(int(token_id) for token_id in tokenizer.eos_token_ids),
         whitespace_token_ids=tuple(
@@ -476,20 +529,20 @@ def create_muse_glimmer_tool_logits_processor(
     tokenizer: Any,
     context: MuseGlimmerToolContext,
 ) -> NativeToolReasoningGuardLogitsProcessor:
-    tool_call_start_token_id = _encode_token_ids(tokenizer, "atem")[0]
+    tool_call_start_token_ids = _encode_token_ids(tokenizer, MUSE_GLIMMER_ATEM_START)
     end_of_message_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOM)[0]
     end_of_turn_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOT)[0]
     tool_grammar = _LLGuidanceToolGrammar(
         tokenizer=tokenizer,
         grammar=_muse_glimmer_llguidance_grammar(context.tool_names),
-        initial_token_ids=(_encode_token_ids(tokenizer, ":function_calls")[0],),
+        initial_token_ids=(_encode_token_ids(tokenizer, "\n")[0],),
     )
 
     return NativeToolReasoningGuardLogitsProcessor(
         reasoning_open=False,
         reasoning_start_token_ids=(),
         reasoning_end_token_ids=(),
-        tool_call_start_token_id=tool_call_start_token_id,
+        tool_call_start_token_ids=tool_call_start_token_ids,
         tool_grammar=tool_grammar,
         eos_token_ids=(),
         whitespace_token_ids=(),
@@ -501,7 +554,7 @@ def create_muse_glimmer_tool_logits_processor(
 def _muse_glimmer_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
     return rf"""%llguidance {{}}
-start: ":function_calls>" WS invoke (WS invoke)* WS "{MUSE_GLIMMER_ATEM_END}"
+start: WS invoke (WS invoke)* WS "{MUSE_GLIMMER_ATEM_END}"
 invoke: "<atem:invoke name=\"" tool "\">" WS parameter* "</atem:invoke>"
 tool: {tool_choice}
 parameter: "<atem:parameter name=\"" PARAM_NAME "\">" param_value WS

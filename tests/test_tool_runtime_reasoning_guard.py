@@ -7,7 +7,11 @@ from mlx_engine.tool_protocols import (
     GEMMA4_CHANNEL_END,
     GEMMA4_REASONING_START,
     GEMMA4_TOOL_CALL_START,
+    MUSE_GLIMMER_ATEM_START,
+    MUSE_GLIMMER_EOM,
+    MUSE_GLIMMER_EOT,
     Gemma4ToolContext,
+    MuseGlimmerToolContext,
     Qwen35ToolContext,
 )
 from mlx_engine.tool_runtime import (
@@ -20,6 +24,7 @@ from mlx_engine.tool_runtime import (
     _qwen35_llguidance_grammar,
     _tokenizer_vocab_size,
     create_gemma4_reasoning_guard_logits_processor,
+    create_muse_glimmer_tool_logits_processor,
     create_qwen35_reasoning_guard_logits_processor,
 )
 
@@ -241,7 +246,7 @@ def _processor(tool_names=("get_weather",), reasoning_open=False):
         reasoning_open=reasoning_open,
         reasoning_start_token_ids=(1, 2),
         reasoning_end_token_ids=(3,),
-        tool_call_start_token_id=4,
+        tool_call_start_token_ids=(4,),
         tool_grammar=_FakeToolGrammar(tool_names),
         eos_token_ids=(0,),
         whitespace_token_ids=(15, 17),
@@ -259,7 +264,7 @@ def _qwen_processor(tool_names=("get_weather",), reasoning_open=False):
         reasoning_open=reasoning_open,
         reasoning_start_token_ids=(1,),
         reasoning_end_token_ids=(2,),
-        tool_call_start_token_id=4,
+        tool_call_start_token_ids=(4,),
         tool_grammar=_FakeToolGrammar(tool_names),
         eos_token_ids=(0,),
         whitespace_token_ids=(15, 17),
@@ -273,7 +278,7 @@ def _muse_glimmer_processor():
         reasoning_open=False,
         reasoning_start_token_ids=(),
         reasoning_end_token_ids=(),
-        tool_call_start_token_id=4,
+        tool_call_start_token_ids=(4, 23, 18),
         tool_grammar=_FakeToolGrammar(),
         eos_token_ids=(),
         whitespace_token_ids=(),
@@ -447,17 +452,72 @@ def _finite_token_ids(logits):
     ]
 
 
+def test_muse_glimmer_factory_tracks_complete_official_opener():
+    token_ids_by_text = {
+        MUSE_GLIMMER_ATEM_START: [4, 23, 18],
+        MUSE_GLIMMER_EOM: [21],
+        MUSE_GLIMMER_EOT: [22],
+        "\n": [17],
+    }
+    tokenizer = SimpleNamespace(
+        encode=lambda text, add_special_tokens=False: token_ids_by_text[text]
+    )
+    processor = create_muse_glimmer_tool_logits_processor(
+        tokenizer=tokenizer,
+        context=MuseGlimmerToolContext(tool_names=("get_weather",)),
+    )
+    processor(mx.array([14], dtype=mx.int32), _mx_logits())
+    context = _mx_context()
+
+    logits = _process_token(processor, context, 4)
+    assert _finite_token_ids(logits) == list(range(24))
+
+    logits = _process_token(processor, context, 23)
+    assert _finite_token_ids(logits) == list(range(24))
+
+    logits = _process_token(processor, context, 18)
+    assert _finite_token_ids(logits) == [17]
+
+
+def test_muse_glimmer_bare_atem_does_not_start_tool_grammar():
+    processor = _muse_glimmer_processor()
+    context = _mx_context()
+
+    logits = _process_token(processor, context, 4)
+    assert _finite_token_ids(logits) == list(range(24))
+
+    logits = _process_token(processor, context, 14)
+    assert _finite_token_ids(logits) == list(range(24))
+
+
+def test_muse_glimmer_complete_opener_starts_tool_grammar():
+    processor = _muse_glimmer_processor()
+    context = _mx_context()
+
+    _process_token(processor, context, 4)
+    logits = _process_token(processor, context, 23)
+    assert _finite_token_ids(logits) == list(range(24))
+
+    logits = _process_token(processor, context, 18)
+    assert _finite_token_ids(logits) == [6]
+
+    logits = _process_token(processor, context, 6)
+    assert _forced_token_ids(logits) == [7]
+
+
 def test_muse_glimmer_post_tool_allows_eom_or_eot_and_eom_resets():
     processor = _muse_glimmer_processor()
     context = _mx_context()
-    for token_id in [4, 6, 7, 8, 9, 10, 11, 12]:
+    for token_id in [4, 23, 18, 6, 7, 8, 9, 10, 11, 12]:
         _process_token(processor, context, token_id)
 
     logits = _process_token(processor, context, 5)
     assert _finite_token_ids(logits) == [21, 22]
 
     _process_token(processor, context, 21)
-    logits = _process_token(processor, context, 4)
+    _process_token(processor, context, 4)
+    _process_token(processor, context, 23)
+    logits = _process_token(processor, context, 18)
     assert _finite_token_ids(logits) == [6]
 
 
@@ -707,10 +767,10 @@ def test_muse_glimmer_llguidance_grammar_accepts_multiple_known_invocations():
     grammar = _muse_glimmer_llguidance_grammar(("lookup", "search.web"))
 
     for text in [
-        ':function_calls>\n<atem:invoke name="lookup">\n'
+        '\n<atem:invoke name="lookup">\n'
         '<atem:parameter name="query">weather</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls>",
-        ':function_calls><atem:invoke name="lookup"></atem:invoke>'
+        '<atem:invoke name="lookup"></atem:invoke>'
         '<atem:invoke name="search.web"><atem:parameter name="query">'
         "weather</atem:parameter></atem:invoke></atem:function_calls>",
     ]:
@@ -722,8 +782,7 @@ def test_muse_glimmer_llguidance_grammar_accepts_multiple_known_invocations():
 
     matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
     for token_id in hf_tokenizer.encode(
-        ':function_calls><atem:invoke name="unknown"></atem:invoke>'
-        "</atem:function_calls>",
+        '<atem:invoke name="unknown"></atem:invoke></atem:function_calls>',
         add_special_tokens=False,
     ):
         matcher.consume_token(token_id)
