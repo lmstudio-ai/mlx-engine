@@ -15,6 +15,11 @@ QWEN35_FUNCTION_START = "<function="
 QWEN35_REASONING_START = "<think>"
 QWEN35_REASONING_END = "</think>"
 
+MUSE_GLIMMER_ATEM_START = "<atem:function_calls>"
+MUSE_GLIMMER_ATEM_END = "</atem:function_calls>"
+MUSE_GLIMMER_EOM = "<|eom|>"
+MUSE_GLIMMER_EOT = "<|eot|>"
+
 
 @dataclass(frozen=True)
 class Gemma4ToolContext:
@@ -26,6 +31,11 @@ class Gemma4ToolContext:
 class Qwen35ToolContext:
     tool_names: tuple[str, ...]
     reasoning_open: bool
+
+
+@dataclass(frozen=True)
+class MuseGlimmerToolContext:
+    tool_names: tuple[str, ...]
 
 
 def gemma4_reasoning_is_open(text: str) -> bool:

@@ -12,12 +12,17 @@ import mlx.core as mx
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_DECLARATION_END,
     GEMMA4_TOOL_DECLARATION_START,
+    MUSE_GLIMMER_ATEM_END,
+    MUSE_GLIMMER_ATEM_START,
+    MUSE_GLIMMER_EOM,
+    MUSE_GLIMMER_EOT,
     QWEN35_FUNCTION_START,
     QWEN35_TOOL_CALL_END,
     QWEN35_TOOL_CALL_START,
     QWEN35_TOOLS_END,
     QWEN35_TOOLS_START,
     Gemma4ToolContext,
+    MuseGlimmerToolContext,
     Qwen35ToolContext,
     gemma4_reasoning_is_open,
     qwen35_reasoning_is_open,
@@ -96,6 +101,38 @@ def create_qwen35_tool_context_from_prompt(
         tool_names=tool_names,
         reasoning_open=qwen35_reasoning_is_open(prompt_text),
     )
+
+
+def create_muse_glimmer_tool_context_from_prompt(
+    *,
+    tokenizer: Any,
+    prompt_tokens: list[int],
+    model_type: str | None,
+) -> MuseGlimmerToolContext | None:
+    """Return Muse Glimmer context for a prompt with native ATEM tools."""
+    if model_type != "muse_glimmer":
+        return None
+
+    prompt_text = tokenizer.decode(prompt_tokens)
+    if MUSE_GLIMMER_ATEM_START not in prompt_text:
+        return None
+
+    tool_names: list[str] = []
+    for line in prompt_text.splitlines():
+        try:
+            tool = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(tool, dict) or not isinstance(tool.get("parameters"), dict):
+            continue
+        name = tool.get("name")
+        if isinstance(name, str) and name != "":
+            tool_names.append(name)
+
+    unique_tool_names = tuple(dict.fromkeys(tool_names))
+    if len(unique_tool_names) == 0:
+        return None
+    return MuseGlimmerToolContext(tool_names=unique_tool_names)
 
 
 def _qwen35_tool_names_from_prompt(prompt_text: str) -> tuple[str, ...]:
@@ -187,25 +224,32 @@ class NativeToolReasoningGuardLogitsProcessor:
         tool_grammar: Any,
         eos_token_ids: tuple[int, ...],
         whitespace_token_ids: tuple[int, ...],
+        post_tool_token_ids: tuple[int, ...] | None = None,
+        post_tool_reset_token_ids: tuple[int, ...] = (),
     ):
         """Initialize native marker ids, tool grammar, and reasoning state."""
         self._reasoning_open = reasoning_open
         self._reasoning_open_mx = mx.array(reasoning_open)
-        self._reasoning_start_first_token_id = reasoning_start_token_ids[0]
+        self._reasoning_start_first_token_id = (
+            reasoning_start_token_ids[0] if len(reasoning_start_token_ids) > 0 else None
+        )
         self._reasoning_start_second_token_id = (
             reasoning_start_token_ids[1]
             if len(reasoning_start_token_ids) == 2
             else None
         )
-        self._reasoning_end_token_id = reasoning_end_token_ids[0]
+        self._reasoning_end_token_id = (
+            reasoning_end_token_ids[0] if len(reasoning_end_token_ids) > 0 else None
+        )
         self._tool_call_start_token_id = tool_call_start_token_id
         self._tool_grammar = tool_grammar
         self._initial_tool_token_ids = tuple(tool_grammar.initial_token_ids)
-        self._post_tool_token_ids = (
+        self._post_tool_token_ids = post_tool_token_ids or (
             *eos_token_ids,
             *whitespace_token_ids,
             tool_call_start_token_id,
         )
+        self._post_tool_reset_token_ids = post_tool_reset_token_ids
         self._previous_token_mx = mx.array(0)
         self._context_token_count = 0
         self._reset_tool_state()
@@ -239,6 +283,11 @@ class NativeToolReasoningGuardLogitsProcessor:
                 # This token was already materialized by the batcher; feed it
                 # into llguidance so the grammar is caught up before masking.
                 self._consume_tool_grammar_token(token_id)
+            elif (
+                self._tool_state == self._STATE_POST_TOOL
+                and token_id in self._post_tool_reset_token_ids
+            ):
+                self._reset_tool_state()
             elif token_id == self._tool_call_start_token_id:
                 # A materialized tool-call marker starts grammar tracking. The
                 # grammar itself begins after that protocol-specific marker.
@@ -268,34 +317,32 @@ class NativeToolReasoningGuardLogitsProcessor:
         # eval()/wait and can create a per-token graph break. We only sync the
         # sampled token while an llguidance tool grammar is active.
 
-        if self._reasoning_start_second_token_id is None:
-            # Qwen-style reasoning opens with a single <think> token.
-            reasoning_start = token_id == self._reasoning_start_first_token_id
-        else:
-            # Gemma-style reasoning opens with a two-token marker.
-            reasoning_start = (
-                self._previous_token_mx == self._reasoning_start_first_token_id
-            ) & (token_id == self._reasoning_start_second_token_id)
+        if self._reasoning_start_first_token_id is not None:
+            if self._reasoning_start_second_token_id is None:
+                # Qwen-style reasoning opens with a single <think> token.
+                reasoning_start = token_id == self._reasoning_start_first_token_id
+            else:
+                # Gemma-style reasoning opens with a two-token marker.
+                reasoning_start = (
+                    self._previous_token_mx == self._reasoning_start_first_token_id
+                ) & (token_id == self._reasoning_start_second_token_id)
 
-        # Visible reasoning closes with a single protocol-specific token.
-        reasoning_end = token_id == self._reasoning_end_token_id
+            # If the opening marker just completed, mark reasoning as open.
+            self._reasoning_open_mx = mx.where(
+                reasoning_start,
+                mx.array(True),
+                self._reasoning_open_mx,
+            )
 
-        # If the opening marker just completed, mark reasoning as open.
-        self._reasoning_open_mx = mx.where(
-            reasoning_start,
-            mx.array(True),
-            self._reasoning_open_mx,
-        )
+            # If the close marker was sampled, mark reasoning as closed.
+            self._reasoning_open_mx = mx.where(
+                token_id == self._reasoning_end_token_id,
+                mx.array(False),
+                self._reasoning_open_mx,
+            )
 
-        # If the close marker was sampled, mark reasoning as closed.
-        self._reasoning_open_mx = mx.where(
-            reasoning_end,
-            mx.array(False),
-            self._reasoning_open_mx,
-        )
-
-        # Remember this token so the next step can detect two-token openers.
-        self._previous_token_mx = token_id
+            # Remember this token so the next step can detect two-token openers.
+            self._previous_token_mx = token_id
 
         if self._tool_state == self._STATE_NORMAL:
             # Bridge the first token after a tool-call start without syncing
@@ -317,8 +364,8 @@ class NativeToolReasoningGuardLogitsProcessor:
             # this step. Skip it there so llguidance does not see it twice.
             self._context_token_count += 1
             if self._tool_state == self._STATE_POST_TOOL:
-                # The call just closed. Allow only EOS, whitespace, or another
-                # adjacent tool call, preserving the model's scores among them.
+                # The call just closed. Allow only the protocol's configured
+                # continuations, preserving the model's scores among them.
                 logits = _mask_except_token_ids_mx(
                     logits,
                     mx.array(True),
@@ -330,27 +377,34 @@ class NativeToolReasoningGuardLogitsProcessor:
                 logits = self._tool_grammar.mask_logits(self._tool_matcher, logits)
 
         elif self._tool_state == self._STATE_POST_TOOL:
-            # If another tool call was sampled, allow only its first grammar tokens.
-            logits = _mask_except_token_ids_mx(
-                logits,
-                token_id == self._tool_call_start_token_id,
-                self._initial_tool_token_ids,
-            )
-            # Otherwise stay in the post-tool lane: EOS, whitespace, or another
-            # adjacent tool call. Preserve scores among those continuations.
-            logits = _mask_except_token_ids_mx(
-                logits,
-                token_id != self._tool_call_start_token_id,
-                self._post_tool_token_ids,
-            )
+            if (
+                self._post_tool_reset_token_ids
+                and int(token_id.item()) in self._post_tool_reset_token_ids
+            ):
+                self._reset_tool_state()
+            else:
+                # If another tool call was sampled, allow only its first grammar tokens.
+                logits = _mask_except_token_ids_mx(
+                    logits,
+                    token_id == self._tool_call_start_token_id,
+                    self._initial_tool_token_ids,
+                )
+                # Otherwise stay in the protocol's configured post-tool lane.
+                # Preserve scores among those continuations.
+                logits = _mask_except_token_ids_mx(
+                    logits,
+                    token_id != self._tool_call_start_token_id,
+                    self._post_tool_token_ids,
+                )
 
-        # Keep tool-call starts blocked while visible reasoning is open. This
-        # forces the model to sample the real reasoning close marker first.
-        logits[:, self._tool_call_start_token_id] = mx.where(
-            self._reasoning_open_mx,
-            -float("inf"),
-            logits[:, self._tool_call_start_token_id],
-        )
+        if self._reasoning_start_first_token_id is not None:
+            # Keep tool-call starts blocked while visible reasoning is open. This
+            # forces the model to sample the real reasoning close marker first.
+            logits[:, self._tool_call_start_token_id] = mx.where(
+                self._reasoning_open_mx,
+                -float("inf"),
+                logits[:, self._tool_call_start_token_id],
+            )
         return logits
 
 
@@ -415,6 +469,47 @@ def create_qwen35_reasoning_guard_logits_processor(
             for whitespace in _TOOL_WHITESPACE
         ),
     )
+
+
+def create_muse_glimmer_tool_logits_processor(
+    *,
+    tokenizer: Any,
+    context: MuseGlimmerToolContext,
+) -> NativeToolReasoningGuardLogitsProcessor:
+    tool_call_start_token_id = _encode_token_ids(tokenizer, "atem")[0]
+    end_of_message_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOM)[0]
+    end_of_turn_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOT)[0]
+    tool_grammar = _LLGuidanceToolGrammar(
+        tokenizer=tokenizer,
+        grammar=_muse_glimmer_llguidance_grammar(context.tool_names),
+        initial_token_ids=(_encode_token_ids(tokenizer, ":function_calls")[0],),
+    )
+
+    return NativeToolReasoningGuardLogitsProcessor(
+        reasoning_open=False,
+        reasoning_start_token_ids=(),
+        reasoning_end_token_ids=(),
+        tool_call_start_token_id=tool_call_start_token_id,
+        tool_grammar=tool_grammar,
+        eos_token_ids=(),
+        whitespace_token_ids=(),
+        post_tool_token_ids=(end_of_message_token_id, end_of_turn_token_id),
+        post_tool_reset_token_ids=(end_of_message_token_id,),
+    )
+
+
+def _muse_glimmer_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
+    tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
+    return rf"""%llguidance {{}}
+start: ":function_calls>" WS invoke (WS invoke)* WS "{MUSE_GLIMMER_ATEM_END}"
+invoke: "<atem:invoke name=\"" tool "\">" WS parameter* "</atem:invoke>"
+tool: {tool_choice}
+parameter: "<atem:parameter name=\"" PARAM_NAME "\">" param_value WS
+PARAM_NAME: /[^\">]+/
+param_value[suffix="</atem:parameter>"]: SAFE_PARAM_VALUE
+SAFE_PARAM_VALUE: /(?s:.*)/ & ~/(?s:.*)<\/atem:(invoke|function_calls)>(?s:.*)/
+WS: /[ \t\n\r]*/
+"""
 
 
 def _gemma4_llguidance_grammar(tool_names: tuple[str, ...]) -> str:

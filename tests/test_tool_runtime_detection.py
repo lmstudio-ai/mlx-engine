@@ -1,5 +1,6 @@
 from mlx_engine.tool_runtime import (
     create_gemma4_tool_context_from_prompt,
+    create_muse_glimmer_tool_context_from_prompt,
     create_qwen35_tool_context_from_prompt,
 )
 
@@ -8,6 +9,17 @@ GEMMA4_TOOL_PROMPT = """<bos><|turn>system
 <|tool>declaration:get_weather{description:<|"|>Get weather<|"|>,parameters:{properties:{location:{type:<|"|>STRING<|"|>}},type:<|"|>OBJECT<|"|>}}<tool|><|tool>declaration:search{description:<|"|>Search<|"|>,parameters:{properties:{query:{type:<|"|>STRING<|"|>}},type:<|"|>OBJECT<|"|>}}<tool|><turn|>
 <|turn>user
 What is the weather in Paris?"""
+
+MUSE_GLIMMER_TOOL_PROMPT = """<|start|>system<|message|>
+You can invoke a function by writing a "<atem:function_calls>" block.
+Here are the functions available in JSONSchema format:
+// Tool metadata
+{"name": "weather", "description": "Weather tools"}
+{"name": "search", "description": "Search tools"}
+// Function schemas
+{"name": "weather.get_forecast", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}
+{"name": "search.web", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}}
+<|eot|><|start|>user<|message|>What is the weather?<|eot|><|start|>assistant"""
 
 QWEN35_TOOL_PROMPT = """<|im_start|>system
 # Tools
@@ -118,6 +130,27 @@ def test_gemma4_context_tracks_open_reasoning_from_prompt_tail():
 
     assert context is not None
     assert context.reasoning_open
+
+
+def test_muse_glimmer_context_extracts_functions_but_not_namespace_metadata():
+    context = create_muse_glimmer_tool_context_from_prompt(
+        tokenizer=_Tokenizer(MUSE_GLIMMER_TOOL_PROMPT),
+        prompt_tokens=[1, 2, 3],
+        model_type="muse_glimmer",
+    )
+
+    assert context is not None
+    assert context.tool_names == ("weather.get_forecast", "search.web")
+
+
+def test_muse_glimmer_context_requires_muse_glimmer_model_type():
+    context = create_muse_glimmer_tool_context_from_prompt(
+        tokenizer=_Tokenizer(MUSE_GLIMMER_TOOL_PROMPT),
+        prompt_tokens=[1, 2, 3],
+        model_type="onyx",
+    )
+
+    assert context is None
 
 
 def test_qwen35_context_extracts_declared_tool_names():

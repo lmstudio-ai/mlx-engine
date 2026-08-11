@@ -12,9 +12,11 @@ from mlx_engine.tool_protocols import (
 )
 from mlx_engine.tool_runtime import (
     Gemma4ReasoningGuardLogitsProcessor,
+    NativeToolReasoningGuardLogitsProcessor,
     Qwen35ReasoningGuardLogitsProcessor,
     _LLGuidanceToolGrammar,
     _gemma4_llguidance_grammar,
+    _muse_glimmer_llguidance_grammar,
     _qwen35_llguidance_grammar,
     _tokenizer_vocab_size,
     create_gemma4_reasoning_guard_logits_processor,
@@ -266,6 +268,22 @@ def _qwen_processor(tool_names=("get_weather",), reasoning_open=False):
     return processor
 
 
+def _muse_glimmer_processor():
+    processor = NativeToolReasoningGuardLogitsProcessor(
+        reasoning_open=False,
+        reasoning_start_token_ids=(),
+        reasoning_end_token_ids=(),
+        tool_call_start_token_id=4,
+        tool_grammar=_FakeToolGrammar(),
+        eos_token_ids=(),
+        whitespace_token_ids=(),
+        post_tool_token_ids=(21, 22),
+        post_tool_reset_token_ids=(21,),
+    )
+    processor(mx.array([14], dtype=mx.int32), mx.zeros((1, 24), dtype=mx.float32))
+    return processor
+
+
 def test_gemma4_reasoning_guard_masks_tool_call_start_when_prompt_reasoning_open():
     processor = _processor(reasoning_open=True)
     logits = _FakeLogits(vocab_size=8)
@@ -427,6 +445,20 @@ def _finite_token_ids(logits):
         for token_id, value in enumerate(logits.reshape(-1).tolist())
         if math.isfinite(value)
     ]
+
+
+def test_muse_glimmer_post_tool_allows_eom_or_eot_and_eom_resets():
+    processor = _muse_glimmer_processor()
+    context = _mx_context()
+    for token_id in [4, 6, 7, 8, 9, 10, 11, 12]:
+        _process_token(processor, context, token_id)
+
+    logits = _process_token(processor, context, 5)
+    assert _finite_token_ids(logits) == [21, 22]
+
+    _process_token(processor, context, 21)
+    logits = _process_token(processor, context, 4)
+    assert _finite_token_ids(logits) == [6]
 
 
 def test_gemma4_structure_constrains_header_after_tool_call_start():
@@ -660,6 +692,44 @@ def test_qwen35_llguidance_grammar_accepts_parser_edge_cases():
             matcher.consume_token(token_id)
             assert not matcher.get_error()
         assert matcher.is_stopped()
+
+
+def test_muse_glimmer_llguidance_grammar_accepts_multiple_known_invocations():
+    import llguidance
+    import llguidance.hf
+
+    hf_tokenizer = _qwen35_hf_tokenizer()
+    llg_tokenizer = llguidance.hf.from_tokenizer(
+        hf_tokenizer,
+        n_vocab=max(hf_tokenizer.get_vocab().values()) + 1,
+        eos_token=[hf_tokenizer.eos_token_id],
+    )
+    grammar = _muse_glimmer_llguidance_grammar(("lookup", "search.web"))
+
+    for text in [
+        ':function_calls>\n<atem:invoke name="lookup">\n'
+        '<atem:parameter name="query">weather</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>",
+        ':function_calls><atem:invoke name="lookup"></atem:invoke>'
+        '<atem:invoke name="search.web"><atem:parameter name="query">'
+        "weather</atem:parameter></atem:invoke></atem:function_calls>",
+    ]:
+        matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+        for token_id in hf_tokenizer.encode(text, add_special_tokens=False):
+            matcher.consume_token(token_id)
+            assert not matcher.get_error()
+        assert matcher.is_stopped()
+
+    matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
+    for token_id in hf_tokenizer.encode(
+        ':function_calls><atem:invoke name="unknown"></atem:invoke>'
+        "</atem:function_calls>",
+        add_special_tokens=False,
+    ):
+        matcher.consume_token(token_id)
+        if matcher.get_error():
+            break
+    assert matcher.get_error()
 
 
 def test_qwen35_llguidance_grammar_rejects_special_tokens_in_parameter_values():

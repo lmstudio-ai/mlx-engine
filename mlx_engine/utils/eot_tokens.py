@@ -18,7 +18,10 @@ DEFAULT_EOT_TOKENS = [
     "<｜end▁of▁sentence｜>",
 ]
 
-MODEL_TYPE_TO_EOT_TOKENS = {"gpt_oss": ["<|return|>", "<|call|>"]}
+MODEL_TYPE_TO_EOT_TOKENS = {
+    "gpt_oss": ["<|return|>", "<|call|>"],
+    "muse_glimmer": ["<|eot|>"],
+}
 
 
 def _get_eot_token_ids(tokenizer, model_type: Optional[str] = None) -> set[int]:

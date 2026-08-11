@@ -46,6 +46,8 @@ from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerT
 from mlx_engine.tool_runtime import (
     create_gemma4_reasoning_guard_logits_processor,
     create_gemma4_tool_context_from_prompt,
+    create_muse_glimmer_tool_context_from_prompt,
+    create_muse_glimmer_tool_logits_processor,
     create_qwen35_reasoning_guard_logits_processor,
     create_qwen35_tool_context_from_prompt,
 )
@@ -727,31 +729,44 @@ def _batched_generation(
                 )
             )
         else:
-            gemma4_tool_context = create_gemma4_tool_context_from_prompt(
+            muse_glimmer_tool_context = create_muse_glimmer_tool_context_from_prompt(
                 tokenizer=model_kit.tokenizer,
                 prompt_tokens=prompt_tokens,
                 model_type=model_kit.model_type,
             )
-            if gemma4_tool_context is not None:
+            if muse_glimmer_tool_context is not None:
                 logits_processors.append(
-                    create_gemma4_reasoning_guard_logits_processor(
+                    create_muse_glimmer_tool_logits_processor(
                         tokenizer=model_kit.tokenizer,
-                        context=gemma4_tool_context,
+                        context=muse_glimmer_tool_context,
                     )
                 )
             else:
-                qwen35_tool_context = create_qwen35_tool_context_from_prompt(
+                gemma4_tool_context = create_gemma4_tool_context_from_prompt(
                     tokenizer=model_kit.tokenizer,
                     prompt_tokens=prompt_tokens,
                     model_type=model_kit.model_type,
                 )
-                if qwen35_tool_context is not None:
+                if gemma4_tool_context is not None:
                     logits_processors.append(
-                        create_qwen35_reasoning_guard_logits_processor(
+                        create_gemma4_reasoning_guard_logits_processor(
                             tokenizer=model_kit.tokenizer,
-                            context=qwen35_tool_context,
+                            context=gemma4_tool_context,
                         )
                     )
+                else:
+                    qwen35_tool_context = create_qwen35_tool_context_from_prompt(
+                        tokenizer=model_kit.tokenizer,
+                        prompt_tokens=prompt_tokens,
+                        model_type=model_kit.model_type,
+                    )
+                    if qwen35_tool_context is not None:
+                        logits_processors.append(
+                            create_qwen35_reasoning_guard_logits_processor(
+                                tokenizer=model_kit.tokenizer,
+                                context=qwen35_tool_context,
+                            )
+                        )
 
         stream = model_kit.generate(
             prompt_tokens=input_tokens,
