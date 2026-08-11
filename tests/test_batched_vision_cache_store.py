@@ -104,10 +104,18 @@ def test_cache_store_can_disable_disk_cache(monkeypatch):
             "disk budget should not be calculated when disk caching is disabled"
         )
 
+    def fail_if_blob_store_is_created(_base_dir):
+        pytest.fail("blob store should not be created when disk caching is disabled")
+
     monkeypatch.setattr(
         cache_store_module,
         "provisional_cache_store_budget_bytes",
         fail_if_budget_is_calculated,
+    )
+    monkeypatch.setattr(
+        cache_store_module,
+        "TemporarySafetensorBlobStore",
+        fail_if_blob_store_is_created,
     )
     store = VlmPromptCacheStore(enable_disk_cache=False)
 
