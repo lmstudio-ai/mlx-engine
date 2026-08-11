@@ -1000,6 +1000,18 @@ class _PromptPrefill:
         )
         gen_batch._rope_deltas = rope_deltas
 
+        # Keep final prefill work out of the first decode step.
+        eval_targets = [
+            first_tokens,
+            [cache.state for cache in self.prompt_cache],
+            first_logprobs,
+        ]
+        if top_idx is not None:
+            eval_targets.extend([top_idx, top_logprobs])
+        if rope_deltas is not None:
+            eval_targets.append(rope_deltas)
+        mx.eval(*eval_targets)
+
         self.prompt_cache = []
         return gen_batch, prompt_responses
 

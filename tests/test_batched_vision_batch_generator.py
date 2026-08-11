@@ -206,6 +206,38 @@ def test_prefill_and_decode_honor_model_logits_to_keep(monkeypatch):
     assert [call["logits_to_keep"] for call in model.calls] == [1, 1, 1]
 
 
+def test_prompt_prefill_materializes_decode_boundary(monkeypatch):
+    cache = _FakeBatchCache()
+    monkeypatch.setattr(batcher, "make_prompt_cache", lambda _model: [cache])
+    eval_calls = []
+    monkeypatch.setattr(batcher.mx, "eval", lambda *targets: eval_calls.append(targets))
+    prompt_prefill = batcher._PromptPrefill(
+        model=_FakeModel(),
+        uid=1,
+        input_ids=[1, 2],
+        max_tokens=1,
+        top_logprobs=2,
+        sampler=_argmax_sampler,
+        logits_processors=[],
+        inputs_embeds=mx.zeros((1, 2, 2), dtype=mx.float32),
+        prompt_kwargs={"rope_deltas": mx.array([7], dtype=mx.int32)},
+        prefix_cache_save_state=_prefix_cache_save_states(1)[0],
+    )
+
+    generation_batch, _ = prompt_prefill.generate(lambda _token: False)
+
+    assert len(eval_calls) == 1
+    first_token, cache_states, token_logprob, top_idx, top_logprobs, rope_deltas = (
+        eval_calls[0]
+    )
+    assert first_token is generation_batch._next_tokens
+    assert cache_states[0] is cache.state
+    assert token_logprob is generation_batch._next_token_logprobs
+    assert top_idx is generation_batch._next_top_idx
+    assert top_logprobs is generation_batch._next_top_logprobs
+    assert rope_deltas is generation_batch._rope_deltas
+
+
 def test_generation_batch_applies_per_sequence_processors_and_top_logprobs():
     """Processors are per-row, and sampled token metadata follows decode-ahead."""
     model = _FakeModel()
