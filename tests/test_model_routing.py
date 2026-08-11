@@ -51,10 +51,12 @@ def _disable_eos_sanitization(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("auto_fit_context", [True, False])
+@pytest.mark.parametrize("enable_disk_cache", [True, False])
 def test_batchable_text_model_uses_mlx_vlm_kit(
     monkeypatch,
     tmp_path,
     auto_fit_context,
+    enable_disk_cache,
 ):
     model_path = _write_text_config(tmp_path)
     fake_kit_class, created_kits = _install_fake_kit(
@@ -82,6 +84,7 @@ def test_batchable_text_model_uses_mlx_vlm_kit(
         trust_remote_code=True,
         seed=7,
         auto_fit_context=auto_fit_context,
+        enable_disk_cache=enable_disk_cache,
     )
 
     assert isinstance(model_kit, fake_kit_class)
@@ -95,6 +98,7 @@ def test_batchable_text_model_uses_mlx_vlm_kit(
         "trust_remote_code": True,
         "seed": 7,
         "auto_fit_context": auto_fit_context,
+        "enable_disk_cache": enable_disk_cache,
     }
 
 

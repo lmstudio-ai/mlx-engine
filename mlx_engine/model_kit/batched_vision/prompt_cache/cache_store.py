@@ -91,27 +91,36 @@ class VlmPromptCacheStore:
     - Touched LRU keys are committed physical records.
     """
 
-    def __init__(self, max_kv_size: int | None = None):
+    def __init__(
+        self,
+        max_kv_size: int | None = None,
+        enable_disk_cache: bool = True,
+    ):
         base_dir = Path("/tmp")
         self._base_dir = base_dir
         self._max_kv_size = max_kv_size
         self._blob_store = TemporarySafetensorBlobStore(base_dir)
-        self._empirical_budget_set = False
+        self._empirical_budget_set = not enable_disk_cache
         self._layout: PromptCacheLayout | None = None
         self._record_metadata_by_key: dict[str, PromptCacheRecordMetadata] = {}
         self._key_sizes: dict[str, int] = {}
         self._lru_keys: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
-        self._max_cache_store_bytes = provisional_cache_store_budget_bytes(base_dir)
+        self._max_cache_store_bytes = (
+            provisional_cache_store_budget_bytes(base_dir) if enable_disk_cache else 0
+        )
         self._restore_hit_tokens = 0
         self._restore_miss_tokens = 0
         self._cache_evictions = 0
         self._cache_evicted_bytes = 0
         self._last_cache_usage_log_time = 0.0
-        logger.info(
-            "VLM prompt cache disk store: lifetime=model_load storage=temporary "
-            "cleanup=model_unload_or_process_exit"
-        )
+        if enable_disk_cache:
+            logger.info(
+                "VLM prompt cache disk store: lifetime=model_load storage=temporary "
+                "cleanup=model_unload_or_process_exit"
+            )
+        else:
+            logger.info("VLM prompt cache disk store disabled")
 
     def ensure_max_kv_size(self, max_kv_size: int) -> None:
         """Keep the larger configured or fitted context as the budget target."""

@@ -1,6 +1,7 @@
 import pytest
 
 import mlx.core as mx
+import mlx_engine.model_kit.batched_vision.prompt_cache.cache_store as cache_store_module
 from mlx_engine.model_kit.batched_vision.prompt_cache.cache_store import (
     VlmPromptCacheStore,
 )
@@ -93,6 +94,27 @@ def test_cache_store_keeps_larger_configured_or_fitted_context(caplog):
         )
         store.ensure_max_kv_size(262_144)
         assert store._max_kv_size == 262_144
+    finally:
+        store.close()
+
+
+def test_cache_store_can_disable_disk_cache(monkeypatch):
+    def fail_if_budget_is_calculated(_base_dir):
+        pytest.fail(
+            "disk budget should not be calculated when disk caching is disabled"
+        )
+
+    monkeypatch.setattr(
+        cache_store_module,
+        "provisional_cache_store_budget_bytes",
+        fail_if_budget_is_calculated,
+    )
+    store = VlmPromptCacheStore(enable_disk_cache=False)
+
+    try:
+        assert not store.can_store_records()
+        assert store.budget_update_from_completed_cache([]) is None
+        assert store.snapshot_stats().max_bytes == 0
     finally:
         store.close()
 
