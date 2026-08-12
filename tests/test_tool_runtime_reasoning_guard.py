@@ -29,6 +29,10 @@ from mlx_engine.tool_runtime import (
 )
 
 
+# Unambiguous opener prefix pieces: "<", "atem", ":function", "_calls".
+_MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS = (4, 23, 18, 20)
+
+
 class _Tokenizer:
     def __init__(self, tool_call_start_tokens=(4,)):
         self.decode_count = 0
@@ -278,7 +282,7 @@ def _muse_glimmer_processor():
         reasoning_open=False,
         reasoning_start_token_ids=(),
         reasoning_end_token_ids=(),
-        tool_call_start_token_ids=(4, 23, 18),
+        tool_call_start_token_ids=_MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS,
         tool_grammar=_FakeToolGrammar(),
         eos_token_ids=(),
         whitespace_token_ids=(),
@@ -452,12 +456,15 @@ def _finite_token_ids(logits):
     ]
 
 
-def test_muse_glimmer_factory_tracks_complete_official_opener():
+def test_muse_glimmer_factory_requires_full_opener_prefix():
     token_ids_by_text = {
-        MUSE_GLIMMER_ATEM_START: [4, 23, 18],
+        MUSE_GLIMMER_ATEM_START.removesuffix(">"): list(
+            _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS
+        ),
         MUSE_GLIMMER_EOM: [21],
         MUSE_GLIMMER_EOT: [22],
-        "\n": [17],
+        ">": [16],
+        ">\n": [20],
     }
     tokenizer = SimpleNamespace(
         encode=lambda text, add_special_tokens=False: token_ids_by_text[text]
@@ -469,36 +476,43 @@ def test_muse_glimmer_factory_tracks_complete_official_opener():
     processor(mx.array([14], dtype=mx.int32), _mx_logits())
     context = _mx_context()
 
-    logits = _process_token(processor, context, 4)
-    assert _finite_token_ids(logits) == list(range(24))
+    for token_id in _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS[:-1]:
+        logits = _process_token(processor, context, token_id)
+        assert _finite_token_ids(logits) == list(range(24))
 
-    logits = _process_token(processor, context, 23)
-    assert _finite_token_ids(logits) == list(range(24))
-
-    logits = _process_token(processor, context, 18)
-    assert _finite_token_ids(logits) == [17]
+    logits = _process_token(processor, context, _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS[-1])
+    assert _finite_token_ids(logits) == [16, 20]
 
 
 def test_muse_glimmer_bare_atem_does_not_start_tool_grammar():
     processor = _muse_glimmer_processor()
     context = _mx_context()
 
-    logits = _process_token(processor, context, 4)
+    logits = _process_token(processor, context, 23)
     assert _finite_token_ids(logits) == list(range(24))
 
     logits = _process_token(processor, context, 14)
     assert _finite_token_ids(logits) == list(range(24))
 
 
-def test_muse_glimmer_complete_opener_starts_tool_grammar():
+def test_muse_glimmer_inner_marker_does_not_start_tool_grammar():
     processor = _muse_glimmer_processor()
     context = _mx_context()
 
-    _process_token(processor, context, 4)
-    logits = _process_token(processor, context, 23)
-    assert _finite_token_ids(logits) == list(range(24))
+    for token_id in _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS[1:]:
+        logits = _process_token(processor, context, token_id)
+        assert _finite_token_ids(logits) == list(range(24))
 
-    logits = _process_token(processor, context, 18)
+
+def test_muse_glimmer_complete_opener_prefix_starts_tool_grammar():
+    processor = _muse_glimmer_processor()
+    context = _mx_context()
+
+    for token_id in _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS[:-1]:
+        logits = _process_token(processor, context, token_id)
+        assert _finite_token_ids(logits) == list(range(24))
+
+    logits = _process_token(processor, context, _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS[-1])
     assert _finite_token_ids(logits) == [6]
 
     logits = _process_token(processor, context, 6)
@@ -508,16 +522,25 @@ def test_muse_glimmer_complete_opener_starts_tool_grammar():
 def test_muse_glimmer_post_tool_allows_eom_or_eot_and_eom_resets():
     processor = _muse_glimmer_processor()
     context = _mx_context()
-    for token_id in [4, 23, 18, 6, 7, 8, 9, 10, 11, 12]:
+    for token_id in [
+        *_MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+    ]:
         _process_token(processor, context, token_id)
 
     logits = _process_token(processor, context, 5)
     assert _finite_token_ids(logits) == [21, 22]
 
     _process_token(processor, context, 21)
-    _process_token(processor, context, 4)
-    _process_token(processor, context, 23)
-    logits = _process_token(processor, context, 18)
+    for token_id in _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS[:-1]:
+        _process_token(processor, context, token_id)
+    logits = _process_token(processor, context, _MUSE_GLIMMER_ATEM_PREFIX_TOKEN_IDS[-1])
     assert _finite_token_ids(logits) == [6]
 
 
@@ -767,10 +790,10 @@ def test_muse_glimmer_llguidance_grammar_accepts_multiple_known_invocations():
     grammar = _muse_glimmer_llguidance_grammar(("lookup", "search.web"))
 
     for text in [
-        '\n<atem:invoke name="lookup">\n'
+        '>\n<atem:invoke name="lookup">\n'
         '<atem:parameter name="query">weather</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls>",
-        '<atem:invoke name="lookup"></atem:invoke>'
+        '>\n<atem:invoke name="lookup"></atem:invoke>'
         '<atem:invoke name="search.web"><atem:parameter name="query">'
         "weather</atem:parameter></atem:invoke></atem:function_calls>",
     ]:
@@ -782,7 +805,7 @@ def test_muse_glimmer_llguidance_grammar_accepts_multiple_known_invocations():
 
     matcher = llguidance.LLMatcher(llg_tokenizer, grammar)
     for token_id in hf_tokenizer.encode(
-        '<atem:invoke name="unknown"></atem:invoke></atem:function_calls>',
+        '>\n<atem:invoke name="unknown"></atem:invoke></atem:function_calls>',
         add_special_tokens=False,
     ):
         matcher.consume_token(token_id)

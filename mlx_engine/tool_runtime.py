@@ -529,13 +529,19 @@ def create_muse_glimmer_tool_logits_processor(
     tokenizer: Any,
     context: MuseGlimmerToolContext,
 ) -> NativeToolReasoningGuardLogitsProcessor:
-    tool_call_start_token_ids = _encode_token_ids(tokenizer, MUSE_GLIMMER_ATEM_START)
+    tool_call_start_token_ids = _encode_token_ids(
+        tokenizer, MUSE_GLIMMER_ATEM_START.removesuffix(">")
+    )
     end_of_message_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOM)[0]
     end_of_turn_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOT)[0]
     tool_grammar = _LLGuidanceToolGrammar(
         tokenizer=tokenizer,
         grammar=_muse_glimmer_llguidance_grammar(context.tool_names),
-        initial_token_ids=(_encode_token_ids(tokenizer, "\n")[0],),
+        # Let llguidance consume the exact opener suffix for both tokenizer
+        # segmentations: a standalone `>` or the merged `>\n` token.
+        initial_token_ids=tuple(
+            _encode_token_ids(tokenizer, suffix)[0] for suffix in (">", ">\n")
+        ),
     )
 
     return NativeToolReasoningGuardLogitsProcessor(
@@ -554,7 +560,7 @@ def create_muse_glimmer_tool_logits_processor(
 def _muse_glimmer_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
     return rf"""%llguidance {{}}
-start: WS invoke (WS invoke)* WS "{MUSE_GLIMMER_ATEM_END}"
+start: ">\n" invoke (WS invoke)* WS "{MUSE_GLIMMER_ATEM_END}"
 invoke: "<atem:invoke name=\"" tool "\">" WS parameter* "</atem:invoke>"
 tool: {tool_choice}
 parameter: "<atem:parameter name=\"" PARAM_NAME "\">" param_value WS
