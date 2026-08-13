@@ -24,7 +24,7 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     slice_prompt_kwargs,
 )
 from mlx_engine.model_kit.patches.gemma4 import (
-    image_prefill_sections as gemma4_image_prefill_sections,
+    image_prefill_runs as gemma4_image_prefill_runs,
     prepare_cached_suffix_prompt_kwargs as prepare_gemma4_cached_suffix_prompt_kwargs,
 )
 from mlx_vlm.generate import (
@@ -786,10 +786,9 @@ class _PromptPrefill:
         self._all_tokens = list(all_tokens) if all_tokens is not None else []
         self._processed_prefix_len = len(self._all_tokens)
         self._prefix_cache_save_state = prefix_cache_save_state
-        self._gemma4_image_prefill_sections = gemma4_image_prefill_sections(
+        self._gemma4_image_prefill_runs = gemma4_image_prefill_runs(
             model,
             prompt_kwargs,
-            len(self._all_tokens),
         )
         # Restored exact hot caches may carry an existing row. Trimmed/disk
         # restores pass None and let prompt prep recompute it.
@@ -855,9 +854,10 @@ class _PromptPrefill:
 
         next_step = 0
         saving_prompt_cache = self._prefix_cache_save_state.callback is not None
-        # Cache-producing prefill calls deliberately end on the 256-token prefix
+        # Cache-producing prefill calls normally end on the 256-token prefix
         # grid because opaque ArraysCache/SSM state is restorable only at an exact
-        # model-call endpoint. Image-aware adjustments must preserve that grid.
+        # model-call endpoint. Gemma 4 has only KV/rotating-KV caches, so its
+        # image-aware adjustment may use a non-aligned endpoint instead.
         processed_remainder = self._processed_prefix_len % self.prefill_step_size
         if saving_prompt_cache and processed_remainder:
             # After a partial restore, land on the next normal prefill boundary.
@@ -886,21 +886,33 @@ class _PromptPrefill:
         return self._step_without_splitting_gemma4_image_run(next_step)
 
     def _step_without_splitting_gemma4_image_run(self, proposed_step: int) -> int:
-        if proposed_step == 0 or self._gemma4_image_prefill_sections is None:
+        if proposed_step == 0 or self._gemma4_image_prefill_runs is None:
             return proposed_step
 
-        processed_prompt_len = self._processed_prefix_len - len(self._all_tokens)
+        suffix_start = len(self._all_tokens)
+        processed_prompt_len = self._processed_prefix_len - suffix_start
         proposed_boundary = processed_prompt_len + proposed_step
-        for section_start, section_end in self._gemma4_image_prefill_sections:
-            if section_start < proposed_boundary < section_end:
-                safe_boundary = (
-                    section_start
-                    if processed_prompt_len < section_start
-                    else section_end
-                )
+        for image_start, image_end in self._gemma4_image_prefill_runs:
+            if image_start < proposed_boundary < image_end:
+                absolute_image_start = suffix_start + image_start
+                aligned_start = (
+                    absolute_image_start // DEFAULT_PREFIX_CHUNK_SIZE
+                ) * DEFAULT_PREFIX_CHUNK_SIZE - suffix_start
+
+                # Prefer the cache grid before using an exact image boundary.
+                # Never exceed the configured step unless one image is longer.
+                if aligned_start > processed_prompt_len:
+                    safe_boundary = aligned_start
+                elif image_end - processed_prompt_len <= self.prefill_step_size:
+                    safe_boundary = image_end
+                elif processed_prompt_len < image_start:
+                    safe_boundary = image_start
+                else:
+                    # A single image longer than the configured step is the
+                    # smallest valid model call from its start.
+                    safe_boundary = image_end
+
                 safe_step = safe_boundary - processed_prompt_len
-                # A cache-aligned section can extend past the prompt's short tail.
-                # Leave that whole suffix for the final model call.
                 if safe_step >= self._inputs_embeds.shape[1]:
                     return 0
                 return safe_step
@@ -1031,18 +1043,18 @@ class _PromptPrefill:
         prompt_kwargs: dict,
         key_len: int,
     ) -> dict:
-        if self._gemma4_image_prefill_sections is None:
+        if self._gemma4_image_prefill_runs is None:
             return prompt_kwargs
 
-        # Protected sections come from exact token-type runs, unlike the cache's
-        # potentially coarse image spans. Keep token types only for image queries
-        # so the mask patch need not scan an MLX array on every model call.
+        # These exact token-type runs are independent of the cache's potentially
+        # coarse image spans. Keep token types only for image queries so the mask
+        # patch need not scan an MLX array on every model call.
         suffix_start = len(self._all_tokens)
         query_start = self._processed_prefix_len - suffix_start
         query_end = key_len - suffix_start
         has_image = any(
-            section_start < query_end and query_start < section_end
-            for section_start, section_end in self._gemma4_image_prefill_sections
+            image_start < query_end and query_start < image_end
+            for image_start, image_end in self._gemma4_image_prefill_runs
         )
         if has_image:
             return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)

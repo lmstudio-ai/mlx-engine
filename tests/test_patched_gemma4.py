@@ -5,7 +5,7 @@ from mlx_vlm.models.cache import create_causal_mask
 
 from mlx_engine.model_kit.patches.gemma4 import (
     config_uses_bidirectional_visual_attention,
-    image_prefill_sections,
+    image_prefill_runs,
     patch_loaded_model,
     prepare_cached_suffix_prompt_kwargs,
     uses_bidirectional_visual_attention,
@@ -137,63 +137,75 @@ def test_gemma4_mask_patch_matches_transformers_attention_topology():
     assert not bool(sliding_mask[0, 0, 1, 4].item())
 
 
-def test_gemma4_image_prefill_sections_are_cache_aligned_and_suffix_relative():
+def test_gemma4_mask_patch_keeps_separate_image_runs_causal():
+    text_model = _Gemma4TextModel()
+    patch_loaded_model(_gemma4_model(text_model))
+    token_types = mx.array([[1, 1, 0, 1, 1]], dtype=mx.int32)
+
+    _, sliding_mask = text_model._make_masks(
+        mx.zeros((1, 5, 4), dtype=mx.float32),
+        [None, None],
+        token_types,
+    )
+
+    assert bool(sliding_mask[0, 0, 0, 1].item())
+    assert not bool(sliding_mask[0, 0, 1, 3].item())
+    assert bool(sliding_mask[0, 0, 3, 4].item())
+
+
+def test_gemma4_image_prefill_runs_are_suffix_relative():
     token_types = mx.zeros((1, 800), dtype=mx.int32)
     token_types[:, 88:188] = 1
     token_types[:, 588:688] = 1
 
-    sections = image_prefill_sections(
+    runs = image_prefill_runs(
         _gemma4_model(),
         {"mm_token_type_ids": token_types},
-        cached_prefix_len=512,
     )
 
-    assert sections == [(0, 256), (512, 768)]
+    assert runs == [(88, 188), (588, 688)]
 
 
-def test_gemma4_image_prefill_sections_merge_shared_cache_chunks():
+def test_gemma4_image_prefill_runs_keep_images_separate():
     token_types = mx.zeros((1, 700), dtype=mx.int32)
     token_types[:, 300:400] = 1
     token_types[:, 500:600] = 1
 
-    sections = image_prefill_sections(
+    runs = image_prefill_runs(
         _gemma4_model(),
         {"mm_token_type_ids": token_types},
-        cached_prefix_len=0,
     )
 
-    assert sections == [(256, 768)]
+    assert runs == [(300, 400), (500, 600)]
 
 
-def test_gemma4_image_prefill_sections_keep_touching_chunks_separate():
+def test_gemma4_image_prefill_runs_do_not_merge_neighboring_chunks():
     token_types = mx.zeros((1, 600), dtype=mx.int32)
     token_types[:, 100:150] = 1
     token_types[:, 300:350] = 1
 
-    sections = image_prefill_sections(
+    runs = image_prefill_runs(
         _gemma4_model(),
         {"mm_token_type_ids": token_types},
-        cached_prefix_len=0,
     )
 
-    assert sections == [(0, 256), (256, 512)]
+    assert runs == [(100, 150), (300, 350)]
 
 
-def test_gemma4_image_prefill_sections_support_legacy_token_types():
+def test_gemma4_image_prefill_runs_support_legacy_token_types():
     token_types = mx.zeros((1, 700), dtype=mx.int32)
     token_types[:, 300:400] = 1
 
-    sections = image_prefill_sections(
+    runs = image_prefill_runs(
         _gemma4_model(),
         {"token_type_ids": token_types},
-        cached_prefix_len=0,
     )
 
-    assert sections == [(256, 512)]
+    assert runs == [(300, 400)]
 
 
-def test_gemma4_image_prefill_sections_without_token_types_are_empty():
-    assert image_prefill_sections(_gemma4_model(), {}, cached_prefix_len=0) == []
+def test_gemma4_image_prefill_runs_without_token_types_are_empty():
+    assert image_prefill_runs(_gemma4_model(), {}) == []
 
 
 def test_gemma4_bidirectional_visual_detection_accepts_top_and_text_config():

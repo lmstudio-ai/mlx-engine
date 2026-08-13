@@ -157,6 +157,34 @@ def test_cache_store_commits_and_restores_prefix_records(cache_store):
     _assert_two_chunk_restore(loaded)
 
 
+def test_cache_store_backfills_aligned_kv_chunk_from_non_aligned_snapshot(
+    cache_store,
+):
+    prompt_input_ids = list(range(400))
+    chunks = build_prefix_cache_chunks(prompt_input_ids, [])
+
+    _save_chunk(
+        cache_store,
+        chunks[0],
+        chunks,
+        _rotating_prompt_cache(300),
+        save_state_checkpoint=False,
+    )
+
+    restore_plan = cache_store.plan_longest_prefix_restore(prompt_input_ids, [])
+    assert restore_plan is not None
+    loaded = cache_store.load_restore_plan(restore_plan)
+    kv_keys, _ = loaded.prompt_cache[0].state
+    rotating_keys, _ = loaded.prompt_cache[1].state
+    mx.eval(kv_keys, rotating_keys)
+
+    assert loaded.cached_prefix_len == 256
+    assert kv_keys.shape[2] == 256
+    assert rotating_keys.shape[2] == 256
+    assert kv_keys[0, 0, -1, 0].item() == 255
+    assert rotating_keys[0, 0, -1, 0].item() == 255
+
+
 def test_cache_store_eviction_preserves_shorter_prefix_restore(cache_store):
     prompt_input_ids = list(range(600))
     chunks = build_prefix_cache_chunks(prompt_input_ids, [])

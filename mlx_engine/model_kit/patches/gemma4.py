@@ -6,10 +6,6 @@ from typing import Any
 import mlx.core as mx
 from mlx_vlm.models.cache import create_causal_mask
 
-from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
-    DEFAULT_PREFIX_CHUNK_SIZE,
-)
-
 
 def is_unified_model_type(model_type: str | None) -> bool:
     return model_type is not None and model_type.startswith("gemma4_unified")
@@ -48,20 +44,15 @@ def _get_token_type_ids(prompt_kwargs: dict) -> mx.array | None:
     return token_types
 
 
-def image_prefill_sections(
+def image_prefill_runs(
     model: Any,
     prompt_kwargs: dict,
-    cached_prefix_len: int,
 ) -> list[tuple[int, int]] | None:
-    """Return suffix-relative cache-aligned sections prefill must not split.
+    """Return suffix-relative visual runs that prefill must not split.
 
     Gemma's token types are the source of truth for visual attention runs. Cache
     image spans can conservatively cover the whole prompt when image sentinels
     are unavailable, so they must remain separate from this prefill plan.
-
-    Sections include the surrounding partial 256-token cache chunks. This keeps
-    model-call endpoints on the prompt-cache grid: opaque SSM state is reusable
-    only when its cache-chunk boundary is also an exact prefill endpoint.
     """
     if not uses_bidirectional_visual_attention(model):
         return None
@@ -71,8 +62,8 @@ def image_prefill_sections(
         return []
 
     # Materialize once while building the request's prefill plan. Each contiguous
-    # type-1 run is one image's bidirectional soft-token block and must stay in a
-    # single model call; later scheduling uses only these Python-side sections.
+    # type-1 run is one bidirectional image block and must stay in a single model
+    # call; later scheduling uses only these Python-side ranges.
     image_runs: list[tuple[int, int]] = []
     image_start = None
     for index, token_type in enumerate(token_types.reshape(-1).tolist()):
@@ -85,35 +76,7 @@ def image_prefill_sections(
     if image_start is not None:
         image_runs.append((image_start, token_types.shape[1]))
 
-    sections: list[tuple[int, int]] = []
-    for image_start, image_end in image_runs:
-        absolute_start = cached_prefix_len + image_start
-        absolute_end = cached_prefix_len + image_end
-
-        # Expand the raw image run to its surrounding 256-token cache chunks.
-        # Adjusted model-call endpoints then remain valid cache checkpoints.
-        section_start = max(
-            cached_prefix_len,
-            (absolute_start // DEFAULT_PREFIX_CHUNK_SIZE) * DEFAULT_PREFIX_CHUNK_SIZE,
-        )
-        section_end = (
-            (absolute_end + DEFAULT_PREFIX_CHUNK_SIZE - 1)
-            // DEFAULT_PREFIX_CHUNK_SIZE
-            * DEFAULT_PREFIX_CHUNK_SIZE
-        )
-        # Prompt prefill indexes the uncached suffix, not the full prompt.
-        relative_section = (
-            section_start - cached_prefix_len,
-            section_end - cached_prefix_len,
-        )
-        # Coalesce overlapping envelopes. Keep touching envelopes separate: their
-        # shared cache boundary lies outside both image runs and is safe to use.
-        if sections and relative_section[0] < sections[-1][1]:
-            sections[-1] = (sections[-1][0], relative_section[1])
-        else:
-            sections.append(relative_section)
-
-    return sections
+    return image_runs
 
 
 def prepare_cached_suffix_prompt_kwargs(prompt_kwargs: dict, key_len: int) -> dict:
