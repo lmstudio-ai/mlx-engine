@@ -898,9 +898,15 @@ class _PromptPrefill:
                 aligned_start = (
                     absolute_image_start // DEFAULT_PREFIX_CHUNK_SIZE
                 ) * DEFAULT_PREFIX_CHUNK_SIZE - suffix_start
+                while aligned_start > processed_prompt_len and any(
+                    start < aligned_start < end
+                    for start, end in self._gemma4_image_prefill_runs
+                ):
+                    aligned_start -= DEFAULT_PREFIX_CHUNK_SIZE
 
-                # Prefer the cache grid before using an exact image boundary.
-                # Never exceed the configured step unless one image is longer.
+                # Prefer the nearest globally safe cache boundary before using an
+                # exact image boundary. Never exceed the configured step unless
+                # one image is itself longer.
                 if aligned_start > processed_prompt_len:
                     safe_boundary = aligned_start
                 elif image_end - processed_prompt_len <= self.prefill_step_size:

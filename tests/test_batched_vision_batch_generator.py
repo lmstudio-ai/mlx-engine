@@ -677,6 +677,48 @@ def test_batch_generator_splits_overlapping_gemma4_cache_envelopes(monkeypatch):
         assert not 500 < boundary < 600
 
 
+def test_batch_generator_aligned_fallback_does_not_split_earlier_image(monkeypatch):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _gemma4_unified_model()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=2_048,
+    )
+    prompt = list(range(2_500))
+    mm_token_type_ids = mx.zeros((1, len(prompt)), dtype=mx.int32)
+    mm_token_type_ids[:, 1_600:1_880] = 1
+    mm_token_type_ids[:, 1_882:2_162] = 1
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={"mm_token_type_ids": mm_token_type_ids},
+            prefix_cache_chunks=[],
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[
+                PromptImageSpan(start=1_600, end=1_880, image_hash="first"),
+                PromptImageSpan(start=1_882, end=2_162, image_hash="second"),
+            ],
+        )
+
+        generator.next()
+        generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [1_536, 964]
+
+
 def test_batch_generator_keeps_image_longer_than_prefill_step_whole(monkeypatch):
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
