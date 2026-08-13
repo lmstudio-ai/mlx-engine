@@ -134,10 +134,15 @@ def patch_loaded_model(model: Any) -> None:
         # image-block overlay only to sliding attention.
         masks = original_make_masks(h, cache, None)
         sliding_mask = next(
-            mask
-            for layer, mask in zip(self.layers, masks)
-            if layer.layer_type == "sliding_attention"
+            (
+                mask
+                for layer, mask in zip(self.layers, masks)
+                if layer.layer_type == "sliding_attention"
+            ),
+            None,
         )
+        if sliding_mask is None:
+            return masks
         if isinstance(sliding_mask, str):
             sliding_mask = create_causal_mask(
                 h.shape[1],
