@@ -106,9 +106,9 @@ def image_prefill_sections(
             section_start - cached_prefix_len,
             section_end - cached_prefix_len,
         )
-        # Nearby images can expand into overlapping or touching cache-aligned
-        # envelopes. Coalesce them into one protected prefill section.
-        if sections and relative_section[0] <= sections[-1][1]:
+        # Coalesce overlapping envelopes. Keep touching envelopes separate: their
+        # shared cache boundary lies outside both image runs and is safe to use.
+        if sections and relative_section[0] < sections[-1][1]:
             sections[-1] = (sections[-1][0], relative_section[1])
         else:
             sections.append(relative_section)

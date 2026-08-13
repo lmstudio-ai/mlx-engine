@@ -165,6 +165,20 @@ def test_gemma4_image_prefill_sections_merge_shared_cache_chunks():
     assert sections == [(256, 768)]
 
 
+def test_gemma4_image_prefill_sections_keep_touching_chunks_separate():
+    token_types = mx.zeros((1, 600), dtype=mx.int32)
+    token_types[:, 100:150] = 1
+    token_types[:, 300:350] = 1
+
+    sections = image_prefill_sections(
+        _gemma4_model(),
+        {"mm_token_type_ids": token_types},
+        cached_prefix_len=0,
+    )
+
+    assert sections == [(0, 256), (256, 512)]
+
+
 def test_gemma4_image_prefill_sections_support_legacy_token_types():
     token_types = mx.zeros((1, 700), dtype=mx.int32)
     token_types[:, 300:400] = 1
