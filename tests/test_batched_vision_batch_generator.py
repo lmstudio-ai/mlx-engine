@@ -141,6 +141,11 @@ class _FakeModel:
                     if kwargs.get("mm_token_type_ids") is None
                     else kwargs["mm_token_type_ids"].tolist()
                 ),
+                "token_type_ids": (
+                    None
+                    if kwargs.get("token_type_ids") is None
+                    else kwargs["token_type_ids"].tolist()
+                ),
             }
         )
         batch_size, seq_len = input_ids.shape
@@ -483,8 +488,12 @@ def test_batch_generator_slices_position_ids_and_saves_prefill_boundaries(
     ]
 
 
-def test_batch_generator_chunks_gemma4_around_image_boundaries(monkeypatch):
-    """Ordinary Gemma 4 chunks can share a call with a whole image block."""
+@pytest.mark.parametrize("token_type_key", ["mm_token_type_ids", "token_type_ids"])
+def test_batch_generator_uses_gemma4_token_types_when_cache_span_is_coarse(
+    monkeypatch,
+    token_type_key,
+):
+    """Cache fallback spans do not become protected attention-mask spans."""
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
@@ -507,11 +516,11 @@ def test_batch_generator_chunks_gemma4_around_image_boundaries(monkeypatch):
             inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
             sampler=_argmax_sampler,
             logits_processors=[],
-            prompt_kwargs={"mm_token_type_ids": mm_token_type_ids},
+            prompt_kwargs={token_type_key: mm_token_type_ids},
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[PromptImageSpan(start=600, end=700, image_hash="image")],
+            image_spans=[PromptImageSpan(start=0, end=len(prompt), image_hash="image")],
         )
 
         generator.next()
@@ -521,9 +530,48 @@ def test_batch_generator_chunks_gemma4_around_image_boundaries(monkeypatch):
         generator.close()
 
     assert [len(call["input_ids"][0]) for call in model.calls] == [512, 512, 276]
-    assert model.calls[0]["mm_token_type_ids"] is None
-    assert model.calls[1]["mm_token_type_ids"] == [[0] * 600 + [1] * 100 + [0] * 324]
-    assert model.calls[2]["mm_token_type_ids"] is None
+    assert model.calls[0][token_type_key] is None
+    assert model.calls[1][token_type_key] == [[0] * 600 + [1] * 100 + [0] * 324]
+    assert model.calls[2][token_type_key] is None
+
+
+def test_batch_generator_gemma4_without_token_types_chunks_normally(monkeypatch):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _gemma4_unified_model()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=4,
+    )
+    prompt = list(range(10))
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=[],
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[PromptImageSpan(start=0, end=len(prompt), image_hash="image")],
+        )
+
+        generator.next()
+        generator.next()
+        generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [4, 4, 2]
+    assert all(call["mm_token_type_ids"] is None for call in model.calls)
+    assert all(call["token_type_ids"] is None for call in model.calls)
 
 
 def test_batch_generator_aligns_gemma4_image_sections_to_cache_boundaries(

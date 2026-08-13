@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import mlx.core as mx
 from mlx_vlm.models.cache import create_causal_mask
 
-from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
 from mlx_engine.model_kit.patches.gemma4 import (
     config_uses_bidirectional_visual_attention,
     image_prefill_sections,
@@ -80,6 +79,24 @@ def test_gemma4_image_prompt_kwargs_without_cached_prefix_are_unchanged():
     assert prepared is prompt_kwargs
 
 
+def test_gemma4_cached_suffix_prompt_kwargs_support_legacy_token_types():
+    prompt_kwargs = {
+        "token_type_ids": mx.array([[0, 1, 1, 0]], dtype=mx.int32),
+    }
+
+    prepared = prepare_cached_suffix_prompt_kwargs(prompt_kwargs, key_len=7)
+
+    assert prepared["token_type_ids"].tolist() == [[0, 0, 0, 0, 1, 1, 0]]
+
+
+def test_gemma4_cached_suffix_prompt_kwargs_without_token_types_are_unchanged():
+    prompt_kwargs = {"unchanged": "value"}
+
+    prepared = prepare_cached_suffix_prompt_kwargs(prompt_kwargs, key_len=7)
+
+    assert prepared is prompt_kwargs
+
+
 def test_gemma4_suffix_visual_mask_patch_uses_query_rows_only():
     text_model = _Gemma4TextModel()
     patch_loaded_model(_gemma4_model(text_model))
@@ -121,13 +138,13 @@ def test_gemma4_mask_patch_matches_transformers_attention_topology():
 
 
 def test_gemma4_image_prefill_sections_are_cache_aligned_and_suffix_relative():
+    token_types = mx.zeros((1, 800), dtype=mx.int32)
+    token_types[:, 88:188] = 1
+    token_types[:, 588:688] = 1
+
     sections = image_prefill_sections(
         _gemma4_model(),
-        [
-            PromptImageSpan(start=300, end=400, image_hash="cached"),
-            PromptImageSpan(start=600, end=700, image_hash="first"),
-            PromptImageSpan(start=1_100, end=1_200, image_hash="second"),
-        ],
+        {"mm_token_type_ids": token_types},
         cached_prefix_len=512,
     )
 
@@ -135,16 +152,34 @@ def test_gemma4_image_prefill_sections_are_cache_aligned_and_suffix_relative():
 
 
 def test_gemma4_image_prefill_sections_merge_shared_cache_chunks():
+    token_types = mx.zeros((1, 700), dtype=mx.int32)
+    token_types[:, 300:400] = 1
+    token_types[:, 500:600] = 1
+
     sections = image_prefill_sections(
         _gemma4_model(),
-        [
-            PromptImageSpan(start=300, end=400, image_hash="first"),
-            PromptImageSpan(start=500, end=600, image_hash="second"),
-        ],
+        {"mm_token_type_ids": token_types},
         cached_prefix_len=0,
     )
 
     assert sections == [(256, 768)]
+
+
+def test_gemma4_image_prefill_sections_support_legacy_token_types():
+    token_types = mx.zeros((1, 700), dtype=mx.int32)
+    token_types[:, 300:400] = 1
+
+    sections = image_prefill_sections(
+        _gemma4_model(),
+        {"token_type_ids": token_types},
+        cached_prefix_len=0,
+    )
+
+    assert sections == [(256, 512)]
+
+
+def test_gemma4_image_prefill_sections_without_token_types_are_empty():
+    assert image_prefill_sections(_gemma4_model(), {}, cached_prefix_len=0) == []
 
 
 def test_gemma4_bidirectional_visual_detection_accepts_top_and_text_config():

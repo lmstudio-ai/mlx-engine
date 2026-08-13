@@ -8,7 +8,6 @@ from mlx_vlm.models.cache import create_causal_mask
 
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     DEFAULT_PREFIX_CHUNK_SIZE,
-    PromptImageSpan,
 )
 
 
@@ -42,16 +41,23 @@ def config_uses_bidirectional_visual_attention(config: dict) -> bool:
     )
 
 
+def _get_token_type_ids(prompt_kwargs: dict) -> mx.array | None:
+    token_types = prompt_kwargs.get("mm_token_type_ids")
+    if token_types is None:
+        token_types = prompt_kwargs.get("token_type_ids")
+    return token_types
+
+
 def image_prefill_sections(
     model: Any,
-    image_spans: list[PromptImageSpan],
+    prompt_kwargs: dict,
     cached_prefix_len: int,
 ) -> list[tuple[int, int]] | None:
     """Return suffix-relative cache-aligned sections prefill must not split.
 
-    Prepared image spans and Gemma 4 token types come from the same expanded
-    image-token runs. Cache restore rejects positions inside those spans before
-    constructing the suffix, so every remaining span starts at or after it.
+    Gemma's token types are the source of truth for visual attention runs. Cache
+    image spans can conservatively cover the whole prompt when image sentinels
+    are unavailable, so they must remain separate from this prefill plan.
 
     Sections include the surrounding partial 256-token cache chunks. This keeps
     model-call endpoints on the prompt-cache grid: opaque SSM state is reusable
@@ -60,21 +66,38 @@ def image_prefill_sections(
     if not uses_bidirectional_visual_attention(model):
         return None
 
+    token_types = _get_token_type_ids(prompt_kwargs)
+    if token_types is None:
+        return []
+
+    # Materialize once while building the request's prefill plan. Each contiguous
+    # type-1 run is one image's bidirectional soft-token block and must stay in a
+    # single model call; later scheduling uses only these Python-side sections.
+    image_runs: list[tuple[int, int]] = []
+    image_start = None
+    for index, token_type in enumerate(token_types.reshape(-1).tolist()):
+        if token_type == 1:
+            if image_start is None:
+                image_start = index
+        elif image_start is not None:
+            image_runs.append((image_start, index))
+            image_start = None
+    if image_start is not None:
+        image_runs.append((image_start, token_types.shape[1]))
+
     sections: list[tuple[int, int]] = []
-    for span in image_spans:
-        # Restores never end inside an image run, so an image that starts before
-        # the restored prefix is already cached in full.
-        if span.start < cached_prefix_len:
-            continue
+    for image_start, image_end in image_runs:
+        absolute_start = cached_prefix_len + image_start
+        absolute_end = cached_prefix_len + image_end
 
         # Expand the raw image run to its surrounding 256-token cache chunks.
         # Adjusted model-call endpoints then remain valid cache checkpoints.
         section_start = max(
             cached_prefix_len,
-            (span.start // DEFAULT_PREFIX_CHUNK_SIZE) * DEFAULT_PREFIX_CHUNK_SIZE,
+            (absolute_start // DEFAULT_PREFIX_CHUNK_SIZE) * DEFAULT_PREFIX_CHUNK_SIZE,
         )
         section_end = (
-            (span.end + DEFAULT_PREFIX_CHUNK_SIZE - 1)
+            (absolute_end + DEFAULT_PREFIX_CHUNK_SIZE - 1)
             // DEFAULT_PREFIX_CHUNK_SIZE
             * DEFAULT_PREFIX_CHUNK_SIZE
         )
@@ -94,23 +117,29 @@ def image_prefill_sections(
 
 
 def prepare_cached_suffix_prompt_kwargs(prompt_kwargs: dict, key_len: int) -> dict:
-    """Pad a known image slice's token types to line up with cached keys."""
-    token_types = prompt_kwargs["mm_token_type_ids"]
-    prefix_len = key_len - token_types.shape[1]
-    if prefix_len == 0:
-        return prompt_kwargs
+    """Pad visual token types to line up with cached keys when present."""
+    prepared = prompt_kwargs
+    for name in ("mm_token_type_ids", "token_type_ids"):
+        token_types = prompt_kwargs.get(name)
+        if token_types is None:
+            continue
 
-    prepared = dict(prompt_kwargs)
-    prepared["mm_token_type_ids"] = mx.concatenate(
-        [
-            mx.zeros(
-                (token_types.shape[0], prefix_len),
-                dtype=token_types.dtype,
-            ),
-            token_types,
-        ],
-        axis=1,
-    )
+        prefix_len = key_len - token_types.shape[1]
+        if prefix_len == 0:
+            continue
+
+        if prepared is prompt_kwargs:
+            prepared = dict(prompt_kwargs)
+        prepared[name] = mx.concatenate(
+            [
+                mx.zeros(
+                    (token_types.shape[0], prefix_len),
+                    dtype=token_types.dtype,
+                ),
+                token_types,
+            ],
+            axis=1,
+        )
     return prepared
 
 

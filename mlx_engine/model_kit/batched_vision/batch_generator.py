@@ -788,7 +788,7 @@ class _PromptPrefill:
         self._prefix_cache_save_state = prefix_cache_save_state
         self._gemma4_image_prefill_sections = gemma4_image_prefill_sections(
             model,
-            prefix_cache_save_state.image_spans,
+            prompt_kwargs,
             len(self._all_tokens),
         )
         # Restored exact hot caches may carry an existing row. Trimmed/disk
@@ -1034,21 +1034,25 @@ class _PromptPrefill:
         if self._gemma4_image_prefill_sections is None:
             return prompt_kwargs
 
-        # Prepared image spans exactly match contiguous image soft-token runs
-        # (`mm_token_type_ids == 1`). Keep token types only for image queries so
-        # the mask patch need not scan an MLX array.
-        query_start = self._processed_prefix_len
+        # Protected sections come from exact token-type runs, unlike the cache's
+        # potentially coarse image spans. Keep token types only for image queries
+        # so the mask patch need not scan an MLX array on every model call.
+        suffix_start = len(self._all_tokens)
+        query_start = self._processed_prefix_len - suffix_start
+        query_end = key_len - suffix_start
         has_image = any(
-            span.start < key_len and query_start < span.end
-            for span in self._prefix_cache_save_state.image_spans
+            section_start < query_end and query_start < section_end
+            for section_start, section_end in self._gemma4_image_prefill_sections
         )
         if has_image:
             return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
 
         # Multimodal text slices still carry an all-zero token-type array. Drop
-        # it so None remains the no-image sentinel for the patched mask builder.
+        # both supported names so None remains the no-image sentinel for the
+        # patched mask builder.
         prepared = dict(prompt_kwargs)
         prepared.pop("mm_token_type_ids", None)
+        prepared.pop("token_type_ids", None)
         return prepared
 
 
