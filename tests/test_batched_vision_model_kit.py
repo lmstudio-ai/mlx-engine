@@ -164,6 +164,7 @@ def test_insert_reports_full_prepared_prompt_length(monkeypatch):
     kit.model = SimpleNamespace(no_chunked_prefill=False)
     kit.model_type = "other_vlm"
     kit._uses_gemma4_bidirectional_visual_attention = False
+    kit._context_fit_result = None
     kit._vision_feature_memoizer = None
     kit._prompt_cache_coordinator = SimpleNamespace(
         save_prompt_cache_snapshot=lambda *_args, **_kwargs: None
