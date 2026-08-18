@@ -89,6 +89,21 @@ def test_extract_function_tool_specs_preserves_empty_schema():
     assert specs[0].to_openai_tool()["function"]["parameters"] == {}
 
 
+@pytest.mark.parametrize("description", [None, False, True, [], {}, 1])
+def test_extract_function_tool_specs_rejects_non_string_description(description):
+    with pytest.raises(
+        ToolCallingValidationError, match="description must be a string"
+    ):
+        extract_function_tool_specs(
+            [
+                {
+                    "type": "function",
+                    "function": {"name": "lookup", "description": description},
+                }
+            ]
+        )
+
+
 def test_parse_tool_choice_supports_only_auto_and_none_for_mvp():
     assert parse_tool_choice_value(None) is None
     assert parse_tool_choice_value("auto") == "auto"
@@ -267,6 +282,34 @@ def test_tool_calling_plan_rejects_invalid_strict_tool_arguments():
         ToolCallingValidationError,
         match="Strict tool call arguments.*count.*integer",
     ):
+        plan.parse_output(output)
+
+
+def test_tool_calling_plan_allows_empty_arguments_for_strict_tool_without_parameters():
+    plan = _plan({"type": "function", "function": {"name": "lookup", "strict": True}})
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
+    )
+
+    result = plan.parse_output(output)
+
+    assert plan.tool_specs[0].parameters == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    assert _arguments(result[0]) == {}
+
+
+def test_tool_calling_plan_rejects_arguments_for_strict_tool_without_parameters():
+    plan = _plan({"type": "function", "function": {"name": "lookup", "strict": True}})
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        "<parameter=query>weather</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    with pytest.raises(ToolCallingValidationError, match="Additional properties"):
         plan.parse_output(output)
 
 

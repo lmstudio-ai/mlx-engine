@@ -12,6 +12,11 @@ ToolCallIdFactory = Callable[[], str]
 SupportedToolChoice = Literal["none", "auto"]
 
 _DEFAULT_PARAMETERS_SCHEMA: JsonObject = {"type": "object", "properties": {}}
+_DEFAULT_STRICT_PARAMETERS_SCHEMA: JsonObject = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
 _FORCED_TOOL_CHOICE_ERROR = (
     "tool_choice='required' and named function tool_choice are not supported yet; "
     "use tool_choice='auto' or tool_choice='none'."
@@ -136,23 +141,30 @@ def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
             f"{prefix}.function.name must be a non-empty string"
         )
 
-    parameters = (
-        _DEFAULT_PARAMETERS_SCHEMA
-        if "parameters" not in function or function["parameters"] is None
-        else function["parameters"]
-    )
+    strict = function.get("strict") is True or tool.get("strict") is True
+    parameters_missing = "parameters" not in function or function["parameters"] is None
+    if parameters_missing:
+        parameters = (
+            _DEFAULT_STRICT_PARAMETERS_SCHEMA if strict else _DEFAULT_PARAMETERS_SCHEMA
+        )
+    else:
+        parameters = function["parameters"]
     if not isinstance(parameters, dict):
         raise ToolCallingValidationError(
             f"{prefix}.function.parameters must be an object"
         )
     _validate_parameters_schema(name, parameters)
 
-    description = function.get("description") or ""
+    description = "" if "description" not in function else function["description"]
+    if not isinstance(description, str):
+        raise ToolCallingValidationError(
+            f"{prefix}.function.description must be a string"
+        )
     return FunctionToolSpec(
         name=name,
         description=description,
         parameters=parameters,
-        strict=function.get("strict") is True or tool.get("strict") is True,
+        strict=strict,
     )
 
 
