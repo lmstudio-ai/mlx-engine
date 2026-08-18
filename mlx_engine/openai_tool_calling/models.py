@@ -81,7 +81,10 @@ def build_openai_tool_call(
         "function": {
             "name": tool_name,
             "arguments": json.dumps(
-                arguments, ensure_ascii=False, separators=(",", ":")
+                arguments,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
             ),
         },
     }

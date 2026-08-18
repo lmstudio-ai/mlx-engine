@@ -33,9 +33,7 @@ _GEMMA4_BLOCK_RE = re.compile(
     rf"{re.escape(GEMMA4_TOOL_CALL_START)}(.*?){re.escape(GEMMA4_TOOL_CALL_END)}",
     re.DOTALL,
 )
-_GEMMA4_CALL_RE = re.compile(
-    r"^\s*call:\s*([A-Za-z_][A-Za-z0-9_.$/:-]*)\s*(.*)$", re.DOTALL
-)
+_GEMMA4_CALL_PREFIX_RE = re.compile(r"^\s*call:\s*", re.DOTALL)
 _MUSE_GLIMMER_BLOCK_RE = re.compile(
     rf"{re.escape(MUSE_GLIMMER_ATEM_START)}(.*?){re.escape(MUSE_GLIMMER_ATEM_END)}",
     re.DOTALL,
@@ -146,9 +144,13 @@ def parse_qwen35_tool_argument_value(value: str) -> Any:
     if stripped_value == "":
         return ""
     try:
-        return json.loads(stripped_value)
-    except json.JSONDecodeError:
+        return json.loads(stripped_value, parse_constant=_reject_json_constant)
+    except ValueError:
         return stripped_value
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Unsupported JSON constant: {value}")
 
 
 def parse_gemma4_tool_calls(
@@ -159,13 +161,11 @@ def parse_gemma4_tool_calls(
 ) -> list[JsonObject]:
     calls: list[JsonObject] = []
     for block_match in _GEMMA4_BLOCK_RE.finditer(model_output):
-        call_match = _GEMMA4_CALL_RE.match(block_match.group(1))
-        if call_match is None:
+        split_call = _split_gemma4_tool_call(block_match.group(1), allowed_tool_names)
+        if split_call is None:
             continue
-        tool_name = call_match.group(1).strip()
-        if tool_name not in allowed_tool_names:
-            continue
-        arguments = parse_gemma4_arguments_object(call_match.group(2).strip())
+        tool_name, arguments_text = split_call
+        arguments = parse_gemma4_arguments_object(arguments_text.strip())
         if arguments is None:
             continue
         calls.append(
@@ -178,6 +178,20 @@ def parse_gemma4_tool_calls(
         )
 
     return calls
+
+
+def _split_gemma4_tool_call(
+    block_body: str,
+    allowed_tool_names: set[str],
+) -> tuple[str, str] | None:
+    prefix_match = _GEMMA4_CALL_PREFIX_RE.match(block_body)
+    if prefix_match is None:
+        return None
+    call_body = block_body[prefix_match.end() :]
+    for tool_name in sorted(allowed_tool_names, key=len, reverse=True):
+        if call_body.startswith(tool_name):
+            return tool_name, call_body[len(tool_name) :]
+    return None
 
 
 def parse_muse_glimmer_tool_calls(

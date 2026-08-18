@@ -11,6 +11,7 @@ from mlx_engine.openai_tool_calling import (
     parse_model_format_tool_calls,
     parse_tool_choice_value,
 )
+from mlx_engine.openai_tool_calling.models import build_openai_tool_call
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_CALL_END,
     GEMMA4_TOOL_CALL_START,
@@ -115,6 +116,12 @@ def test_parse_tool_choice_supports_only_auto_and_none_for_mvp():
         parse_tool_choice_value({"type": "function", "function": {"name": "lookup"}})
     with pytest.raises(ToolCallingValidationError, match="tool_choice"):
         parse_tool_choice_value("invalid")
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_build_openai_tool_call_rejects_non_finite_arguments(value):
+    with pytest.raises(ValueError, match="Out of range float values"):
+        build_openai_tool_call("lookup", {"value": value}, 0)
 
 
 def test_tool_calling_plan_accepts_valid_tool_parameter_schema():
@@ -404,6 +411,21 @@ def test_qwen35_tool_call_parses_multiple_calls_in_emission_order():
     assert _arguments(result[1]) == {"query": "weather"}
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_qwen35_tool_call_treats_non_finite_json_constants_as_text(constant):
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        f"<parameter=value>{constant}</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"value": constant}
+
+
 def test_parser_rejects_mixed_model_format_tool_calls():
     output = (
         f'{GEMMA4_TOOL_CALL_START}call:search{{query:<|"|>news<|"|>}}'
@@ -457,6 +479,23 @@ def test_gemma4_tool_call_parses_model_format_call_as_openai_tool_call():
     assert _arguments(call) == {"city": "Paris", "metadata": {"source": "wx"}}
 
 
+@pytest.mark.parametrize("tool_name", ["search-tool", "1search", "search web!"])
+def test_gemma4_tool_call_parses_llmster_forwarded_tool_names(tool_name):
+    output = (
+        f"{GEMMA4_TOOL_CALL_START}"
+        f'call:{tool_name}{{query:<|"|>weather<|"|>}}'
+        f"{GEMMA4_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool(tool_name)), id_factory=_id_factory()
+    )
+
+    assert len(result) == 1
+    assert result[0]["function"]["name"] == tool_name
+    assert _arguments(result[0]) == {"query": "weather"}
+
+
 def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
     output = (
         "prefix "
@@ -477,6 +516,23 @@ def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
     call = result[0]
     assert call["function"]["name"] == "lookup"
     assert _arguments(call) == {"query": "weather", "metadata": {"city": "Paris"}}
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_muse_glimmer_tool_call_treats_non_finite_json_constants_as_text(constant):
+    output = (
+        f"{MUSE_GLIMMER_ATEM_START}"
+        '<atem:invoke name="lookup">'
+        f'<atem:parameter name="value">{constant}</atem:parameter>'
+        "</atem:invoke>"
+        f"{MUSE_GLIMMER_ATEM_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"value": constant}
 
 
 def test_parser_ignores_unknown_model_format_blocks():
