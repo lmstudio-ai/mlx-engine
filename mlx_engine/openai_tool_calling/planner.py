@@ -72,6 +72,18 @@ def build_tool_calling_plan(
     if tool_choice is not None and tool_choice.mode == "none":
         tool_specs = []
 
+    if len(tool_specs) > 0 and response_json_schema is not None:
+        raise ToolCallingValidationError(
+            "response_format is not supported with active tools; "
+            "set tool_choice='none' or omit response_format."
+        )
+
+    if parallel_tool_calls and len(tool_specs) > 0:
+        raise ToolCallingValidationError(
+            "parallel_tool_calls=true is not supported with tools; "
+            "set parallel_tool_calls=false."
+        )
+
     if tool_choice is not None and tool_choice.is_forced:
         selected_tool_specs = _select_forced_tool_specs(tool_specs, tool_choice)
         allow_parallel_tool_calls = False

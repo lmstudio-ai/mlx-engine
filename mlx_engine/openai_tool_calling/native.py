@@ -107,7 +107,9 @@ def parse_qwen35_tool_calls(
     id_factory: ToolCallIdFactory | None = None,
 ) -> ParsedToolCalls:
     calls: list[JsonObject] = []
+    converted_block_spans: list[tuple[int, int]] = []
     for block_match in _QWEN35_BLOCK_RE.finditer(model_output):
+        block_call_count = len(calls)
         block_body = block_match.group(1)
         for function_match in _QWEN35_FUNCTION_RE.finditer(block_body):
             tool_name = function_match.group(1).strip()
@@ -131,10 +133,12 @@ def parse_qwen35_tool_calls(
                     id_factory=id_factory,
                 )
             )
+        if len(calls) > block_call_count:
+            converted_block_spans.append(block_match.span())
 
     return ParsedToolCalls(
         calls=calls,
-        remaining_text=_QWEN35_BLOCK_RE.sub(" ", model_output).strip(),
+        remaining_text=_remove_spans(model_output, converted_block_spans),
     )
 
 
@@ -156,6 +160,7 @@ def parse_gemma4_tool_calls(
     id_factory: ToolCallIdFactory | None = None,
 ) -> ParsedToolCalls:
     calls: list[JsonObject] = []
+    converted_block_spans: list[tuple[int, int]] = []
     for block_match in _GEMMA4_BLOCK_RE.finditer(model_output):
         call_match = _GEMMA4_CALL_RE.match(block_match.group(1))
         if call_match is None:
@@ -174,10 +179,11 @@ def parse_gemma4_tool_calls(
                 id_factory=id_factory,
             )
         )
+        converted_block_spans.append(block_match.span())
 
     return ParsedToolCalls(
         calls=calls,
-        remaining_text=_GEMMA4_BLOCK_RE.sub(" ", model_output).strip(),
+        remaining_text=_remove_spans(model_output, converted_block_spans),
     )
 
 
@@ -189,7 +195,9 @@ def parse_muse_glimmer_tool_calls(
     id_factory: ToolCallIdFactory | None = None,
 ) -> ParsedToolCalls:
     calls: list[JsonObject] = []
+    converted_block_spans: list[tuple[int, int]] = []
     for block_match in _MUSE_GLIMMER_BLOCK_RE.finditer(model_output):
+        block_call_count = len(calls)
         for invoke_match in _MUSE_GLIMMER_INVOKE_RE.finditer(block_match.group(1)):
             tool_name = invoke_match.group(1).strip()
             if tool_name not in allowed_tool_names:
@@ -212,11 +220,27 @@ def parse_muse_glimmer_tool_calls(
                     id_factory=id_factory,
                 )
             )
+        if len(calls) > block_call_count:
+            converted_block_spans.append(block_match.span())
 
     return ParsedToolCalls(
         calls=calls,
-        remaining_text=_MUSE_GLIMMER_BLOCK_RE.sub(" ", model_output).strip(),
+        remaining_text=_remove_spans(model_output, converted_block_spans),
     )
+
+
+def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    if len(spans) == 0:
+        return text.strip()
+
+    parts: list[str] = []
+    position = 0
+    for start, end in spans:
+        parts.append(text[position:start])
+        parts.append(" ")
+        position = end
+    parts.append(text[position:])
+    return "".join(parts).strip()
 
 
 def parse_gemma4_arguments_object(value: str) -> JsonObject | None:

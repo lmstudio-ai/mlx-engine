@@ -213,11 +213,62 @@ def test_tool_calling_plan_accepts_valid_tool_parameter_schema():
             )
         ],
         tool_choice_value="auto",
-        parallel_tool_calls=True,
+        parallel_tool_calls=False,
         response_json_schema=None,
     )
 
     assert plan.strategy == "native"
+
+
+def test_tool_calling_plan_rejects_parallel_tool_calls_with_active_tools():
+    with pytest.raises(ToolCallingValidationError, match="parallel_tool_calls"):
+        build_tool_calling_plan(
+            messages=[{"role": "user", "content": "Find Paris."}],
+            tools=[_tool("lookup")],
+            tool_choice_value="auto",
+            parallel_tool_calls=True,
+            response_json_schema=None,
+        )
+
+
+def test_tool_calling_plan_allows_parallel_flag_when_tool_choice_is_none():
+    plan = build_tool_calling_plan(
+        messages=[{"role": "user", "content": "Find Paris."}],
+        tools=[_tool("lookup")],
+        tool_choice_value="none",
+        parallel_tool_calls=True,
+        response_json_schema=None,
+    )
+
+    assert plan.strategy == "none"
+    assert not plan.has_active_tools
+
+
+def test_tool_calling_plan_rejects_response_format_with_active_tools():
+    with pytest.raises(ToolCallingValidationError, match="response_format"):
+        build_tool_calling_plan(
+            messages=[{"role": "user", "content": "Find Paris."}],
+            tools=[_tool("lookup")],
+            tool_choice_value="auto",
+            parallel_tool_calls=False,
+            response_json_schema='{"type":"object"}',
+        )
+
+
+def test_tool_calling_plan_allows_response_format_when_tool_choice_is_none():
+    response_schema = '{"type":"object"}'
+
+    plan = build_tool_calling_plan(
+        messages=[{"role": "user", "content": "Find Paris."}],
+        tools=[_tool("lookup")],
+        tool_choice_value="none",
+        parallel_tool_calls=False,
+        response_json_schema=response_schema,
+    )
+
+    assert plan.strategy == "none"
+    assert not plan.has_active_tools
+    assert plan.generation_json_schema == response_schema
 
 
 def test_tool_calling_plan_rejects_invalid_tool_parameter_schema():
@@ -234,7 +285,7 @@ def test_tool_calling_plan_rejects_invalid_tool_parameter_schema():
                 )
             ],
             tool_choice_value="required",
-            parallel_tool_calls=True,
+            parallel_tool_calls=False,
             response_json_schema=None,
         )
 
@@ -255,7 +306,7 @@ def test_tool_calling_plan_rejects_invalid_tool_parameter_schema_for_auto_choice
                 )
             ],
             tool_choice_value="auto",
-            parallel_tool_calls=True,
+            parallel_tool_calls=False,
             response_json_schema=None,
         )
 
@@ -265,7 +316,7 @@ def test_tool_calling_plan_uses_generic_json_for_required_choice():
         messages=[{"role": "user", "content": "Find Paris."}],
         tools=[_tool("lookup")],
         tool_choice_value="required",
-        parallel_tool_calls=True,
+        parallel_tool_calls=False,
         response_json_schema=None,
     )
 
@@ -286,14 +337,13 @@ def test_tool_calling_plan_uses_generic_json_for_required_choice():
 
 def test_tool_calling_plan_keeps_native_path_for_auto_choice():
     tools = [_tool("lookup")]
-    response_schema = '{"type":"object"}'
 
     plan = build_tool_calling_plan(
         messages=[{"role": "user", "content": "Find Paris."}],
         tools=tools,
         tool_choice_value="auto",
-        parallel_tool_calls=True,
-        response_json_schema=response_schema,
+        parallel_tool_calls=False,
+        response_json_schema=None,
     )
 
     assert plan.strategy == "native"
@@ -301,7 +351,7 @@ def test_tool_calling_plan_keeps_native_path_for_auto_choice():
     assert plan.template_tool_choice == "auto"
     assert plan.should_buffer_output
     assert plan.max_tool_calls == 1
-    assert plan.generation_json_schema == response_schema
+    assert plan.generation_json_schema is None
 
 
 def test_tool_calling_plan_returns_only_one_tool_call_for_serial_mvp():
@@ -309,7 +359,7 @@ def test_tool_calling_plan_returns_only_one_tool_call_for_serial_mvp():
         messages=[{"role": "user", "content": "Find Paris."}],
         tools=[_tool("lookup"), _tool("search")],
         tool_choice_value="auto",
-        parallel_tool_calls=True,
+        parallel_tool_calls=False,
         response_json_schema=None,
     )
     output = (
@@ -447,7 +497,7 @@ def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
     assert "suffix" in result.remaining_text
 
 
-def test_parser_removes_native_blocks_for_unknown_tool_names():
+def test_parser_leaves_unknown_native_blocks_as_text():
     output = (
         "prefix "
         f"{QWEN35_TOOL_CALL_START}<function=unknown></function>{QWEN35_TOOL_CALL_END}"
@@ -463,9 +513,25 @@ def test_parser_removes_native_blocks_for_unknown_tool_names():
     )
 
     assert result.calls == []
+    assert result.remaining_text == output.strip()
+
+
+def test_parser_removes_only_converted_native_blocks():
+    unknown_output = f"{GEMMA4_TOOL_CALL_START}call:unknown{{}}{GEMMA4_TOOL_CALL_END}"
+    output = (
+        "prefix "
+        f"{QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
+        f"{unknown_output}"
+        " suffix"
+    )
+
+    result = parse_openai_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert [call["function"]["name"] for call in result.calls] == ["lookup"]
     assert QWEN35_TOOL_CALL_START not in result.remaining_text
-    assert GEMMA4_TOOL_CALL_START not in result.remaining_text
-    assert MUSE_GLIMMER_ATEM_START not in result.remaining_text
+    assert unknown_output in result.remaining_text
     assert "prefix" in result.remaining_text
     assert "suffix" in result.remaining_text
 

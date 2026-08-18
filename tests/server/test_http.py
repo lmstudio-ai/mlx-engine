@@ -612,7 +612,7 @@ def test_vision_usage_uses_the_prepared_prompt_length():
     assert terminal_event["usage"]["prompt_tokens"] == 9
 
 
-def test_tools_return_one_tool_call_from_live_chat_endpoint():
+def test_tools_default_to_serial_tool_calls_from_live_chat_endpoint():
     output = (
         f"{QWEN35_TOOL_CALL_START}<function=lookup>"
         "<parameter=query>weather</parameter></function>"
@@ -642,7 +642,6 @@ def test_tools_return_one_tool_call_from_live_chat_endpoint():
         tokenize_fn=lambda _model_kit, _prompt: [1],
     )
     body = _request_body()
-    body["parallel_tool_calls"] = False
     body["tools"] = [
         {"type": "function", "function": {"name": "lookup"}},
         {"type": "function", "function": {"name": "search"}},
@@ -667,6 +666,116 @@ def test_tools_return_one_tool_call_from_live_chat_endpoint():
     assert tool_calls[0]["function"]["name"] == "lookup"
     assert json.loads(tool_calls[0]["function"]["arguments"]) == {"query": "weather"}
     assert events[1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_parallel_tool_calls_true_is_rejected_by_live_chat_endpoint():
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+    body = _request_body()
+    body["parallel_tool_calls"] = True
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+
+    with _running_server(runtime) as port:
+        status, response_body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 400
+    assert json.loads(response_body) == {
+        "error": {
+            "message": (
+                "parallel_tool_calls=true is not supported with tools; "
+                "set parallel_tool_calls=false."
+            )
+        }
+    }
+
+
+def test_response_format_with_active_tools_is_rejected_by_live_chat_endpoint():
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+    )
+    body = _request_body()
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+    body["response_format"] = {
+        "type": "json_schema",
+        "json_schema": {"schema": {"type": "object"}},
+    }
+
+    with _running_server(runtime) as port:
+        status, response_body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 400
+    assert json.loads(response_body) == {
+        "error": {
+            "message": (
+                "response_format is not supported with active tools; "
+                "set tool_choice='none' or omit response_format."
+            )
+        }
+    }
+
+
+def test_unknown_native_tool_block_is_returned_as_text():
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=unknown></function>{QWEN35_TOOL_CALL_END}"
+    )
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text=output,
+            tokens=[Token(id=10, text=output, logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+    body = _request_body()
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+
+    with _running_server(runtime) as port:
+        status, response_text = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 200
+    events = _parse_sse(response_text)
+    assert events[0] == {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": output},
+                "finish_reason": None,
+            }
+        ]
+    }
+    assert events[1]["choices"][0]["finish_reason"] == "stop"
 
 
 def test_generation_errors_are_returned_inside_the_stream():

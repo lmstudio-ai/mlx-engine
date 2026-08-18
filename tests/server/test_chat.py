@@ -273,6 +273,83 @@ def test_tools_are_forwarded_to_template_and_native_parser_plan():
     assert renderer.calls[0][1]["tool_choice"] == "auto"
 
 
+def test_parallel_tool_calls_true_is_rejected_with_active_tools():
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match="parallel_tool_calls"):
+        prepare_chat_generation_request(
+            _base_request(
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                parallel_tool_calls=True,
+            ),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
+def test_response_format_is_rejected_with_active_tools():
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match="response_format"):
+        prepare_chat_generation_request(
+            _base_request(
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"schema": {"type": "object"}},
+                },
+            ),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
+def test_response_format_is_allowed_with_tools_when_tool_choice_is_none():
+    renderer = _FakeRenderer()
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            tools=[{"type": "function", "function": {"name": "search"}}],
+            tool_choice="none",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"schema": schema},
+            },
+        ),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.strategy == "none"
+    assert json.loads(request.generation_kwargs["json_schema"]) == schema
+    assert "tools" not in renderer.calls[0][1]
+    assert "tool_choice" not in renderer.calls[0][1]
+
+
 def test_forced_tool_choice_uses_generic_json_schema_plan():
     renderer = _FakeRenderer()
 
@@ -288,7 +365,7 @@ def test_forced_tool_choice_uses_generic_json_schema_plan():
                 }
             ],
             tool_choice="required",
-            parallel_tool_calls=True,
+            parallel_tool_calls=False,
         ),
         model_kit=_FakeTextModelKit(renderer),
         supports_vision=False,

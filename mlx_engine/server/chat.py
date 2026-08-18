@@ -103,7 +103,7 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: float | None = None
     tools: list[dict] | None = None
     tool_choice: Any = None
-    parallel_tool_calls: bool = True
+    parallel_tool_calls: bool = False
     response_format: _JsonSchemaResponseFormat | None = None
     chat_template_kwargs: dict = Field(default_factory=dict)
 
