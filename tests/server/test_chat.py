@@ -267,8 +267,7 @@ def test_tools_are_forwarded_to_template_and_model_format_parser_plan():
         tokenize=lambda _model_kit, _prompt: [],
     )
 
-    assert request.tool_calling_plan.strategy == "model_format"
-    assert request.tool_calling_plan.max_tool_calls == 1
+    assert request.tool_calling_plan.has_active_tools
     assert renderer.calls[0][1]["tools"] == tools
     assert renderer.calls[0][1]["tool_choice"] == "auto"
 
@@ -320,7 +319,7 @@ def test_assistant_prefill_is_allowed_with_tools_when_tool_choice_is_none():
         tokenize=lambda _model_kit, _prompt: [],
     )
 
-    assert request.tool_calling_plan.strategy == "none"
+    assert not request.tool_calling_plan.has_active_tools
     messages, template_kwargs = renderer.calls[0]
     assert messages[-1] == {"role": "assistant", "content": "No tools:"}
     assert template_kwargs["add_generation_prompt"] is False
@@ -400,7 +399,7 @@ def test_response_format_is_allowed_with_tools_when_tool_choice_is_none():
         tokenize=lambda _model_kit, _prompt: [],
     )
 
-    assert request.tool_calling_plan.strategy == "none"
+    assert not request.tool_calling_plan.has_active_tools
     assert json.loads(request.generation_kwargs["json_schema"]) == schema
     assert "tools" not in renderer.calls[0][1]
     assert "tool_choice" not in renderer.calls[0][1]

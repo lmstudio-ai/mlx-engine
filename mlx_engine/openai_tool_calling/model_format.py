@@ -10,7 +10,6 @@ from mlx_engine.openai_tool_calling.models import (
     ParsedToolCalls,
     ToolCallIdFactory,
     build_openai_tool_call,
-    tool_names,
 )
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_CALL_END,
@@ -55,21 +54,16 @@ MODEL_FORMAT_TOOL_CALL_START_MARKERS = (
     GEMMA4_TOOL_CALL_START,
     MUSE_GLIMMER_ATEM_START,
 )
-# Compatibility alias for older internal callers.
-NATIVE_TOOL_CALL_START_MARKERS = MODEL_FORMAT_TOOL_CALL_START_MARKERS
 
 
-def parse_native_tool_calls(
+def parse_model_format_tool_calls(
     model_output: str,
     tool_specs: list[FunctionToolSpec],
     *,
     id_factory: ToolCallIdFactory | None = None,
 ) -> ParsedToolCalls:
-    """Parse supported native MLX tool-call text into OpenAI tool calls."""
-    if len(tool_specs) == 0:
-        return ParsedToolCalls(calls=[], remaining_text=model_output)
-
-    allowed_tool_names = tool_names(tool_specs)
+    """Parse supported model-format MLX tool-call text into OpenAI tool calls."""
+    allowed_tool_names = {tool.name for tool in tool_specs}
 
     qwen35_result = parse_qwen35_tool_calls(
         model_output,
@@ -97,13 +91,6 @@ def parse_native_tool_calls(
         ],
         remaining_text=muse_glimmer_result.remaining_text,
     )
-
-
-def remove_native_tool_call_blocks(text: str) -> str:
-    text = _QWEN35_BLOCK_RE.sub(" ", text)
-    text = _GEMMA4_BLOCK_RE.sub(" ", text)
-    text = _MUSE_GLIMMER_BLOCK_RE.sub(" ", text)
-    return text.strip()
 
 
 def parse_qwen35_tool_calls(

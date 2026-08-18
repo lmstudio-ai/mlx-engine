@@ -1158,7 +1158,7 @@ def test_response_format_with_active_tools_is_rejected_by_live_chat_endpoint():
     }
 
 
-def test_unknown_native_tool_block_is_returned_as_text():
+def test_unknown_model_format_tool_block_is_returned_as_text():
     output = (
         f"{QWEN35_TOOL_CALL_START}<function=unknown></function>{QWEN35_TOOL_CALL_END}"
     )

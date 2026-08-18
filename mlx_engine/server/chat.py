@@ -246,7 +246,6 @@ def prepare_chat_generation_request(
     response_json_schema = _response_json_schema(request)
     try:
         tool_calling_plan = build_tool_calling_plan(
-            messages=normalized_messages,
             tools=request.tools,
             tool_choice_value=request.tool_choice,
             parallel_tool_calls=request.parallel_tool_calls,
@@ -258,10 +257,9 @@ def prepare_chat_generation_request(
         raise ChatRequestError("Tool calling is not supported with assistant prefills.")
 
     template_kwargs = dict(request.chat_template_kwargs)
-    if tool_calling_plan.template_tools is not None:
+    if tool_calling_plan.has_active_tools:
         template_kwargs["tools"] = tool_calling_plan.template_tools
-    if tool_calling_plan.template_tool_choice is not None:
-        template_kwargs["tool_choice"] = tool_calling_plan.template_tool_choice
+        template_kwargs["tool_choice"] = "auto"
 
     if has_assistant_prefill:
         template_kwargs["continue_final_message"] = True
@@ -273,7 +271,7 @@ def prepare_chat_generation_request(
         model_kit,
         supports_vision=supports_vision,
     )(
-        tool_calling_plan.prompt_messages,
+        normalized_messages,
         tokenize=False,
         add_generation_prompt=add_generation_prompt,
         **template_kwargs,
@@ -284,8 +282,8 @@ def prepare_chat_generation_request(
         "temp": request.temperature,
         "top_k": request.top_k,
     }
-    if tool_calling_plan.generation_json_schema is not None:
-        generation_kwargs["json_schema"] = tool_calling_plan.generation_json_schema
+    if response_json_schema is not None:
+        generation_kwargs["json_schema"] = response_json_schema
     for name, value in (
         ("max_tokens", request.max_tokens),
         ("stop_strings", request.stop),

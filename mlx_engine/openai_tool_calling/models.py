@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import uuid
 from dataclasses import dataclass
@@ -10,23 +9,17 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 JsonObject = dict[str, Any]
 ToolCallIdFactory = Callable[[], str]
-ToolChoiceMode = Literal["none", "auto", "required", "function"]
+SupportedToolChoice = Literal["none", "auto"]
 
 _DEFAULT_PARAMETERS_SCHEMA: JsonObject = {"type": "object", "properties": {}}
+_FORCED_TOOL_CHOICE_ERROR = (
+    "tool_choice='required' and named function tool_choice are not supported yet; "
+    "use tool_choice='auto' or tool_choice='none'."
+)
 
 
 class ToolCallingValidationError(ValueError):
     """Raised when OpenAI tool-calling request fields are invalid."""
-
-
-@dataclass(frozen=True)
-class OpenAIToolChoice:
-    mode: ToolChoiceMode
-    function_name: str | None = None
-
-    @property
-    def is_forced(self) -> bool:
-        return self.mode in ("required", "function")
 
 
 @dataclass(frozen=True)
@@ -40,7 +33,7 @@ class FunctionToolSpec:
         function: JsonObject = {
             "name": self.name,
             "description": self.description,
-            "parameters": copy.deepcopy(self.parameters),
+            "parameters": self.parameters,
         }
         if self.strict:
             function["strict"] = True
@@ -53,49 +46,26 @@ class ParsedToolCalls:
     remaining_text: str
 
 
-def parse_tool_choice_value(value: Any) -> OpenAIToolChoice | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        if value in ("none", "auto", "required"):
-            return OpenAIToolChoice(mode=value)
-        raise ToolCallingValidationError(
-            "tool_choice must be one of: none, auto, required"
-        )
-    if isinstance(value, dict):
-        if value.get("type") != "function":
-            raise ToolCallingValidationError("tool_choice.type must be 'function'")
-        function = value.get("function")
-        if not isinstance(function, dict):
-            raise ToolCallingValidationError("tool_choice.function must be an object")
-        name = function.get("name")
-        if not isinstance(name, str) or name == "":
-            raise ToolCallingValidationError(
-                "tool_choice.function.name must be a non-empty string"
-            )
-        return OpenAIToolChoice(mode="function", function_name=name)
-    raise ToolCallingValidationError(
-        "tool_choice must be a string or function choice object"
-    )
+def parse_tool_choice_value(value: Any) -> SupportedToolChoice | None:
+    if value is None or value in ("none", "auto"):
+        return value
+    if value == "required" or isinstance(value, dict):
+        raise ToolCallingValidationError(_FORCED_TOOL_CHOICE_ERROR)
+    raise ToolCallingValidationError("tool_choice must be 'none' or 'auto'.")
 
 
-def extract_function_tool_specs(tools: list[Any] | None) -> list[FunctionToolSpec]:
+def extract_function_tool_specs(tools: list[dict] | None) -> list[FunctionToolSpec]:
     if tools is None:
         return []
 
     specs = [_parse_function_tool(tool, index) for index, tool in enumerate(tools)]
-    seen_names: set[str] = set()
-    for spec in specs:
-        if spec.name in seen_names:
-            raise ToolCallingValidationError(
-                f"duplicate function tool name: {spec.name}"
-            )
-        seen_names.add(spec.name)
+    names = [spec.name for spec in specs]
+    duplicate_names = {name for name in names if names.count(name) > 1}
+    if duplicate_names:
+        raise ToolCallingValidationError(
+            f"duplicate function tool name: {sorted(duplicate_names)[0]}"
+        )
     return specs
-
-
-def tool_names(tool_specs: list[FunctionToolSpec]) -> set[str]:
-    return {tool.name for tool in tool_specs}
 
 
 def build_openai_tool_call(
@@ -123,38 +93,25 @@ def validate_strict_tool_calls(
     tool_specs: list[FunctionToolSpec],
 ) -> None:
     strict_tool_specs = {tool.name: tool for tool in tool_specs if tool.strict}
-    if len(strict_tool_specs) == 0:
-        return
-
     for tool_call in parsed_tool_calls.calls:
-        function = tool_call.get("function")
-        if not isinstance(function, dict):
-            continue
-        tool_name = function.get("name")
-        if not isinstance(tool_name, str):
-            continue
-        tool_spec = strict_tool_specs.get(tool_name)
+        function = tool_call["function"]
+        tool_spec = strict_tool_specs.get(function["name"])
         if tool_spec is None:
             continue
-        arguments = _tool_call_arguments_object(tool_name, function)
+        arguments = _tool_call_arguments_object(tool_spec.name, function)
         try:
             Draft202012Validator(tool_spec.parameters).validate(arguments)
         except ValidationError as error:
             location = f" at {error.json_path}" if error.json_path != "$" else ""
             raise ToolCallingValidationError(
-                f"Strict tool call arguments for function `{tool_name}` do not "
+                f"Strict tool call arguments for function `{tool_spec.name}` do not "
                 f"match the parameters schema{location}: {error.message}"
             ) from error
 
 
 def _tool_call_arguments_object(tool_name: str, function: JsonObject) -> JsonObject:
-    raw_arguments = function.get("arguments")
-    if not isinstance(raw_arguments, str):
-        raise ToolCallingValidationError(
-            f"Strict tool call arguments for function `{tool_name}` must be a JSON object."
-        )
     try:
-        arguments = json.loads(raw_arguments)
+        arguments = json.loads(function["arguments"])
     except json.JSONDecodeError as error:
         raise ToolCallingValidationError(
             f"Strict tool call arguments for function `{tool_name}` must be valid JSON."
@@ -170,10 +127,8 @@ def default_tool_call_id() -> str:
     return f"call_{uuid.uuid4().hex}"
 
 
-def _parse_function_tool(tool: Any, index: int) -> FunctionToolSpec:
+def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
     prefix = f"tools[{index}]"
-    if not isinstance(tool, dict):
-        raise ToolCallingValidationError(f"{prefix} must be an object")
     if tool.get("type") != "function":
         raise ToolCallingValidationError(f"{prefix}.type must be 'function'")
 
@@ -187,20 +142,17 @@ def _parse_function_tool(tool: Any, index: int) -> FunctionToolSpec:
             f"{prefix}.function.name must be a non-empty string"
         )
 
-    parameters = function.get("parameters", _DEFAULT_PARAMETERS_SCHEMA)
-    if parameters is None:
-        parameters = _DEFAULT_PARAMETERS_SCHEMA
+    parameters = function.get("parameters") or _DEFAULT_PARAMETERS_SCHEMA
     if not isinstance(parameters, dict):
         raise ToolCallingValidationError(
             f"{prefix}.function.parameters must be an object"
         )
-    parameters = copy.deepcopy(parameters)
     _validate_parameters_schema(name, parameters)
 
-    description = function.get("description")
+    description = function.get("description") or ""
     return FunctionToolSpec(
         name=name,
-        description=description if isinstance(description, str) else "",
+        description=description,
         parameters=parameters,
         strict=function.get("strict") is True or tool.get("strict") is True,
     )

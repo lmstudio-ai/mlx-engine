@@ -45,41 +45,38 @@ _MAX_TOOL_CALL_BUFFER_BYTES = 1024 * 1024
 
 
 class _ToolAwareOutputBuffer:
-    def __init__(self, markers: tuple[str, ...], max_buffer_bytes: int):
-        self._markers = markers
-        self._lookbehind_chars = max((len(marker) for marker in markers), default=1) - 1
+    def __init__(self, max_buffer_bytes: int):
+        self._lookbehind_chars = (
+            max(len(marker) for marker in MODEL_FORMAT_TOOL_CALL_START_MARKERS) - 1
+        )
         self._max_buffer_bytes = max_buffer_bytes
         self._pending_text = ""
         self._tool_output_parts: list[str] = []
         self._tool_output_bytes = 0
         self.tool_output_started = False
 
-    def append(self, text: str) -> list[str]:
-        if text == "":
-            return []
+    def append(self, text: str) -> str:
         if self.tool_output_started:
             self._append_tool_output(text)
-            return []
+            return ""
 
         self._pending_text += text
-        marker_index = _first_marker_index(self._pending_text, self._markers)
+        marker_index = _first_tool_marker_index(self._pending_text)
         if marker_index is not None:
             prefix = self._pending_text[:marker_index]
             self._append_tool_output(self._pending_text[marker_index:])
             self._pending_text = ""
             self.tool_output_started = True
-            return [prefix] if prefix != "" else []
+            return prefix
 
         if len(self._pending_text) <= self._lookbehind_chars:
-            return []
+            return ""
         flush_text = self._pending_text[: -self._lookbehind_chars]
         self._pending_text = self._pending_text[-self._lookbehind_chars :]
-        return [flush_text] if flush_text != "" else []
+        return flush_text
 
     def finish_content(self) -> str:
-        content = self._pending_text
-        self._pending_text = ""
-        return content
+        return self._pending_text
 
     def tool_output(self) -> str:
         return "".join(self._tool_output_parts)
@@ -94,9 +91,13 @@ class _ToolAwareOutputBuffer:
         self._tool_output_parts.append(text)
 
 
-def _first_marker_index(text: str, markers: tuple[str, ...]) -> int | None:
-    indexes = [index for marker in markers if (index := text.find(marker)) != -1]
-    return min(indexes) if len(indexes) > 0 else None
+def _first_tool_marker_index(text: str) -> int | None:
+    indexes = [
+        index
+        for marker in MODEL_FORMAT_TOOL_CALL_START_MARKERS
+        if (index := text.find(marker)) != -1
+    ]
+    return min(indexes) if indexes else None
 
 
 class _ClientConnectionError(Exception):
@@ -361,10 +362,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         stop_condition: GenerationStopCondition | None = None
         tool_calling_plan = request.tool_calling_plan
         tool_output_buffer = (
-            _ToolAwareOutputBuffer(
-                MODEL_FORMAT_TOOL_CALL_START_MARKERS,
-                _MAX_TOOL_CALL_BUFFER_BYTES,
-            )
+            _ToolAwareOutputBuffer(_MAX_TOOL_CALL_BUFFER_BYTES)
             if tool_calling_plan.has_active_tools
             else None
         )
@@ -373,7 +371,8 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             completion_tokens += len(result.tokens)
             if result.text != "":
                 if tool_output_buffer is not None:
-                    for content_delta in tool_output_buffer.append(result.text):
+                    content_delta = tool_output_buffer.append(result.text)
+                    if content_delta != "":
                         self._write_content_delta(content_delta)
                 else:
                     self._write_content_delta(result.text)
@@ -388,7 +387,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
                 parsed_tool_calls = tool_calling_plan.parse_output(
                     tool_output_buffer.tool_output()
                 )
-                if len(parsed_tool_calls.calls) > tool_calling_plan.max_tool_calls:
+                if len(parsed_tool_calls.calls) > 1:
                     raise RuntimeError(
                         "The model produced multiple tool calls, but this server only "
                         "supports one tool call per response."
