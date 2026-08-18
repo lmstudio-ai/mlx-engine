@@ -24,6 +24,7 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 - `response_format` with active tools. Use `tool_choice: "none"` if structured output should take precedence over provided tools.
 - Assistant prefill with active tools or structured output. Plain no-tool requests still support assistant prefill.
 - Strict constrained decoding for tool arguments. `strict: true` is validation only; invalid generated arguments produce a stream error.
+- Mixed model-format dialects in one response. A response must use only one of the supported Qwen, Gemma, or Muse tool-call formats.
 
 ## Streaming behavior
 

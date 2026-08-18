@@ -21,11 +21,16 @@ from mlx_engine.tool_protocols import (
 )
 
 
-def _tool(name: str, parameters=None, *, strict: bool = False):
+_MISSING = object()
+
+
+def _tool(name: str, parameters=_MISSING, *, strict: bool = False):
     function = {
         "name": name,
         "description": f"Call {name}",
-        "parameters": parameters or {"type": "object", "properties": {}},
+        "parameters": {"type": "object", "properties": {}}
+        if parameters is _MISSING
+        else parameters,
     }
     if strict:
         function["strict"] = True
@@ -67,6 +72,21 @@ def test_extract_function_tool_specs_requires_openai_function_tools():
         ToolCallingValidationError, match="duplicate function tool name"
     ):
         _specs(_tool("lookup"), _tool("lookup"))
+
+
+@pytest.mark.parametrize("parameters", [False, [], "", 0])
+def test_extract_function_tool_specs_rejects_falsy_non_object_parameters(parameters):
+    with pytest.raises(
+        ToolCallingValidationError, match="parameters must be an object"
+    ):
+        _specs(_tool("lookup", parameters))
+
+
+def test_extract_function_tool_specs_preserves_empty_schema():
+    specs = _specs(_tool("lookup", {}))
+
+    assert specs[0].parameters == {}
+    assert specs[0].to_openai_tool()["function"]["parameters"] == {}
 
 
 def test_parse_tool_choice_supports_only_auto_and_none_for_mvp():
@@ -344,6 +364,21 @@ def test_qwen35_tool_call_parses_multiple_calls_in_emission_order():
     ]
     assert _arguments(result.calls[0]) == {}
     assert _arguments(result.calls[1]) == {"query": "weather"}
+
+
+def test_parser_rejects_mixed_model_format_tool_calls():
+    output = (
+        f'{GEMMA4_TOOL_CALL_START}call:search{{query:<|"|>news<|"|>}}'
+        f"{GEMMA4_TOOL_CALL_END}"
+        f"{QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
+    )
+
+    with pytest.raises(ToolCallingValidationError, match="Mixed model-format"):
+        parse_model_format_tool_calls(
+            output,
+            _specs(_tool("lookup"), _tool("search")),
+            id_factory=_id_factory(),
+        )
 
 
 def test_gemma4_argument_parser_supports_model_format_object_syntax():

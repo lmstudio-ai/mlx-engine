@@ -142,7 +142,11 @@ def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
             f"{prefix}.function.name must be a non-empty string"
         )
 
-    parameters = function.get("parameters") or _DEFAULT_PARAMETERS_SCHEMA
+    parameters = (
+        _DEFAULT_PARAMETERS_SCHEMA
+        if "parameters" not in function or function["parameters"] is None
+        else function["parameters"]
+    )
     if not isinstance(parameters, dict):
         raise ToolCallingValidationError(
             f"{prefix}.function.parameters must be an object"

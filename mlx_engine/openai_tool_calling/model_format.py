@@ -9,6 +9,7 @@ from mlx_engine.openai_tool_calling.models import (
     JsonObject,
     ParsedToolCalls,
     ToolCallIdFactory,
+    ToolCallingValidationError,
     build_openai_tool_call,
 )
 from mlx_engine.tool_protocols import (
@@ -83,6 +84,11 @@ def parse_model_format_tool_calls(
         starting_index=len(qwen35_result.calls) + len(gemma4_result.calls),
         id_factory=id_factory,
     )
+    _reject_mixed_model_formats(
+        qwen35_calls=len(qwen35_result.calls),
+        gemma4_calls=len(gemma4_result.calls),
+        muse_glimmer_calls=len(muse_glimmer_result.calls),
+    )
     return ParsedToolCalls(
         calls=[
             *qwen35_result.calls,
@@ -91,6 +97,22 @@ def parse_model_format_tool_calls(
         ],
         remaining_text=muse_glimmer_result.remaining_text,
     )
+
+
+def _reject_mixed_model_formats(
+    *,
+    qwen35_calls: int,
+    gemma4_calls: int,
+    muse_glimmer_calls: int,
+) -> None:
+    used_formats = sum(
+        call_count > 0
+        for call_count in (qwen35_calls, gemma4_calls, muse_glimmer_calls)
+    )
+    if used_formats > 1:
+        raise ToolCallingValidationError(
+            "Mixed model-format tool calls are not supported in one response."
+        )
 
 
 def parse_qwen35_tool_calls(
