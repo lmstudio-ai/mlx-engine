@@ -319,6 +319,11 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
 
         if tool_calling_plan.should_buffer_output:
             parsed_tool_calls = tool_calling_plan.parse_output("".join(output_parts))
+            if len(parsed_tool_calls.calls) > tool_calling_plan.max_tool_calls:
+                raise RuntimeError(
+                    "The model produced multiple tool calls, but this server only "
+                    "supports one tool call per response."
+                )
             if len(parsed_tool_calls.calls) > 0:
                 self._write_tool_calls_delta(parsed_tool_calls.calls)
                 self._write_sse_json(
@@ -331,12 +336,6 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._write_bytes(b"data: [DONE]\n\n")
                 return
-
-            if tool_calling_plan.requires_tool_call:
-                raise RuntimeError(
-                    "A forced tool_choice was specified, but the model did not "
-                    "produce a valid tool call."
-                )
 
             if parsed_tool_calls.remaining_text != "":
                 self._write_content_delta(parsed_tool_calls.remaining_text)

@@ -350,33 +350,37 @@ def test_response_format_is_allowed_with_tools_when_tool_choice_is_none():
     assert "tool_choice" not in renderer.calls[0][1]
 
 
-def test_forced_tool_choice_uses_generic_json_schema_plan():
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "search"}},
+    ],
+)
+def test_forced_tool_choice_is_rejected_before_rendering(tool_choice):
     renderer = _FakeRenderer()
 
-    request = prepare_chat_generation_request(
-        _base_request(
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "search",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ],
-            tool_choice="required",
-            parallel_tool_calls=False,
-        ),
-        model_kit=_FakeTextModelKit(renderer),
-        supports_vision=False,
-        tokenize=lambda _model_kit, _prompt: [],
-    )
+    with pytest.raises(ChatRequestError, match="not supported"):
+        prepare_chat_generation_request(
+            _base_request(
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                tool_choice=tool_choice,
+                parallel_tool_calls=False,
+            ),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
 
-    assert request.tool_calling_plan.strategy == "generic_json"
-    assert "json_schema" in request.generation_kwargs
-    assert "Tool calling instructions:" in renderer.calls[0][0][0]["content"]
-    schema = json.loads(request.generation_kwargs["json_schema"])
-    assert schema["properties"]["tool_calls"]["maxItems"] == 1
+    assert renderer.calls == []
 
 
 def test_invalid_tool_schema_is_rejected_before_rendering():
@@ -439,12 +443,12 @@ def test_unsupported_response_format_is_rejected():
         )
 
 
-def test_structured_output_with_assistant_prefill_is_rejected():
+def test_final_assistant_message_is_rejected():
     renderer = _FakeRenderer()
 
     with pytest.raises(
         ChatRequestError,
-        match="Structured output is not supported with assistant prefills",
+        match="Assistant prefills are not supported",
     ):
         prepare_chat_generation_request(
             _base_request(
@@ -452,10 +456,6 @@ def test_structured_output_with_assistant_prefill_is_rejected():
                     {"role": "user", "content": "Respond with JSON"},
                     {"role": "assistant", "content": '{"answer":'},
                 ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {"schema": {"type": "object"}},
-                },
             ),
             model_kit=_FakeTextModelKit(renderer),
             supports_vision=False,
@@ -463,27 +463,6 @@ def test_structured_output_with_assistant_prefill_is_rejected():
         )
 
     assert renderer.calls == []
-
-
-def test_final_assistant_message_is_rendered_as_a_prefill():
-    renderer = _FakeRenderer()
-
-    prepare_chat_generation_request(
-        _base_request(
-            messages=[
-                {"role": "user", "content": "Respond with JSON"},
-                {"role": "assistant", "content": '{"answer":'},
-            ]
-        ),
-        model_kit=_FakeTextModelKit(renderer),
-        supports_vision=False,
-        tokenize=lambda _model_kit, _prompt: [],
-    )
-
-    messages, template_kwargs = renderer.calls[0]
-    assert messages[-1] == {"role": "assistant", "content": '{"answer":'}
-    assert template_kwargs["add_generation_prompt"] is False
-    assert template_kwargs["continue_final_message"] is True
 
 
 @pytest.mark.parametrize(

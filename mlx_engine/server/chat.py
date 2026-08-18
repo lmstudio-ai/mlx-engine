@@ -222,10 +222,8 @@ def prepare_chat_generation_request(
     has_assistant_prefill = bool(
         request.messages and request.messages[-1].role == "assistant"
     )
-    if request.response_format is not None and has_assistant_prefill:
-        raise ChatRequestError(
-            "Structured output is not supported with assistant prefills."
-        )
+    if has_assistant_prefill:
+        raise ChatRequestError("Assistant prefills are not supported.")
 
     normalized_messages, images_b64 = normalize_messages(
         request.messages,
@@ -261,19 +259,13 @@ def prepare_chat_generation_request(
     if tool_calling_plan.template_tool_choice is not None:
         template_kwargs["tool_choice"] = tool_calling_plan.template_tool_choice
 
-    if has_assistant_prefill:
-        template_kwargs["continue_final_message"] = True
-        add_generation_prompt = False
-    else:
-        add_generation_prompt = True
-
     prompt = _get_chat_template(
         model_kit,
         supports_vision=supports_vision,
     )(
         tool_calling_plan.prompt_messages,
         tokenize=False,
-        add_generation_prompt=add_generation_prompt,
+        add_generation_prompt=True,
         **template_kwargs,
     )
 

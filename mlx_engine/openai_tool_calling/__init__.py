@@ -1,9 +1,3 @@
-from mlx_engine.openai_tool_calling.generic_json import (
-    add_generic_tool_instruction_to_messages,
-    build_generic_tool_call_instruction,
-    build_generic_tool_call_response_schema,
-    parse_generic_tool_call_response,
-)
 from mlx_engine.openai_tool_calling.models import (
     FunctionToolSpec,
     JsonObject,
@@ -41,15 +35,11 @@ __all__ = [
     "ToolCallingPlan",
     "ToolCallingValidationError",
     "ToolCallIdFactory",
-    "add_generic_tool_instruction_to_messages",
-    "build_generic_tool_call_instruction",
-    "build_generic_tool_call_response_schema",
     "build_openai_tool_call",
     "build_tool_calling_plan",
     "extract_function_tool_specs",
     "parse_gemma4_arguments_object",
     "parse_gemma4_tool_calls",
-    "parse_generic_tool_call_response",
     "parse_muse_glimmer_tool_calls",
     "parse_native_tool_calls",
     "parse_openai_tool_calls",
