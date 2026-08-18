@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 from mlx_engine.openai_tool_calling.models import (
     FunctionToolSpec,
     JsonObject,
     ToolCallIdFactory,
-    ToolCallingValidationError,
     build_openai_tool_call,
 )
 from mlx_engine.tool_protocols import (
@@ -29,10 +28,6 @@ _QWEN35_FUNCTION_RE = re.compile(
     re.DOTALL,
 )
 _QWEN35_PARAMETER_RE = re.compile(r"<parameter=([^>]+)>(.*?)</parameter>", re.DOTALL)
-_GEMMA4_BLOCK_RE = re.compile(
-    rf"{re.escape(GEMMA4_TOOL_CALL_START)}(.*?){re.escape(GEMMA4_TOOL_CALL_END)}",
-    re.DOTALL,
-)
 _GEMMA4_CALL_PREFIX_RE = re.compile(r"^\s*call:\s*", re.DOTALL)
 _MUSE_GLIMMER_BLOCK_RE = re.compile(
     rf"{re.escape(MUSE_GLIMMER_ATEM_START)}(.*?){re.escape(MUSE_GLIMMER_ATEM_END)}",
@@ -47,6 +42,13 @@ _MUSE_GLIMMER_PARAMETER_RE = re.compile(
 _GEMMA4_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_.$/-]+")
 _GEMMA4_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 _GEMMA4_STRING_DELIMITER = '<|"|>'
+ModelToolCallFormat = Literal["auto", "qwen35", "gemma4", "muse_glimmer"]
+_SelectedModelToolCallFormat = Literal["qwen35", "gemma4", "muse_glimmer"]
+_MODEL_FORMAT_MARKERS: tuple[tuple[_SelectedModelToolCallFormat, str], ...] = (
+    ("qwen35", QWEN35_TOOL_CALL_START),
+    ("gemma4", GEMMA4_TOOL_CALL_START),
+    ("muse_glimmer", MUSE_GLIMMER_ATEM_START),
+)
 
 
 def parse_model_format_tool_calls(
@@ -54,55 +56,46 @@ def parse_model_format_tool_calls(
     tool_specs: list[FunctionToolSpec],
     *,
     id_factory: ToolCallIdFactory | None = None,
+    model_format: ModelToolCallFormat = "auto",
 ) -> list[JsonObject]:
     """Parse supported model-format MLX tool-call text into OpenAI tool calls."""
     allowed_tool_names = {tool.name for tool in tool_specs}
+    selected_format = _select_model_tool_call_format(model_output, model_format)
+    if selected_format is None:
+        return []
+    if selected_format == "qwen35":
+        return parse_qwen35_tool_calls(
+            model_output,
+            allowed_tool_names,
+            id_factory=id_factory,
+        )
+    if selected_format == "gemma4":
+        return parse_gemma4_tool_calls(
+            model_output,
+            allowed_tool_names,
+            id_factory=id_factory,
+        )
+    return parse_muse_glimmer_tool_calls(
+        model_output,
+        allowed_tool_names,
+        id_factory=id_factory,
+    )
 
-    qwen35_calls = parse_qwen35_tool_calls(
-        model_output,
-        allowed_tool_names,
-        id_factory=id_factory,
-    )
-    gemma4_calls = parse_gemma4_tool_calls(
-        model_output,
-        allowed_tool_names,
-        id_factory=id_factory,
-    )
-    muse_glimmer_calls = parse_muse_glimmer_tool_calls(
-        model_output,
-        allowed_tool_names,
-        id_factory=id_factory,
-    )
-    _reject_mixed_model_formats(
-        qwen35_call_count=len(qwen35_calls),
-        gemma4_call_count=len(gemma4_calls),
-        muse_glimmer_call_count=len(muse_glimmer_calls),
-    )
-    return [
-        *qwen35_calls,
-        *gemma4_calls,
-        *muse_glimmer_calls,
+
+def _select_model_tool_call_format(
+    model_output: str,
+    model_format: ModelToolCallFormat,
+) -> _SelectedModelToolCallFormat | None:
+    if model_format != "auto":
+        return model_format
+    marker_positions = [
+        (position, marker_format)
+        for marker_format, marker in _MODEL_FORMAT_MARKERS
+        if (position := model_output.find(marker)) >= 0
     ]
-
-
-def _reject_mixed_model_formats(
-    *,
-    qwen35_call_count: int,
-    gemma4_call_count: int,
-    muse_glimmer_call_count: int,
-) -> None:
-    used_formats = sum(
-        call_count > 0
-        for call_count in (
-            qwen35_call_count,
-            gemma4_call_count,
-            muse_glimmer_call_count,
-        )
-    )
-    if used_formats > 1:
-        raise ToolCallingValidationError(
-            "Mixed model-format tool calls are not supported in one response."
-        )
+    if len(marker_positions) == 0:
+        return None
+    return min(marker_positions)[1]
 
 
 def parse_qwen35_tool_calls(
@@ -160,14 +153,21 @@ def parse_gemma4_tool_calls(
     id_factory: ToolCallIdFactory | None = None,
 ) -> list[JsonObject]:
     calls: list[JsonObject] = []
-    for block_match in _GEMMA4_BLOCK_RE.finditer(model_output):
-        split_call = _split_gemma4_tool_call(block_match.group(1), allowed_tool_names)
-        if split_call is None:
+    position = 0
+    while True:
+        block_start = model_output.find(GEMMA4_TOOL_CALL_START, position)
+        if block_start < 0:
+            return calls
+        body_start = block_start + len(GEMMA4_TOOL_CALL_START)
+        parsed_block = _parse_gemma4_block_at(
+            model_output,
+            body_start,
+            allowed_tool_names,
+        )
+        if parsed_block is None:
+            position = body_start
             continue
-        tool_name, arguments_text = split_call
-        arguments = parse_gemma4_arguments_object(arguments_text.strip())
-        if arguments is None:
-            continue
+        tool_name, arguments, block_end = parsed_block
         calls.append(
             build_openai_tool_call(
                 tool_name,
@@ -176,8 +176,27 @@ def parse_gemma4_tool_calls(
                 id_factory=id_factory,
             )
         )
+        position = block_end
 
-    return calls
+
+def _parse_gemma4_block_at(
+    model_output: str,
+    body_start: int,
+    allowed_tool_names: set[str],
+) -> tuple[str, JsonObject, int] | None:
+    end_search_position = body_start
+    while True:
+        block_end = model_output.find(GEMMA4_TOOL_CALL_END, end_search_position)
+        if block_end < 0:
+            return None
+        block_body = model_output[body_start:block_end]
+        split_call = _split_gemma4_tool_call(block_body, allowed_tool_names)
+        if split_call is not None:
+            tool_name, arguments_text = split_call
+            arguments = parse_gemma4_arguments_object(arguments_text.strip())
+            if arguments is not None:
+                return tool_name, arguments, block_end + len(GEMMA4_TOOL_CALL_END)
+        end_search_position = block_end + len(GEMMA4_TOOL_CALL_END)
 
 
 def _split_gemma4_tool_call(

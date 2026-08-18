@@ -250,6 +250,7 @@ def prepare_chat_generation_request(
             tool_choice_value=request.tool_choice,
             parallel_tool_calls=request.parallel_tool_calls,
             response_json_schema=response_json_schema,
+            model_type=getattr(model_kit, "model_type", None),
         )
     except ToolCallingValidationError as error:
         raise ChatRequestError(str(error)) from error

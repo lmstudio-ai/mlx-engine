@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
@@ -11,6 +12,7 @@ JsonObject = dict[str, Any]
 ToolCallIdFactory = Callable[[], str]
 SupportedToolChoice = Literal["none", "auto"]
 
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DEFAULT_PARAMETERS_SCHEMA: JsonObject = {"type": "object", "properties": {}}
 _DEFAULT_STRICT_PARAMETERS_SCHEMA: JsonObject = {
     "type": "object",
@@ -142,6 +144,11 @@ def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
     if not isinstance(name, str) or name == "":
         raise ToolCallingValidationError(
             f"{prefix}.function.name must be a non-empty string"
+        )
+    if _TOOL_NAME_RE.fullmatch(name) is None:
+        raise ToolCallingValidationError(
+            f"{prefix}.function.name must contain only letters, numbers, "
+            "underscores, or dashes and be at most 64 characters"
         )
 
     if "strict" in function and not isinstance(function["strict"], bool):

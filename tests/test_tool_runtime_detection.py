@@ -85,7 +85,7 @@ def test_gemma4_context_extracts_colon_namespaced_tool_name():
     assert context.tool_names == ("mcp:search",)
 
 
-def test_gemma4_context_ignores_tool_names_outside_native_grammar():
+def test_gemma4_context_extracts_openai_safe_digit_start_tool_name():
     prompt = GEMMA4_TOOL_PROMPT.replace(
         "declaration:get_weather",
         "declaration:2fa_lookup",
@@ -98,7 +98,7 @@ def test_gemma4_context_ignores_tool_names_outside_native_grammar():
     )
 
     assert context is not None
-    assert context.tool_names == ("search",)
+    assert context.tool_names == ("2fa_lookup", "search")
 
 
 def test_gemma4_context_requires_gemma4_model_type():

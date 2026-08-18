@@ -75,6 +75,23 @@ def test_extract_function_tool_specs_requires_openai_function_tools():
         _specs(_tool("lookup"), _tool("lookup"))
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["lookup", "lookup_weather", "lookup-weather", "1lookup", "-lookup", "a" * 64],
+)
+def test_extract_function_tool_specs_accepts_openai_safe_tool_names(name):
+    assert _specs(_tool(name))[0].name == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["a>b", 'quote"name', "search web", "mcp:lookup", "weather.get_forecast", "a" * 65],
+)
+def test_extract_function_tool_specs_rejects_unsafe_tool_names(name):
+    with pytest.raises(ToolCallingValidationError, match="letters, numbers"):
+        _specs(_tool(name))
+
+
 @pytest.mark.parametrize("parameters", [False, [], "", 0])
 def test_extract_function_tool_specs_rejects_falsy_non_object_parameters(parameters):
     with pytest.raises(
@@ -280,6 +297,29 @@ def test_tool_calling_plan_uses_model_format_parser_for_auto_choice():
     assert plan.template_tools == tools
 
 
+def test_tool_calling_plan_uses_model_type_format_hint():
+    plan = build_tool_calling_plan(
+        tools=[_tool("lookup")],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+        model_type="muse_glimmer",
+    )
+    output = (
+        f"literal {QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
+        f"{MUSE_GLIMMER_ATEM_START}"
+        '<atem:invoke name="lookup">'
+        '<atem:parameter name="query">weather</atem:parameter>'
+        "</atem:invoke>"
+        f"{MUSE_GLIMMER_ATEM_END}"
+    )
+
+    result = plan.parse_output(output)
+
+    assert [call["function"]["name"] for call in result] == ["lookup"]
+    assert _arguments(result[0]) == {"query": "weather"}
+
+
 def test_tool_calling_plan_validates_strict_tool_arguments():
     plan = _plan(
         _tool(
@@ -465,19 +505,20 @@ def test_qwen35_tool_call_treats_non_finite_json_constants_as_text(constant):
     assert _arguments(result[0]) == {"value": constant}
 
 
-def test_parser_rejects_mixed_model_format_tool_calls():
+def test_parser_auto_selects_first_model_format_marker():
     output = (
         f'{GEMMA4_TOOL_CALL_START}call:search{{query:<|"|>news<|"|>}}'
         f"{GEMMA4_TOOL_CALL_END}"
         f"{QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
     )
 
-    with pytest.raises(ToolCallingValidationError, match="Mixed model-format"):
-        parse_model_format_tool_calls(
-            output,
-            _specs(_tool("lookup"), _tool("search")),
-            id_factory=_id_factory(),
-        )
+    result = parse_model_format_tool_calls(
+        output,
+        _specs(_tool("lookup"), _tool("search")),
+        id_factory=_id_factory(),
+    )
+
+    assert [call["function"]["name"] for call in result] == ["search"]
 
 
 def test_gemma4_argument_parser_supports_model_format_object_syntax():
@@ -501,24 +542,26 @@ def test_gemma4_tool_call_parses_model_format_call_as_openai_tool_call():
     output = (
         "prefix "
         f"{GEMMA4_TOOL_CALL_START}"
-        'call:mcp:lookup{city:<|"|>Paris<|"|>,metadata:{source:<|"|>wx<|"|>}}'
+        'call:mcp_lookup{city:<|"|>Paris<|"|>,metadata:{source:<|"|>wx<|"|>}}'
         f"{GEMMA4_TOOL_CALL_END}"
         " suffix"
     )
 
     result = parse_model_format_tool_calls(
-        output, _specs(_tool("mcp:lookup")), id_factory=_id_factory()
+        output, _specs(_tool("mcp_lookup")), id_factory=_id_factory()
     )
 
     assert len(result) == 1
     call = result[0]
     assert call["index"] == 0
     assert call["id"] == "call_test_0"
-    assert call["function"]["name"] == "mcp:lookup"
+    assert call["function"]["name"] == "mcp_lookup"
     assert _arguments(call) == {"city": "Paris", "metadata": {"source": "wx"}}
 
 
-@pytest.mark.parametrize("tool_name", ["search-tool", "1search", "search web!"])
+@pytest.mark.parametrize(
+    "tool_name", ["search-tool", "1search", "-search", "search_web"]
+)
 def test_gemma4_tool_call_parses_llmster_forwarded_tool_names(tool_name):
     output = (
         f"{GEMMA4_TOOL_CALL_START}"
@@ -533,6 +576,21 @@ def test_gemma4_tool_call_parses_llmster_forwarded_tool_names(tool_name):
     assert len(result) == 1
     assert result[0]["function"]["name"] == tool_name
     assert _arguments(result[0]) == {"query": "weather"}
+
+
+def test_gemma4_tool_call_string_can_contain_end_marker_text():
+    output = (
+        f"{GEMMA4_TOOL_CALL_START}"
+        'call:lookup{snippet:<|"|>before <tool_call|> after<|"|>}'
+        f"{GEMMA4_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert len(result) == 1
+    assert _arguments(result[0]) == {"snippet": "before <tool_call|> after"}
 
 
 def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
@@ -555,6 +613,26 @@ def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
     call = result[0]
     assert call["function"]["name"] == "lookup"
     assert _arguments(call) == {"query": "weather", "metadata": {"city": "Paris"}}
+
+
+def test_muse_glimmer_argument_can_contain_qwen_marker_text():
+    qwen_text = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
+    )
+    output = (
+        f"{MUSE_GLIMMER_ATEM_START}"
+        '<atem:invoke name="lookup">'
+        f'<atem:parameter name="snippet">{qwen_text}</atem:parameter>'
+        "</atem:invoke>"
+        f"{MUSE_GLIMMER_ATEM_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert len(result) == 1
+    assert _arguments(result[0]) == {"snippet": qwen_text}
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])

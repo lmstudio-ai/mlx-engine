@@ -272,6 +272,25 @@ def test_tools_are_forwarded_to_template_and_model_format_parser_plan():
     assert renderer.calls[0][1]["tool_choice"] == "auto"
 
 
+def test_tools_use_loaded_model_type_to_select_parser_format():
+    renderer = _FakeRenderer()
+    model_kit = _FakeTextModelKit(renderer)
+    model_kit.model_type = "muse_glimmer"
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+        ),
+        model_kit=model_kit,
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.model_format == "muse_glimmer"
+
+
 def test_assistant_prefill_is_rejected_with_active_tools():
     renderer = _FakeRenderer()
 

@@ -5,7 +5,7 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 ## Supported
 
 - Streaming chat completions only (`stream: true`).
-- OpenAI `tools` entries with `type: "function"`.
+- OpenAI `tools` entries with `type: "function"` and names matching `^[A-Za-z0-9_-]{1,64}$`.
 - `tool_choice` omitted or `"auto"` for active tools.
 - `tool_choice: "none"` to ignore provided tools and run as a normal chat request.
 - Serial tool-calling only: set `parallel_tool_calls: false` when tools are active.
@@ -24,7 +24,7 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 - `response_format` with active tools. Use `tool_choice: "none"` if structured output should take precedence over provided tools.
 - Assistant prefill with active tools or structured output. Plain no-tool requests still support assistant prefill.
 - Strict constrained decoding for tool arguments. `strict: true` is validation only; invalid generated arguments produce a stream error.
-- Mixed model-format dialects in one response. A response must use only one of the supported Qwen, Gemma, or Muse tool-call formats.
+- Mixed model-format dialects in one response. The server selects the parser from the loaded model type when known, otherwise from the first tool-call marker in the generated text.
 
 ## Streaming behavior
 
