@@ -247,7 +247,7 @@ def test_invalid_generation_settings_are_rejected_before_rendering(overrides):
     assert renderer.calls == []
 
 
-def test_tools_are_forwarded_to_template_and_native_parser_plan():
+def test_tools_are_forwarded_to_template_and_model_format_parser_plan():
     renderer = _FakeRenderer()
     tools = [
         {
@@ -267,10 +267,66 @@ def test_tools_are_forwarded_to_template_and_native_parser_plan():
         tokenize=lambda _model_kit, _prompt: [],
     )
 
-    assert request.tool_calling_plan.strategy == "native"
+    assert request.tool_calling_plan.strategy == "model_format"
     assert request.tool_calling_plan.max_tool_calls == 1
     assert renderer.calls[0][1]["tools"] == tools
     assert renderer.calls[0][1]["tool_choice"] == "auto"
+
+
+def test_assistant_prefill_is_rejected_with_active_tools():
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match="Tool calling"):
+        prepare_chat_generation_request(
+            _base_request(
+                messages=[
+                    {"role": "user", "content": "Find Paris"},
+                    {"role": "assistant", "content": "Searching"},
+                ],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                tool_choice="auto",
+                parallel_tool_calls=False,
+            ),
+            model_kit=_FakeTextModelKit(renderer),
+            supports_vision=False,
+            tokenize=lambda _model_kit, _prompt: [],
+        )
+
+    assert renderer.calls == []
+
+
+def test_assistant_prefill_is_allowed_with_tools_when_tool_choice_is_none():
+    renderer = _FakeRenderer()
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            messages=[
+                {"role": "user", "content": "Find Paris"},
+                {"role": "assistant", "content": "No tools:"},
+            ],
+            tools=[{"type": "function", "function": {"name": "search"}}],
+            tool_choice="none",
+        ),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.strategy == "none"
+    messages, template_kwargs = renderer.calls[0]
+    assert messages[-1] == {"role": "assistant", "content": "No tools:"}
+    assert template_kwargs["add_generation_prompt"] is False
+    assert template_kwargs["continue_final_message"] is True
+    assert "tools" not in template_kwargs
+    assert "tool_choice" not in template_kwargs
 
 
 def test_parallel_tool_calls_true_is_rejected_with_active_tools():
@@ -443,12 +499,33 @@ def test_unsupported_response_format_is_rejected():
         )
 
 
-def test_final_assistant_message_is_rejected():
+def test_final_assistant_message_is_rendered_as_a_prefill():
+    renderer = _FakeRenderer()
+
+    prepare_chat_generation_request(
+        _base_request(
+            messages=[
+                {"role": "user", "content": "Respond with JSON"},
+                {"role": "assistant", "content": '{"answer":'},
+            ]
+        ),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    messages, template_kwargs = renderer.calls[0]
+    assert messages[-1] == {"role": "assistant", "content": '{"answer":'}
+    assert template_kwargs["add_generation_prompt"] is False
+    assert template_kwargs["continue_final_message"] is True
+
+
+def test_structured_output_with_assistant_prefill_is_rejected():
     renderer = _FakeRenderer()
 
     with pytest.raises(
         ChatRequestError,
-        match="Assistant prefills are not supported",
+        match="Structured output is not supported with assistant prefills",
     ):
         prepare_chat_generation_request(
             _base_request(
@@ -456,6 +533,10 @@ def test_final_assistant_message_is_rejected():
                     {"role": "user", "content": "Respond with JSON"},
                     {"role": "assistant", "content": '{"answer":'},
                 ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"schema": {"type": "object"}},
+                },
             ),
             model_kit=_FakeTextModelKit(renderer),
             supports_vision=False,

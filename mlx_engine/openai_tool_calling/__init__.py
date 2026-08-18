@@ -9,8 +9,11 @@ from mlx_engine.openai_tool_calling.models import (
     extract_function_tool_specs,
     parse_tool_choice_value,
     tool_names,
+    validate_strict_tool_calls,
 )
 from mlx_engine.openai_tool_calling.native import (
+    MODEL_FORMAT_TOOL_CALL_START_MARKERS,
+    NATIVE_TOOL_CALL_START_MARKERS,
     parse_gemma4_arguments_object,
     parse_gemma4_tool_calls,
     parse_muse_glimmer_tool_calls,
@@ -30,6 +33,8 @@ parse_openai_tool_calls = parse_native_tool_calls
 __all__ = [
     "FunctionToolSpec",
     "JsonObject",
+    "MODEL_FORMAT_TOOL_CALL_START_MARKERS",
+    "NATIVE_TOOL_CALL_START_MARKERS",
     "OpenAIToolChoice",
     "ParsedToolCalls",
     "ToolCallingPlan",
@@ -48,4 +53,5 @@ __all__ = [
     "parse_tool_choice_value",
     "remove_native_tool_call_blocks",
     "tool_names",
+    "validate_strict_tool_calls",
 ]

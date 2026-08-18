@@ -136,6 +136,37 @@ def _request_with_content_length(port, content_length):
     return response.status, response_body
 
 
+def _send_raw_chat_request(client, body):
+    encoded_body = json.dumps(body).encode("utf-8")
+    client.sendall(
+        b"POST /v1/chat/completions HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Authorization: Bearer secret-token\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(encoded_body)}\r\n\r\n".encode("ascii")
+        + encoded_body
+    )
+
+
+def _recv_until(client, needle, *, timeout=2):
+    deadline = time.monotonic() + timeout
+    received = b""
+    client.settimeout(0.05)
+    while needle not in received:
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"Timed out waiting for {needle!r}; received {received!r}"
+            )
+        try:
+            chunk = client.recv(4096)
+        except socket.timeout:
+            continue
+        if chunk == b"":
+            break
+        received += chunk
+    return received
+
+
 def test_health_requires_auth_and_reports_actualized_context_length():
     runtime = EngineRuntime(
         _FakeModelKit(),
@@ -665,6 +696,222 @@ def test_single_tool_call_is_returned_by_live_chat_endpoint():
     assert events[1]["choices"][0]["finish_reason"] == "tool_calls"
 
 
+def test_active_tools_without_tool_marker_streams_before_generation_finishes():
+    first_content_read = threading.Event()
+    generator_resumed = threading.Event()
+    plain_text = "plain response " + ("x" * 64)
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text=plain_text,
+            tokens=[Token(id=10, text=plain_text, logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=None,
+        )
+        assert first_content_read.wait(timeout=2)
+        generator_resumed.set()
+        yield GenerationResult(
+            text="",
+            tokens=[],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+    body = _request_body()
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+
+    with _running_server(runtime) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            _send_raw_chat_request(client, body)
+            received = _recv_until(client, b'"content":"plain response"')
+            first_content_read.set()
+            received += _recv_until(client, b"data: [DONE]\n\n")
+
+    assert generator_resumed.is_set()
+    assert b"200 OK" in received
+    events = _parse_sse(received.decode("utf-8"))
+    content = "".join(
+        event["choices"][0]["delta"].get("content", "")
+        for event in events
+        if "choices" in event
+    )
+    assert content == plain_text
+    assert events[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_split_tool_marker_is_buffered_and_text_around_tool_call_is_returned():
+    output_start = "Before " + QWEN35_TOOL_CALL_START[:5]
+    output_end = (
+        f"{QWEN35_TOOL_CALL_START[5:]}<function=lookup>"
+        "<parameter=query>weather</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END} After"
+    )
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text=output_start,
+            tokens=[Token(id=10, text=output_start, logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=None,
+        )
+        yield GenerationResult(
+            text=output_end,
+            tokens=[Token(id=11, text=output_end, logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+    body = _request_body()
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+
+    with _running_server(runtime) as port:
+        status, response_text = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 200
+    assert QWEN35_TOOL_CALL_START not in response_text
+    events = _parse_sse(response_text)
+    assert events[0]["choices"][0]["delta"] == {"content": "Before "}
+    tool_calls = events[1]["choices"][0]["delta"]["tool_calls"]
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "lookup"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"query": "weather"}
+    assert events[2]["choices"][0]["delta"] == {"content": "After"}
+    assert events[3]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_tool_call_buffer_limit_returns_stream_error(monkeypatch):
+    monkeypatch.setattr(server_http, "_MAX_TOOL_CALL_BUFFER_BYTES", 16)
+    output = QWEN35_TOOL_CALL_START + ("x" * 32)
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text=output,
+            tokens=[Token(id=10, text=output, logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+    body = _request_body()
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+
+    with _running_server(runtime) as port:
+        status, response_text = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 200
+    events = _parse_sse(response_text)
+    assert len(events) == 1
+    assert events[0]["error"]["message"] == (
+        "Tool-call output exceeded the 16-byte buffer limit."
+    )
+    assert "data: [DONE]" not in response_text
+
+
+def test_invalid_strict_tool_call_returns_stream_error():
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        "<parameter=count>not an integer</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text=output,
+            tokens=[Token(id=10, text=output, logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+    body = _request_body()
+    body["tools"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+
+    with _running_server(runtime) as port:
+        status, response_text = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 200
+    events = _parse_sse(response_text)
+    assert len(events) == 1
+    message = events[0]["error"]["message"]
+    assert message.startswith(
+        "Strict tool call arguments for function `lookup` do not match "
+        "the parameters schema"
+    )
+    assert "$.count" in message
+    assert "integer" in message
+
+
 def test_multiple_tool_calls_return_error_in_serial_mvp():
     output = (
         f"{QWEN35_TOOL_CALL_START}<function=lookup>"
@@ -781,13 +1028,76 @@ def test_forced_tool_choice_is_rejected_by_live_chat_endpoint(tool_choice):
         "error": {
             "message": (
                 "tool_choice='required' and named function tool_choice are not "
-                "supported."
+                "supported yet; use tool_choice='auto' or tool_choice='none'."
             )
         }
     }
 
 
-def test_assistant_prefill_is_rejected_by_live_chat_endpoint():
+def test_assistant_prefill_is_allowed_by_live_chat_endpoint():
+    class _PrefillRenderer:
+        chat_template = "model template"
+
+        def __init__(self):
+            self.calls = []
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            return "rendered prefill prompt"
+
+    class _PrefillTokenizer:
+        def __init__(self, renderer):
+            self._tokenizer = renderer
+
+    class _PrefillModelKit:
+        def __init__(self, renderer):
+            self.tokenizer = _PrefillTokenizer(renderer)
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text=" completion",
+            tokens=[Token(id=10, text=" completion", logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
+    renderer = _PrefillRenderer()
+    runtime = EngineRuntime(
+        _PrefillModelKit(renderer),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
+    )
+    body = _request_body()
+    body["messages"] = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "partial"},
+    ]
+
+    with _running_server(runtime) as port:
+        status, response_text = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+        )
+
+    assert status == 200
+    events = _parse_sse(response_text)
+    assert events[0]["choices"][0]["delta"] == {"content": " completion"}
+    assert events[1]["choices"][0]["finish_reason"] == "stop"
+    messages, template_kwargs = renderer.calls[0]
+    assert messages[-1] == {"role": "assistant", "content": "partial"}
+    assert template_kwargs["add_generation_prompt"] is False
+    assert template_kwargs["continue_final_message"] is True
+
+
+def test_assistant_prefill_with_active_tools_is_rejected_by_live_chat_endpoint():
     runtime = EngineRuntime(
         _FakeModelKit(),
         supports_vision=False,
@@ -798,6 +1108,9 @@ def test_assistant_prefill_is_rejected_by_live_chat_endpoint():
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": "partial"},
     ]
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+    body["tool_choice"] = "auto"
+    body["parallel_tool_calls"] = False
 
     with _running_server(runtime) as port:
         status, response_body = _request(
@@ -809,7 +1122,7 @@ def test_assistant_prefill_is_rejected_by_live_chat_endpoint():
 
     assert status == 400
     assert json.loads(response_body) == {
-        "error": {"message": "Assistant prefills are not supported."}
+        "error": {"message": "Tool calling is not supported with assistant prefills."}
     }
 
 

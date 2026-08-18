@@ -22,15 +22,15 @@ from mlx_engine.tool_protocols import (
 )
 
 
-def _tool(name: str, parameters=None):
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": f"Call {name}",
-            "parameters": parameters or {"type": "object", "properties": {}},
-        },
+def _tool(name: str, parameters=None, *, strict: bool = False):
+    function = {
+        "name": name,
+        "description": f"Call {name}",
+        "parameters": parameters or {"type": "object", "properties": {}},
     }
+    if strict:
+        function["strict"] = True
+    return {"type": "function", "function": function}
 
 
 def _specs(*tools):
@@ -92,7 +92,7 @@ def test_tool_calling_plan_accepts_valid_tool_parameter_schema():
         response_json_schema=None,
     )
 
-    assert plan.strategy == "native"
+    assert plan.strategy == "model_format"
 
 
 def test_tool_calling_plan_rejects_parallel_tool_calls_with_active_tools():
@@ -204,7 +204,7 @@ def test_tool_calling_plan_rejects_forced_tool_choice(tool_choice_value):
         )
 
 
-def test_tool_calling_plan_keeps_native_path_for_auto_choice():
+def test_tool_calling_plan_keeps_model_format_path_for_auto_choice():
     tools = [_tool("lookup")]
 
     plan = build_tool_calling_plan(
@@ -215,12 +215,104 @@ def test_tool_calling_plan_keeps_native_path_for_auto_choice():
         response_json_schema=None,
     )
 
-    assert plan.strategy == "native"
+    assert plan.strategy == "model_format"
     assert plan.template_tools == tools
     assert plan.template_tool_choice == "auto"
-    assert plan.should_buffer_output
     assert plan.max_tool_calls == 1
     assert plan.generation_json_schema is None
+
+
+def test_tool_calling_plan_validates_strict_tool_arguments():
+    plan = build_tool_calling_plan(
+        messages=[{"role": "user", "content": "Find Paris."}],
+        tools=[
+            _tool(
+                "lookup",
+                {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            )
+        ],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+    )
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        "<parameter=count>2</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    result = plan.parse_output(output)
+
+    assert len(result.calls) == 1
+    assert _arguments(result.calls[0]) == {"count": 2}
+
+
+def test_tool_calling_plan_rejects_invalid_strict_tool_arguments():
+    plan = build_tool_calling_plan(
+        messages=[{"role": "user", "content": "Find Paris."}],
+        tools=[
+            _tool(
+                "lookup",
+                {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            )
+        ],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+    )
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        "<parameter=count>not an integer</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    with pytest.raises(
+        ToolCallingValidationError,
+        match="Strict tool call arguments.*count.*integer",
+    ):
+        plan.parse_output(output)
+
+
+def test_tool_calling_plan_allows_invalid_non_strict_tool_arguments():
+    plan = build_tool_calling_plan(
+        messages=[{"role": "user", "content": "Find Paris."}],
+        tools=[
+            _tool(
+                "lookup",
+                {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                    "additionalProperties": False,
+                },
+            )
+        ],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+    )
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        "<parameter=count>not an integer</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    result = plan.parse_output(output)
+
+    assert len(result.calls) == 1
+    assert _arguments(result.calls[0]) == {"count": "not an integer"}
 
 
 def test_tool_calling_plan_preserves_all_parsed_tool_calls():

@@ -9,10 +9,11 @@ from mlx_engine.openai_tool_calling.models import (
     ToolCallingValidationError,
     extract_function_tool_specs,
     parse_tool_choice_value,
+    validate_strict_tool_calls,
 )
 from mlx_engine.openai_tool_calling.native import parse_native_tool_calls
 
-ToolCallingStrategy = Literal["none", "native"]
+ToolCallingStrategy = Literal["none", "model_format"]
 
 
 @dataclass(frozen=True)
@@ -29,16 +30,12 @@ class ToolCallingPlan:
     def has_active_tools(self) -> bool:
         return len(self.tool_specs) > 0
 
-    @property
-    def should_buffer_output(self) -> bool:
-        return self.has_active_tools
-
     def parse_output(self, model_output: str) -> ParsedToolCalls:
-        if self.strategy == "native":
+        if self.strategy == "model_format":
             parsed = parse_native_tool_calls(model_output, self.tool_specs)
-        else:
-            return ParsedToolCalls(calls=[], remaining_text=model_output)
-        return parsed
+            validate_strict_tool_calls(parsed, self.tool_specs)
+            return parsed
+        return ParsedToolCalls(calls=[], remaining_text=model_output)
 
 
 def build_tool_calling_plan(
@@ -69,11 +66,12 @@ def build_tool_calling_plan(
 
     if tool_choice is not None and tool_choice.is_forced:
         raise ToolCallingValidationError(
-            "tool_choice='required' and named function tool_choice are not supported."
+            "tool_choice='required' and named function tool_choice are not "
+            "supported yet; use tool_choice='auto' or tool_choice='none'."
         )
 
     return ToolCallingPlan(
-        strategy="native" if len(tool_specs) > 0 else "none",
+        strategy="model_format" if len(tool_specs) > 0 else "none",
         tool_specs=tool_specs,
         prompt_messages=messages,
         template_tools=[tool.to_openai_tool() for tool in tool_specs]

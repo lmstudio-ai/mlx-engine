@@ -11,6 +11,8 @@ import uuid
 
 from pydantic import ValidationError
 
+from mlx_engine.openai_tool_calling import MODEL_FORMAT_TOOL_CALL_START_MARKERS
+
 from mlx_engine import (
     create_generator,
     get_runtime_load_info,
@@ -39,6 +41,62 @@ _MAX_REQUEST_BODY_MIB = 64
 _MAX_REQUEST_BODY_BYTES = _MAX_REQUEST_BODY_MIB * 1024 * 1024
 _REQUEST_READ_TIMEOUT_SECONDS = 30.0
 _SSE_WRITE_TIMEOUT_SECONDS = 30.0
+_MAX_TOOL_CALL_BUFFER_BYTES = 1024 * 1024
+
+
+class _ToolAwareOutputBuffer:
+    def __init__(self, markers: tuple[str, ...], max_buffer_bytes: int):
+        self._markers = markers
+        self._lookbehind_chars = max((len(marker) for marker in markers), default=1) - 1
+        self._max_buffer_bytes = max_buffer_bytes
+        self._pending_text = ""
+        self._tool_output_parts: list[str] = []
+        self._tool_output_bytes = 0
+        self.tool_output_started = False
+
+    def append(self, text: str) -> list[str]:
+        if text == "":
+            return []
+        if self.tool_output_started:
+            self._append_tool_output(text)
+            return []
+
+        self._pending_text += text
+        marker_index = _first_marker_index(self._pending_text, self._markers)
+        if marker_index is not None:
+            prefix = self._pending_text[:marker_index]
+            self._append_tool_output(self._pending_text[marker_index:])
+            self._pending_text = ""
+            self.tool_output_started = True
+            return [prefix] if prefix != "" else []
+
+        if len(self._pending_text) <= self._lookbehind_chars:
+            return []
+        flush_text = self._pending_text[: -self._lookbehind_chars]
+        self._pending_text = self._pending_text[-self._lookbehind_chars :]
+        return [flush_text] if flush_text != "" else []
+
+    def finish_content(self) -> str:
+        content = self._pending_text
+        self._pending_text = ""
+        return content
+
+    def tool_output(self) -> str:
+        return "".join(self._tool_output_parts)
+
+    def _append_tool_output(self, text: str) -> None:
+        self._tool_output_bytes += len(text.encode("utf-8"))
+        if self._tool_output_bytes > self._max_buffer_bytes:
+            raise RuntimeError(
+                "Tool-call output exceeded the "
+                f"{self._max_buffer_bytes}-byte buffer limit."
+            )
+        self._tool_output_parts.append(text)
+
+
+def _first_marker_index(text: str, markers: tuple[str, ...]) -> int | None:
+    indexes = [index for marker in markers if (index := text.find(marker)) != -1]
+    return min(indexes) if len(indexes) > 0 else None
 
 
 class _ClientConnectionError(Exception):
@@ -300,15 +358,23 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         reporter: _SsePromptProgressReporter,
     ) -> None:
         completion_tokens = 0
-        output_parts: list[str] = []
         stop_condition: GenerationStopCondition | None = None
         tool_calling_plan = request.tool_calling_plan
+        tool_output_buffer = (
+            _ToolAwareOutputBuffer(
+                MODEL_FORMAT_TOOL_CALL_START_MARKERS,
+                _MAX_TOOL_CALL_BUFFER_BYTES,
+            )
+            if tool_calling_plan.has_active_tools
+            else None
+        )
 
         for result in generator:
             completion_tokens += len(result.tokens)
             if result.text != "":
-                if tool_calling_plan.should_buffer_output:
-                    output_parts.append(result.text)
+                if tool_output_buffer is not None:
+                    for content_delta in tool_output_buffer.append(result.text):
+                        self._write_content_delta(content_delta)
                 else:
                     self._write_content_delta(result.text)
             if result.stop_condition is not None:
@@ -317,28 +383,37 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         if stop_condition is None:
             raise RuntimeError("MLX generation ended without a stop condition.")
 
-        if tool_calling_plan.should_buffer_output:
-            parsed_tool_calls = tool_calling_plan.parse_output("".join(output_parts))
-            if len(parsed_tool_calls.calls) > tool_calling_plan.max_tool_calls:
-                raise RuntimeError(
-                    "The model produced multiple tool calls, but this server only "
-                    "supports one tool call per response."
+        if tool_output_buffer is not None:
+            if tool_output_buffer.tool_output_started:
+                parsed_tool_calls = tool_calling_plan.parse_output(
+                    tool_output_buffer.tool_output()
                 )
-            if len(parsed_tool_calls.calls) > 0:
-                self._write_tool_calls_delta(parsed_tool_calls.calls)
-                self._write_sse_json(
-                    self._terminal_payload(
-                        stop_condition=stop_condition,
-                        prompt_tokens=reporter.prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        finish_reason_override="tool_calls",
+                if len(parsed_tool_calls.calls) > tool_calling_plan.max_tool_calls:
+                    raise RuntimeError(
+                        "The model produced multiple tool calls, but this server only "
+                        "supports one tool call per response."
                     )
-                )
-                self._write_bytes(b"data: [DONE]\n\n")
-                return
+                if len(parsed_tool_calls.calls) > 0:
+                    self._write_tool_calls_delta(parsed_tool_calls.calls)
+                    if parsed_tool_calls.remaining_text != "":
+                        self._write_content_delta(parsed_tool_calls.remaining_text)
+                    self._write_sse_json(
+                        self._terminal_payload(
+                            stop_condition=stop_condition,
+                            prompt_tokens=reporter.prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            finish_reason_override="tool_calls",
+                        )
+                    )
+                    self._write_bytes(b"data: [DONE]\n\n")
+                    return
 
-            if parsed_tool_calls.remaining_text != "":
-                self._write_content_delta(parsed_tool_calls.remaining_text)
+                if parsed_tool_calls.remaining_text != "":
+                    self._write_content_delta(parsed_tool_calls.remaining_text)
+            else:
+                remaining_content = tool_output_buffer.finish_content()
+                if remaining_content != "":
+                    self._write_content_delta(remaining_content)
 
         self._write_sse_json(
             self._terminal_payload(

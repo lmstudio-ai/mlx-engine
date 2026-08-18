@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
-from jsonschema import Draft202012Validator, SchemaError
+from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 JsonObject = dict[str, Any]
 ToolCallIdFactory = Callable[[], str]
@@ -116,6 +116,54 @@ def build_openai_tool_call(
             ),
         },
     }
+
+
+def validate_strict_tool_calls(
+    parsed_tool_calls: ParsedToolCalls,
+    tool_specs: list[FunctionToolSpec],
+) -> None:
+    strict_tool_specs = {tool.name: tool for tool in tool_specs if tool.strict}
+    if len(strict_tool_specs) == 0:
+        return
+
+    for tool_call in parsed_tool_calls.calls:
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        tool_name = function.get("name")
+        if not isinstance(tool_name, str):
+            continue
+        tool_spec = strict_tool_specs.get(tool_name)
+        if tool_spec is None:
+            continue
+        arguments = _tool_call_arguments_object(tool_name, function)
+        try:
+            Draft202012Validator(tool_spec.parameters).validate(arguments)
+        except ValidationError as error:
+            location = f" at {error.json_path}" if error.json_path != "$" else ""
+            raise ToolCallingValidationError(
+                f"Strict tool call arguments for function `{tool_name}` do not "
+                f"match the parameters schema{location}: {error.message}"
+            ) from error
+
+
+def _tool_call_arguments_object(tool_name: str, function: JsonObject) -> JsonObject:
+    raw_arguments = function.get("arguments")
+    if not isinstance(raw_arguments, str):
+        raise ToolCallingValidationError(
+            f"Strict tool call arguments for function `{tool_name}` must be a JSON object."
+        )
+    try:
+        arguments = json.loads(raw_arguments)
+    except json.JSONDecodeError as error:
+        raise ToolCallingValidationError(
+            f"Strict tool call arguments for function `{tool_name}` must be valid JSON."
+        ) from error
+    if not isinstance(arguments, dict):
+        raise ToolCallingValidationError(
+            f"Strict tool call arguments for function `{tool_name}` must be a JSON object."
+        )
+    return arguments
 
 
 def default_tool_call_id() -> str:

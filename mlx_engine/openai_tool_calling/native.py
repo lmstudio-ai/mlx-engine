@@ -50,6 +50,13 @@ _MUSE_GLIMMER_PARAMETER_RE = re.compile(
 _GEMMA4_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_.$/-]+")
 _GEMMA4_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 _GEMMA4_STRING_DELIMITER = '<|"|>'
+MODEL_FORMAT_TOOL_CALL_START_MARKERS = (
+    QWEN35_TOOL_CALL_START,
+    GEMMA4_TOOL_CALL_START,
+    MUSE_GLIMMER_ATEM_START,
+)
+# Compatibility alias for older internal callers.
+NATIVE_TOOL_CALL_START_MARKERS = MODEL_FORMAT_TOOL_CALL_START_MARKERS
 
 
 def parse_native_tool_calls(
