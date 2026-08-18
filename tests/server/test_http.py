@@ -696,9 +696,9 @@ def test_single_tool_call_is_returned_by_live_chat_endpoint():
     assert events[1]["choices"][0]["finish_reason"] == "tool_calls"
 
 
-def test_active_tools_without_tool_marker_streams_before_generation_finishes():
-    first_content_read = threading.Event()
-    generator_resumed = threading.Event()
+def test_active_tools_without_tool_call_buffers_until_generation_finishes():
+    first_chunk_buffered = threading.Event()
+    finish_generation = threading.Event()
     plain_text = "plain response " + ("x" * 64)
 
     def create_generator(_model_kit, _prompt_tokens, **_kwargs):
@@ -708,8 +708,8 @@ def test_active_tools_without_tool_marker_streams_before_generation_finishes():
             top_logprobs=[],
             stop_condition=None,
         )
-        assert first_content_read.wait(timeout=2)
-        generator_resumed.set()
+        first_chunk_buffered.set()
+        assert finish_generation.wait(timeout=2)
         yield GenerationResult(
             text="",
             tokens=[],
@@ -734,11 +734,17 @@ def test_active_tools_without_tool_marker_streams_before_generation_finishes():
     with _running_server(runtime) as port:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
             _send_raw_chat_request(client, body)
-            received = _recv_until(client, b'"content":"plain response"')
-            first_content_read.set()
+            received = _recv_until(client, b"\r\n\r\n")
+            assert first_chunk_buffered.wait(timeout=2)
+            client.settimeout(0.05)
+            try:
+                received += client.recv(4096)
+            except socket.timeout:
+                pass
+            assert b'"content":"plain response' not in received
+            finish_generation.set()
             received += _recv_until(client, b"data: [DONE]\n\n")
 
-    assert generator_resumed.is_set()
     assert b"200 OK" in received
     events = _parse_sse(received.decode("utf-8"))
     content = "".join(
@@ -750,7 +756,7 @@ def test_active_tools_without_tool_marker_streams_before_generation_finishes():
     assert events[-1]["choices"][0]["finish_reason"] == "stop"
 
 
-def test_split_tool_marker_is_buffered_and_text_around_tool_call_is_returned():
+def test_tool_call_turn_suppresses_surrounding_text():
     output_start = "Before " + QWEN35_TOOL_CALL_START[:5]
     output_end = (
         f"{QWEN35_TOOL_CALL_START[5:]}<function=lookup>"
@@ -796,14 +802,14 @@ def test_split_tool_marker_is_buffered_and_text_around_tool_call_is_returned():
 
     assert status == 200
     assert QWEN35_TOOL_CALL_START not in response_text
+    assert "Before" not in response_text
+    assert "After" not in response_text
     events = _parse_sse(response_text)
-    assert events[0]["choices"][0]["delta"] == {"content": "Before "}
-    tool_calls = events[1]["choices"][0]["delta"]["tool_calls"]
+    tool_calls = events[0]["choices"][0]["delta"]["tool_calls"]
     assert len(tool_calls) == 1
     assert tool_calls[0]["function"]["name"] == "lookup"
     assert json.loads(tool_calls[0]["function"]["arguments"]) == {"query": "weather"}
-    assert events[2]["choices"][0]["delta"] == {"content": "After"}
-    assert events[3]["choices"][0]["finish_reason"] == "tool_calls"
+    assert events[1]["choices"][0]["finish_reason"] == "tool_calls"
 
 
 def test_tool_call_buffer_limit_returns_stream_error(monkeypatch):

@@ -40,12 +40,6 @@ class FunctionToolSpec:
         return {"type": "function", "function": function}
 
 
-@dataclass(frozen=True)
-class ParsedToolCalls:
-    calls: list[JsonObject]
-    remaining_text: str
-
-
 def parse_tool_choice_value(value: Any) -> SupportedToolChoice | None:
     if value is None or value in ("none", "auto"):
         return value
@@ -89,11 +83,11 @@ def build_openai_tool_call(
 
 
 def validate_strict_tool_calls(
-    parsed_tool_calls: ParsedToolCalls,
+    tool_calls: list[JsonObject],
     tool_specs: list[FunctionToolSpec],
 ) -> None:
     strict_tool_specs = {tool.name: tool for tool in tool_specs if tool.strict}
-    for tool_call in parsed_tool_calls.calls:
+    for tool_call in tool_calls:
         function = tool_call["function"]
         tool_spec = strict_tool_specs.get(function["name"])
         if tool_spec is None:

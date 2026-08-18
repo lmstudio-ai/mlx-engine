@@ -6,7 +6,6 @@ from typing import Any
 from mlx_engine.openai_tool_calling.models import (
     FunctionToolSpec,
     JsonObject,
-    ParsedToolCalls,
     ToolCallingValidationError,
     extract_function_tool_specs,
     parse_tool_choice_value,
@@ -27,10 +26,10 @@ class ToolCallingPlan:
     def template_tools(self) -> list[JsonObject]:
         return [tool.to_openai_tool() for tool in self.tool_specs]
 
-    def parse_output(self, model_output: str) -> ParsedToolCalls:
-        parsed = parse_model_format_tool_calls(model_output, self.tool_specs)
-        validate_strict_tool_calls(parsed, self.tool_specs)
-        return parsed
+    def parse_output(self, model_output: str) -> list[JsonObject]:
+        tool_calls = parse_model_format_tool_calls(model_output, self.tool_specs)
+        validate_strict_tool_calls(tool_calls, self.tool_specs)
+        return tool_calls
 
 
 def build_tool_calling_plan(

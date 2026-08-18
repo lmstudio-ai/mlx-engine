@@ -240,8 +240,8 @@ def test_tool_calling_plan_validates_strict_tool_arguments():
 
     result = plan.parse_output(output)
 
-    assert len(result.calls) == 1
-    assert _arguments(result.calls[0]) == {"count": 2}
+    assert len(result) == 1
+    assert _arguments(result[0]) == {"count": 2}
 
 
 def test_tool_calling_plan_rejects_invalid_strict_tool_arguments():
@@ -290,8 +290,8 @@ def test_tool_calling_plan_allows_invalid_non_strict_tool_arguments():
 
     result = plan.parse_output(output)
 
-    assert len(result.calls) == 1
-    assert _arguments(result.calls[0]) == {"count": "not an integer"}
+    assert len(result) == 1
+    assert _arguments(result[0]) == {"count": "not an integer"}
 
 
 def test_tool_calling_plan_preserves_all_parsed_tool_calls():
@@ -303,11 +303,10 @@ def test_tool_calling_plan_preserves_all_parsed_tool_calls():
 
     result = plan.parse_output(output)
 
-    assert [call["function"]["name"] for call in result.calls] == [
+    assert [call["function"]["name"] for call in result] == [
         "lookup",
         "search",
     ]
-    assert result.remaining_text == ""
 
 
 def test_qwen35_tool_call_parses_parameters_as_openai_tool_call():
@@ -325,8 +324,8 @@ After"""
         output, _specs(_tool("lookup")), id_factory=_id_factory()
     )
 
-    assert len(result.calls) == 1
-    call = result.calls[0]
+    assert len(result) == 1
+    call = result[0]
     assert call["index"] == 0
     assert call["id"] == "call_test_0"
     assert call["type"] == "function"
@@ -336,10 +335,6 @@ After"""
         "count": 2,
         "label": "plain text",
     }
-    assert QWEN35_TOOL_CALL_START not in result.remaining_text
-    assert QWEN35_TOOL_CALL_END not in result.remaining_text
-    assert "Before" in result.remaining_text
-    assert "After" in result.remaining_text
 
 
 def test_qwen35_tool_call_parses_multiple_calls_in_emission_order():
@@ -356,14 +351,14 @@ def test_qwen35_tool_call_parses_multiple_calls_in_emission_order():
         id_factory=_id_factory(),
     )
 
-    assert [call["index"] for call in result.calls] == [0, 1]
-    assert [call["id"] for call in result.calls] == ["call_test_0", "call_test_1"]
-    assert [call["function"]["name"] for call in result.calls] == [
+    assert [call["index"] for call in result] == [0, 1]
+    assert [call["id"] for call in result] == ["call_test_0", "call_test_1"]
+    assert [call["function"]["name"] for call in result] == [
         "lookup",
         "search-tool",
     ]
-    assert _arguments(result.calls[0]) == {}
-    assert _arguments(result.calls[1]) == {"query": "weather"}
+    assert _arguments(result[0]) == {}
+    assert _arguments(result[1]) == {"query": "weather"}
 
 
 def test_parser_rejects_mixed_model_format_tool_calls():
@@ -411,16 +406,12 @@ def test_gemma4_tool_call_parses_model_format_call_as_openai_tool_call():
         output, _specs(_tool("mcp:lookup")), id_factory=_id_factory()
     )
 
-    assert len(result.calls) == 1
-    call = result.calls[0]
+    assert len(result) == 1
+    call = result[0]
     assert call["index"] == 0
     assert call["id"] == "call_test_0"
     assert call["function"]["name"] == "mcp:lookup"
     assert _arguments(call) == {"city": "Paris", "metadata": {"source": "wx"}}
-    assert GEMMA4_TOOL_CALL_START not in result.remaining_text
-    assert GEMMA4_TOOL_CALL_END not in result.remaining_text
-    assert "prefix" in result.remaining_text
-    assert "suffix" in result.remaining_text
 
 
 def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
@@ -439,17 +430,13 @@ def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
         output, _specs(_tool("lookup")), id_factory=_id_factory()
     )
 
-    assert len(result.calls) == 1
-    call = result.calls[0]
+    assert len(result) == 1
+    call = result[0]
     assert call["function"]["name"] == "lookup"
     assert _arguments(call) == {"query": "weather", "metadata": {"city": "Paris"}}
-    assert MUSE_GLIMMER_ATEM_START not in result.remaining_text
-    assert MUSE_GLIMMER_ATEM_END not in result.remaining_text
-    assert "prefix" in result.remaining_text
-    assert "suffix" in result.remaining_text
 
 
-def test_parser_leaves_unknown_model_format_blocks_as_text():
+def test_parser_ignores_unknown_model_format_blocks():
     output = (
         "prefix "
         f"{QWEN35_TOOL_CALL_START}<function=unknown></function>{QWEN35_TOOL_CALL_END}"
@@ -464,16 +451,14 @@ def test_parser_leaves_unknown_model_format_blocks_as_text():
         output, _specs(_tool("allowed")), id_factory=_id_factory()
     )
 
-    assert result.calls == []
-    assert result.remaining_text == output.strip()
+    assert result == []
 
 
-def test_parser_removes_only_converted_model_format_blocks():
-    unknown_output = f"{GEMMA4_TOOL_CALL_START}call:unknown{{}}{GEMMA4_TOOL_CALL_END}"
+def test_parser_extracts_valid_calls_from_surrounding_text():
     output = (
         "prefix "
         f"{QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
-        f"{unknown_output}"
+        f"{GEMMA4_TOOL_CALL_START}call:unknown{{}}{GEMMA4_TOOL_CALL_END}"
         " suffix"
     )
 
@@ -481,8 +466,4 @@ def test_parser_removes_only_converted_model_format_blocks():
         output, _specs(_tool("lookup")), id_factory=_id_factory()
     )
 
-    assert [call["function"]["name"] for call in result.calls] == ["lookup"]
-    assert QWEN35_TOOL_CALL_START not in result.remaining_text
-    assert unknown_output in result.remaining_text
-    assert "prefix" in result.remaining_text
-    assert "suffix" in result.remaining_text
+    assert [call["function"]["name"] for call in result] == ["lookup"]

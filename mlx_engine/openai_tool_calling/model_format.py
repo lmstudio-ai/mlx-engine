@@ -7,7 +7,6 @@ from typing import Any
 from mlx_engine.openai_tool_calling.models import (
     FunctionToolSpec,
     JsonObject,
-    ParsedToolCalls,
     ToolCallIdFactory,
     ToolCallingValidationError,
     build_openai_tool_call,
@@ -50,11 +49,6 @@ _MUSE_GLIMMER_PARAMETER_RE = re.compile(
 _GEMMA4_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_.$/-]+")
 _GEMMA4_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 _GEMMA4_STRING_DELIMITER = '<|"|>'
-MODEL_FORMAT_TOOL_CALL_START_MARKERS = (
-    QWEN35_TOOL_CALL_START,
-    GEMMA4_TOOL_CALL_START,
-    MUSE_GLIMMER_ATEM_START,
-)
 
 
 def parse_model_format_tool_calls(
@@ -62,52 +56,50 @@ def parse_model_format_tool_calls(
     tool_specs: list[FunctionToolSpec],
     *,
     id_factory: ToolCallIdFactory | None = None,
-) -> ParsedToolCalls:
+) -> list[JsonObject]:
     """Parse supported model-format MLX tool-call text into OpenAI tool calls."""
     allowed_tool_names = {tool.name for tool in tool_specs}
 
-    qwen35_result = parse_qwen35_tool_calls(
+    qwen35_calls = parse_qwen35_tool_calls(
         model_output,
         allowed_tool_names,
-        starting_index=0,
         id_factory=id_factory,
     )
-    gemma4_result = parse_gemma4_tool_calls(
-        qwen35_result.remaining_text,
+    gemma4_calls = parse_gemma4_tool_calls(
+        model_output,
         allowed_tool_names,
-        starting_index=len(qwen35_result.calls),
         id_factory=id_factory,
     )
-    muse_glimmer_result = parse_muse_glimmer_tool_calls(
-        gemma4_result.remaining_text,
+    muse_glimmer_calls = parse_muse_glimmer_tool_calls(
+        model_output,
         allowed_tool_names,
-        starting_index=len(qwen35_result.calls) + len(gemma4_result.calls),
         id_factory=id_factory,
     )
     _reject_mixed_model_formats(
-        qwen35_calls=len(qwen35_result.calls),
-        gemma4_calls=len(gemma4_result.calls),
-        muse_glimmer_calls=len(muse_glimmer_result.calls),
+        qwen35_call_count=len(qwen35_calls),
+        gemma4_call_count=len(gemma4_calls),
+        muse_glimmer_call_count=len(muse_glimmer_calls),
     )
-    return ParsedToolCalls(
-        calls=[
-            *qwen35_result.calls,
-            *gemma4_result.calls,
-            *muse_glimmer_result.calls,
-        ],
-        remaining_text=muse_glimmer_result.remaining_text,
-    )
+    return [
+        *qwen35_calls,
+        *gemma4_calls,
+        *muse_glimmer_calls,
+    ]
 
 
 def _reject_mixed_model_formats(
     *,
-    qwen35_calls: int,
-    gemma4_calls: int,
-    muse_glimmer_calls: int,
+    qwen35_call_count: int,
+    gemma4_call_count: int,
+    muse_glimmer_call_count: int,
 ) -> None:
     used_formats = sum(
         call_count > 0
-        for call_count in (qwen35_calls, gemma4_calls, muse_glimmer_calls)
+        for call_count in (
+            qwen35_call_count,
+            gemma4_call_count,
+            muse_glimmer_call_count,
+        )
     )
     if used_formats > 1:
         raise ToolCallingValidationError(
@@ -119,15 +111,11 @@ def parse_qwen35_tool_calls(
     model_output: str,
     allowed_tool_names: set[str],
     *,
-    starting_index: int = 0,
     id_factory: ToolCallIdFactory | None = None,
-) -> ParsedToolCalls:
+) -> list[JsonObject]:
     calls: list[JsonObject] = []
-    converted_block_spans: list[tuple[int, int]] = []
     for block_match in _QWEN35_BLOCK_RE.finditer(model_output):
-        block_call_count = len(calls)
-        block_body = block_match.group(1)
-        for function_match in _QWEN35_FUNCTION_RE.finditer(block_body):
+        for function_match in _QWEN35_FUNCTION_RE.finditer(block_match.group(1)):
             tool_name = function_match.group(1).strip()
             if tool_name not in allowed_tool_names:
                 continue
@@ -145,17 +133,12 @@ def parse_qwen35_tool_calls(
                 build_openai_tool_call(
                     tool_name,
                     arguments,
-                    starting_index + len(calls),
+                    len(calls),
                     id_factory=id_factory,
                 )
             )
-        if len(calls) > block_call_count:
-            converted_block_spans.append(block_match.span())
 
-    return ParsedToolCalls(
-        calls=calls,
-        remaining_text=_remove_spans(model_output, converted_block_spans),
-    )
+    return calls
 
 
 def parse_qwen35_tool_argument_value(value: str) -> Any:
@@ -172,11 +155,9 @@ def parse_gemma4_tool_calls(
     model_output: str,
     allowed_tool_names: set[str],
     *,
-    starting_index: int = 0,
     id_factory: ToolCallIdFactory | None = None,
-) -> ParsedToolCalls:
+) -> list[JsonObject]:
     calls: list[JsonObject] = []
-    converted_block_spans: list[tuple[int, int]] = []
     for block_match in _GEMMA4_BLOCK_RE.finditer(model_output):
         call_match = _GEMMA4_CALL_RE.match(block_match.group(1))
         if call_match is None:
@@ -191,29 +172,22 @@ def parse_gemma4_tool_calls(
             build_openai_tool_call(
                 tool_name,
                 arguments,
-                starting_index + len(calls),
+                len(calls),
                 id_factory=id_factory,
             )
         )
-        converted_block_spans.append(block_match.span())
 
-    return ParsedToolCalls(
-        calls=calls,
-        remaining_text=_remove_spans(model_output, converted_block_spans),
-    )
+    return calls
 
 
 def parse_muse_glimmer_tool_calls(
     model_output: str,
     allowed_tool_names: set[str],
     *,
-    starting_index: int = 0,
     id_factory: ToolCallIdFactory | None = None,
-) -> ParsedToolCalls:
+) -> list[JsonObject]:
     calls: list[JsonObject] = []
-    converted_block_spans: list[tuple[int, int]] = []
     for block_match in _MUSE_GLIMMER_BLOCK_RE.finditer(model_output):
-        block_call_count = len(calls)
         for invoke_match in _MUSE_GLIMMER_INVOKE_RE.finditer(block_match.group(1)):
             tool_name = invoke_match.group(1).strip()
             if tool_name not in allowed_tool_names:
@@ -232,31 +206,12 @@ def parse_muse_glimmer_tool_calls(
                 build_openai_tool_call(
                     tool_name,
                     arguments,
-                    starting_index + len(calls),
+                    len(calls),
                     id_factory=id_factory,
                 )
             )
-        if len(calls) > block_call_count:
-            converted_block_spans.append(block_match.span())
 
-    return ParsedToolCalls(
-        calls=calls,
-        remaining_text=_remove_spans(model_output, converted_block_spans),
-    )
-
-
-def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
-    if len(spans) == 0:
-        return text.strip()
-
-    parts: list[str] = []
-    position = 0
-    for start, end in spans:
-        parts.append(text[position:start])
-        parts.append(" ")
-        position = end
-    parts.append(text[position:])
-    return "".join(parts).strip()
+    return calls
 
 
 def parse_gemma4_arguments_object(value: str) -> JsonObject | None:

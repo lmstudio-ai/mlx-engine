@@ -13,8 +13,8 @@ This document describes the current `/v1/chat/completions` tool-calling contract
   - Qwen 3.5 `<tool_call>...</tool_call>`
   - Gemma 4 `<|tool_call>...<tool_call|>`
   - Muse Glimmer `<atem:function_calls>...</atem:function_calls>`
-- Text responses when tools are available but the model does not emit a supported tool-call marker.
-- Text around a valid tool call is emitted as normal content deltas; the terminal event still uses `finish_reason: "tool_calls"`.
+- Text responses when tools are available but no valid tool call is parsed.
+- Exclusive tool-call turns: when a valid tool call is parsed, the response emits `tool_calls` with `finish_reason: "tool_calls"` and suppresses surrounding model text.
 - `strict: true` validates parsed tool-call arguments against the tool parameter schema after generation.
 
 ## Intentionally unsupported for this MVP
@@ -28,6 +28,6 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 
 ## Streaming behavior
 
-When tools are active, the server streams normal content until it sees a known tool-call start marker. From the first marker onward it buffers output, up to 1 MiB, so the completed tool-call block can be parsed safely. If no valid tool call is parsed, the buffered text is returned as ordinary assistant content.
+When tools are active, the server buffers generated text, up to 1 MiB, until generation finishes. It then parses the buffer. If a valid tool call is parsed, only the structured tool call is emitted. If no valid tool call is parsed, the buffered text is returned as ordinary assistant content.
 
 If the model emits more than one valid tool call in serial mode, the server returns a stream error instead of silently dropping calls.
