@@ -19,6 +19,7 @@ from mlx_engine.openai_tool_calling.models import (
 from mlx_engine.openai_tool_calling.native import (
     parse_gemma4_arguments_object,
     parse_gemma4_tool_calls,
+    parse_muse_glimmer_tool_calls,
     parse_native_tool_calls,
     parse_qwen35_tool_argument_value,
     parse_qwen35_tool_calls,
@@ -49,6 +50,7 @@ __all__ = [
     "parse_gemma4_arguments_object",
     "parse_gemma4_tool_calls",
     "parse_generic_tool_call_response",
+    "parse_muse_glimmer_tool_calls",
     "parse_native_tool_calls",
     "parse_openai_tool_calls",
     "parse_qwen35_tool_argument_value",

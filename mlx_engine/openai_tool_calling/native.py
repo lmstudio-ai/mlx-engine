@@ -15,6 +15,8 @@ from mlx_engine.openai_tool_calling.models import (
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_CALL_END,
     GEMMA4_TOOL_CALL_START,
+    MUSE_GLIMMER_ATEM_END,
+    MUSE_GLIMMER_ATEM_START,
     QWEN35_TOOL_CALL_END,
     QWEN35_TOOL_CALL_START,
 )
@@ -34,6 +36,16 @@ _GEMMA4_BLOCK_RE = re.compile(
 )
 _GEMMA4_CALL_RE = re.compile(
     r"^\s*call:\s*([A-Za-z_][A-Za-z0-9_.$/:-]*)\s*(.*)$", re.DOTALL
+)
+_MUSE_GLIMMER_BLOCK_RE = re.compile(
+    rf"{re.escape(MUSE_GLIMMER_ATEM_START)}(.*?){re.escape(MUSE_GLIMMER_ATEM_END)}",
+    re.DOTALL,
+)
+_MUSE_GLIMMER_INVOKE_RE = re.compile(
+    r'<atem:invoke\s+name="([^"]+)">(.*?)</atem:invoke>', re.DOTALL
+)
+_MUSE_GLIMMER_PARAMETER_RE = re.compile(
+    r'<atem:parameter\s+name="([^"]+)">(.*?)</atem:parameter>', re.DOTALL
 )
 _GEMMA4_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_.$/-]+")
 _GEMMA4_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
@@ -64,15 +76,26 @@ def parse_native_tool_calls(
         starting_index=len(qwen35_result.calls),
         id_factory=id_factory,
     )
+    muse_glimmer_result = parse_muse_glimmer_tool_calls(
+        gemma4_result.remaining_text,
+        allowed_tool_names,
+        starting_index=len(qwen35_result.calls) + len(gemma4_result.calls),
+        id_factory=id_factory,
+    )
     return ParsedToolCalls(
-        calls=[*qwen35_result.calls, *gemma4_result.calls],
-        remaining_text=gemma4_result.remaining_text,
+        calls=[
+            *qwen35_result.calls,
+            *gemma4_result.calls,
+            *muse_glimmer_result.calls,
+        ],
+        remaining_text=muse_glimmer_result.remaining_text,
     )
 
 
 def remove_native_tool_call_blocks(text: str) -> str:
     text = _QWEN35_BLOCK_RE.sub(" ", text)
     text = _GEMMA4_BLOCK_RE.sub(" ", text)
+    text = _MUSE_GLIMMER_BLOCK_RE.sub(" ", text)
     return text.strip()
 
 
@@ -155,6 +178,44 @@ def parse_gemma4_tool_calls(
     return ParsedToolCalls(
         calls=calls,
         remaining_text=_GEMMA4_BLOCK_RE.sub(" ", model_output).strip(),
+    )
+
+
+def parse_muse_glimmer_tool_calls(
+    model_output: str,
+    allowed_tool_names: set[str],
+    *,
+    starting_index: int = 0,
+    id_factory: ToolCallIdFactory | None = None,
+) -> ParsedToolCalls:
+    calls: list[JsonObject] = []
+    for block_match in _MUSE_GLIMMER_BLOCK_RE.finditer(model_output):
+        for invoke_match in _MUSE_GLIMMER_INVOKE_RE.finditer(block_match.group(1)):
+            tool_name = invoke_match.group(1).strip()
+            if tool_name not in allowed_tool_names:
+                continue
+            arguments: JsonObject = {}
+            for parameter_match in _MUSE_GLIMMER_PARAMETER_RE.finditer(
+                invoke_match.group(2)
+            ):
+                parameter_name = parameter_match.group(1).strip()
+                if parameter_name == "":
+                    continue
+                arguments[parameter_name] = parse_qwen35_tool_argument_value(
+                    parameter_match.group(2)
+                )
+            calls.append(
+                build_openai_tool_call(
+                    tool_name,
+                    arguments,
+                    starting_index + len(calls),
+                    id_factory=id_factory,
+                )
+            )
+
+    return ParsedToolCalls(
+        calls=calls,
+        remaining_text=_MUSE_GLIMMER_BLOCK_RE.sub(" ", model_output).strip(),
     )
 
 

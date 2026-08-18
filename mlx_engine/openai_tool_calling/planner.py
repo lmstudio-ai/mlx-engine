@@ -31,6 +31,7 @@ class ToolCallingPlan:
     template_tools: list[Any] | None
     template_tool_choice: Any
     generation_json_schema: str | None
+    max_tool_calls: int = 1
 
     @property
     def has_active_tools(self) -> bool:
@@ -46,10 +47,15 @@ class ToolCallingPlan:
 
     def parse_output(self, model_output: str) -> ParsedToolCalls:
         if self.strategy == "generic_json":
-            return parse_generic_tool_call_response(model_output, self.tool_specs)
-        if self.strategy == "native":
-            return parse_native_tool_calls(model_output, self.tool_specs)
-        return ParsedToolCalls(calls=[], remaining_text=model_output)
+            parsed = parse_generic_tool_call_response(model_output, self.tool_specs)
+        elif self.strategy == "native":
+            parsed = parse_native_tool_calls(model_output, self.tool_specs)
+        else:
+            return ParsedToolCalls(calls=[], remaining_text=model_output)
+        return ParsedToolCalls(
+            calls=parsed.calls[: self.max_tool_calls],
+            remaining_text=parsed.remaining_text,
+        )
 
 
 def build_tool_calling_plan(
@@ -68,11 +74,7 @@ def build_tool_calling_plan(
 
     if tool_choice is not None and tool_choice.is_forced:
         selected_tool_specs = _select_forced_tool_specs(tool_specs, tool_choice)
-        allow_parallel_tool_calls = (
-            parallel_tool_calls
-            and tool_choice.mode != "function"
-            and len(tool_specs) > 1
-        )
+        allow_parallel_tool_calls = False
         instruction = build_generic_tool_call_instruction(
             selected_tool_specs,
             allow_parallel_tool_calls=allow_parallel_tool_calls,
@@ -93,6 +95,7 @@ def build_tool_calling_plan(
             template_tools=None,
             template_tool_choice=None,
             generation_json_schema=generation_json_schema,
+            max_tool_calls=1,
         )
 
     return ToolCallingPlan(
@@ -108,6 +111,7 @@ def build_tool_calling_plan(
         and len(tool_specs) > 0
         else None,
         generation_json_schema=response_json_schema,
+        max_tool_calls=1,
     )
 
 

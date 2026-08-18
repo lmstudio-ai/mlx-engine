@@ -247,16 +247,77 @@ def test_invalid_generation_settings_are_rejected_before_rendering(overrides):
     assert renderer.calls == []
 
 
-def test_tools_are_rejected():
+def test_tools_are_forwarded_to_template_and_native_parser_plan():
+    renderer = _FakeRenderer()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search the web",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    request = prepare_chat_generation_request(
+        _base_request(tools=tools, tool_choice="auto", parallel_tool_calls=False),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.strategy == "native"
+    assert request.tool_calling_plan.max_tool_calls == 1
+    assert renderer.calls[0][1]["tools"] == tools
+    assert renderer.calls[0][1]["tool_choice"] == "auto"
+
+
+def test_forced_tool_choice_uses_generic_json_schema_plan():
     renderer = _FakeRenderer()
 
-    with pytest.raises(ChatRequestError, match="Tools are not supported yet"):
+    request = prepare_chat_generation_request(
+        _base_request(
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            tool_choice="required",
+            parallel_tool_calls=True,
+        ),
+        model_kit=_FakeTextModelKit(renderer),
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.strategy == "generic_json"
+    assert "json_schema" in request.generation_kwargs
+    assert "Tool calling instructions:" in renderer.calls[0][0][0]["content"]
+    schema = json.loads(request.generation_kwargs["json_schema"])
+    assert schema["properties"]["tool_calls"]["maxItems"] == 1
+
+
+def test_invalid_tool_schema_is_rejected_before_rendering():
+    renderer = _FakeRenderer()
+
+    with pytest.raises(ChatRequestError, match="valid JSON Schema"):
         prepare_chat_generation_request(
             _base_request(
                 tools=[
                     {
                         "type": "function",
-                        "function": {"name": "search"},
+                        "function": {
+                            "name": "search",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"query": {"type": "invalid"}},
+                            },
+                        },
                     }
                 ]
             ),
@@ -366,6 +427,7 @@ def test_final_assistant_message_is_rendered_as_a_prefill():
         "return_tensors",
         "tokenize",
         "tokenizer_kwargs",
+        "tool_choice",
         "tools",
         "truncation",
     ],

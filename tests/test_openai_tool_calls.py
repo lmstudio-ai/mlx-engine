@@ -19,6 +19,8 @@ from mlx_engine.openai_tool_calling import (
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_CALL_END,
     GEMMA4_TOOL_CALL_START,
+    MUSE_GLIMMER_ATEM_END,
+    MUSE_GLIMMER_ATEM_START,
     QWEN35_TOOL_CALL_END,
     QWEN35_TOOL_CALL_START,
 )
@@ -298,7 +300,27 @@ def test_tool_calling_plan_keeps_native_path_for_auto_choice():
     assert plan.template_tools == tools
     assert plan.template_tool_choice == "auto"
     assert plan.should_buffer_output
+    assert plan.max_tool_calls == 1
     assert plan.generation_json_schema == response_schema
+
+
+def test_tool_calling_plan_returns_only_one_tool_call_for_serial_mvp():
+    plan = build_tool_calling_plan(
+        messages=[{"role": "user", "content": "Find Paris."}],
+        tools=[_tool("lookup"), _tool("search")],
+        tool_choice_value="auto",
+        parallel_tool_calls=True,
+        response_json_schema=None,
+    )
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup></function>{QWEN35_TOOL_CALL_END}"
+        f"{QWEN35_TOOL_CALL_START}<function=search></function>{QWEN35_TOOL_CALL_END}"
+    )
+
+    result = plan.parse_output(output)
+
+    assert [call["function"]["name"] for call in result.calls] == ["lookup"]
+    assert result.remaining_text == ""
 
 
 def test_qwen35_tool_call_parses_parameters_as_openai_tool_call():
@@ -399,11 +421,40 @@ def test_gemma4_tool_call_parses_native_call_as_openai_tool_call():
     assert "suffix" in result.remaining_text
 
 
+def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
+    output = (
+        "prefix "
+        f"{MUSE_GLIMMER_ATEM_START}"
+        '<atem:invoke name="lookup">'
+        '<atem:parameter name="query">weather</atem:parameter>'
+        '<atem:parameter name="metadata">{"city":"Paris"}</atem:parameter>'
+        "</atem:invoke>"
+        f"{MUSE_GLIMMER_ATEM_END}"
+        " suffix"
+    )
+
+    result = parse_openai_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert len(result.calls) == 1
+    call = result.calls[0]
+    assert call["function"]["name"] == "lookup"
+    assert _arguments(call) == {"query": "weather", "metadata": {"city": "Paris"}}
+    assert MUSE_GLIMMER_ATEM_START not in result.remaining_text
+    assert MUSE_GLIMMER_ATEM_END not in result.remaining_text
+    assert "prefix" in result.remaining_text
+    assert "suffix" in result.remaining_text
+
+
 def test_parser_removes_native_blocks_for_unknown_tool_names():
     output = (
         "prefix "
         f"{QWEN35_TOOL_CALL_START}<function=unknown></function>{QWEN35_TOOL_CALL_END}"
         f"{GEMMA4_TOOL_CALL_START}call:also_unknown{{}}{GEMMA4_TOOL_CALL_END}"
+        f"{MUSE_GLIMMER_ATEM_START}"
+        '<atem:invoke name="muse_unknown"></atem:invoke>'
+        f"{MUSE_GLIMMER_ATEM_END}"
         " suffix"
     )
 
@@ -414,6 +465,7 @@ def test_parser_removes_native_blocks_for_unknown_tool_names():
     assert result.calls == []
     assert QWEN35_TOOL_CALL_START not in result.remaining_text
     assert GEMMA4_TOOL_CALL_START not in result.remaining_text
+    assert MUSE_GLIMMER_ATEM_START not in result.remaining_text
     assert "prefix" in result.remaining_text
     assert "suffix" in result.remaining_text
 

@@ -273,7 +273,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
                 request_id=session.request_id,
                 prompt_progress_reporter=reporter,
             )
-            self._stream_generation(generator, reporter)
+            self._stream_generation(generator, request, reporter)
             normal_completion = True
         except _ClientConnectionError:
             logger.debug("Generation client disconnected: %s", session.request_id)
@@ -296,38 +296,85 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
     def _stream_generation(
         self,
         generator: Iterator[GenerationResult],
+        request: ChatGenerationRequest,
         reporter: _SsePromptProgressReporter,
     ) -> None:
         completion_tokens = 0
-        terminal_sent = False
+        output_parts: list[str] = []
+        stop_condition: GenerationStopCondition | None = None
+        tool_calling_plan = request.tool_calling_plan
 
         for result in generator:
             completion_tokens += len(result.tokens)
             if result.text != "":
-                self._write_sse_json(
-                    {
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": result.text},
-                                "finish_reason": None,
-                            }
-                        ]
-                    }
-                )
+                if tool_calling_plan.should_buffer_output:
+                    output_parts.append(result.text)
+                else:
+                    self._write_content_delta(result.text)
             if result.stop_condition is not None:
+                stop_condition = result.stop_condition
+
+        if stop_condition is None:
+            raise RuntimeError("MLX generation ended without a stop condition.")
+
+        if tool_calling_plan.should_buffer_output:
+            parsed_tool_calls = tool_calling_plan.parse_output("".join(output_parts))
+            if len(parsed_tool_calls.calls) > 0:
+                self._write_tool_calls_delta(parsed_tool_calls.calls)
                 self._write_sse_json(
                     self._terminal_payload(
-                        stop_condition=result.stop_condition,
+                        stop_condition=stop_condition,
                         prompt_tokens=reporter.prompt_tokens,
                         completion_tokens=completion_tokens,
+                        finish_reason_override="tool_calls",
                     )
                 )
-                terminal_sent = True
+                self._write_bytes(b"data: [DONE]\n\n")
+                return
 
-        if not terminal_sent:
-            raise RuntimeError("MLX generation ended without a stop condition.")
+            if tool_calling_plan.requires_tool_call:
+                raise RuntimeError(
+                    "A forced tool_choice was specified, but the model did not "
+                    "produce a valid tool call."
+                )
+
+            if parsed_tool_calls.remaining_text != "":
+                self._write_content_delta(parsed_tool_calls.remaining_text)
+
+        self._write_sse_json(
+            self._terminal_payload(
+                stop_condition=stop_condition,
+                prompt_tokens=reporter.prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+        )
         self._write_bytes(b"data: [DONE]\n\n")
+
+    def _write_content_delta(self, text: str) -> None:
+        self._write_sse_json(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": text},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        )
+
+    def _write_tool_calls_delta(self, tool_calls: list[dict]) -> None:
+        self._write_sse_json(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": tool_calls},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        )
 
     def _terminal_payload(
         self,
@@ -335,6 +382,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
         stop_condition: GenerationStopCondition,
         prompt_tokens: int,
         completion_tokens: int,
+        finish_reason_override: str | None = None,
     ) -> dict:
         stop_reason = stop_condition.stop_reason
         if stop_reason == "eos_token":
@@ -360,7 +408,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
                 {
                     "index": 0,
                     "delta": {},
-                    "finish_reason": finish_reason,
+                    "finish_reason": finish_reason_override or finish_reason,
                 }
             ],
             "usage": {

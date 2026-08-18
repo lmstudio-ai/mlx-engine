@@ -3,10 +3,16 @@ import binascii
 from dataclasses import dataclass
 from io import BytesIO
 import json
-from typing import Annotated, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
+
+from mlx_engine.openai_tool_calling import (
+    ToolCallingPlan,
+    ToolCallingValidationError,
+    build_tool_calling_plan,
+)
 
 
 _CHAT_TEMPLATE_CONTROL_KEYS = {
@@ -25,6 +31,7 @@ _CHAT_TEMPLATE_CONTROL_KEYS = {
     "return_tensors",
     "tokenize",
     "tokenizer_kwargs",
+    "tool_choice",
     "tools",
     "truncation",
 }
@@ -95,6 +102,8 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
     tools: list[dict] | None = None
+    tool_choice: Any = None
+    parallel_tool_calls: bool = True
     response_format: _JsonSchemaResponseFormat | None = None
     chat_template_kwargs: dict = Field(default_factory=dict)
 
@@ -103,6 +112,7 @@ class ChatCompletionRequest(BaseModel):
 class ChatGenerationRequest:
     prompt_tokens: list[int]
     generation_kwargs: dict[str, object]
+    tool_calling_plan: ToolCallingPlan
 
 
 def _validate_image_pixel_count(pixel_count: int) -> None:
@@ -191,8 +201,6 @@ def prepare_chat_generation_request(
     tokenize: Callable[[object, str], list[int]],
 ) -> ChatGenerationRequest:
     request = ChatCompletionRequest.model_validate(body)
-    if request.tools:
-        raise ChatRequestError("Tools are not supported yet.")
 
     unsupported_controls = [
         name
@@ -235,7 +243,24 @@ def prepare_chat_generation_request(
             f"chat_template_kwargs cannot override server rendering controls: {names}."
         )
 
+    response_json_schema = _response_json_schema(request)
+    try:
+        tool_calling_plan = build_tool_calling_plan(
+            messages=normalized_messages,
+            tools=request.tools,
+            tool_choice_value=request.tool_choice,
+            parallel_tool_calls=request.parallel_tool_calls,
+            response_json_schema=response_json_schema,
+        )
+    except ToolCallingValidationError as error:
+        raise ChatRequestError(str(error)) from error
+
     template_kwargs = dict(request.chat_template_kwargs)
+    if tool_calling_plan.template_tools is not None:
+        template_kwargs["tools"] = tool_calling_plan.template_tools
+    if tool_calling_plan.template_tool_choice is not None:
+        template_kwargs["tool_choice"] = tool_calling_plan.template_tool_choice
+
     if has_assistant_prefill:
         template_kwargs["continue_final_message"] = True
         add_generation_prompt = False
@@ -246,7 +271,7 @@ def prepare_chat_generation_request(
         model_kit,
         supports_vision=supports_vision,
     )(
-        normalized_messages,
+        tool_calling_plan.prompt_messages,
         tokenize=False,
         add_generation_prompt=add_generation_prompt,
         **template_kwargs,
@@ -257,10 +282,8 @@ def prepare_chat_generation_request(
         "temp": request.temperature,
         "top_k": request.top_k,
     }
-    if request.response_format is not None:
-        generation_kwargs["json_schema"] = json.dumps(
-            request.response_format.json_schema.schema_
-        )
+    if tool_calling_plan.generation_json_schema is not None:
+        generation_kwargs["json_schema"] = tool_calling_plan.generation_json_schema
     for name, value in (
         ("max_tokens", request.max_tokens),
         ("stop_strings", request.stop),
@@ -274,4 +297,11 @@ def prepare_chat_generation_request(
     return ChatGenerationRequest(
         prompt_tokens=tokenize(model_kit, prompt),
         generation_kwargs=generation_kwargs,
+        tool_calling_plan=tool_calling_plan,
     )
+
+
+def _response_json_schema(request: ChatCompletionRequest) -> str | None:
+    if request.response_format is None:
+        return None
+    return json.dumps(request.response_format.json_schema.schema_)

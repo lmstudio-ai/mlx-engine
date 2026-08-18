@@ -14,6 +14,7 @@ from mlx_engine.server.http import (
     GenerationSession,
     MlxEngineHttpServer,
 )
+from mlx_engine.tool_protocols import QWEN35_TOOL_CALL_END, QWEN35_TOOL_CALL_START
 from mlx_engine.utils.generation_result import (
     GenerationResult,
     GenerationStopCondition,
@@ -611,27 +612,61 @@ def test_vision_usage_uses_the_prepared_prompt_length():
     assert terminal_event["usage"]["prompt_tokens"] == 9
 
 
-def test_tools_are_rejected_before_streaming():
+def test_tools_return_one_tool_call_from_live_chat_endpoint():
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        "<parameter=query>weather</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+        f"{QWEN35_TOOL_CALL_START}<function=search>"
+        "<parameter=query>news</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        yield GenerationResult(
+            text=output,
+            tokens=[Token(id=10, text=output, logprob=-0.1)],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="eos_token",
+                stop_string="",
+                stop_tokens=[2],
+            ),
+        )
+
     runtime = EngineRuntime(
         _FakeModelKit(),
         supports_vision=False,
+        create_generator_fn=create_generator,
         get_runtime_load_info_fn=lambda _model_kit: {},
+        tokenize_fn=lambda _model_kit, _prompt: [1],
     )
     body = _request_body()
-    body["tools"] = [{"type": "function", "function": {"name": "search"}}]
+    body["parallel_tool_calls"] = False
+    body["tools"] = [
+        {"type": "function", "function": {"name": "lookup"}},
+        {"type": "function", "function": {"name": "search"}},
+    ]
 
     with _running_server(runtime) as port:
-        status, response_body = _request(
+        status, response_text = _request(
             port,
             "POST",
             "/v1/chat/completions",
             body=body,
         )
 
-    assert status == 400
-    assert json.loads(response_body) == {
-        "error": {"message": "Tools are not supported yet."}
-    }
+    assert status == 200
+    assert QWEN35_TOOL_CALL_START not in response_text
+    events = _parse_sse(response_text)
+    tool_calls = events[0]["choices"][0]["delta"]["tool_calls"]
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["index"] == 0
+    assert tool_calls[0]["type"] == "function"
+    assert tool_calls[0]["id"].startswith("call_")
+    assert tool_calls[0]["function"]["name"] == "lookup"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"query": "weather"}
+    assert events[1]["choices"][0]["finish_reason"] == "tool_calls"
 
 
 def test_generation_errors_are_returned_inside_the_stream():
