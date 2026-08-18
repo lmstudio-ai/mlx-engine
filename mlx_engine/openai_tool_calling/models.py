@@ -144,6 +144,10 @@ def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
             f"{prefix}.function.name must be a non-empty string"
         )
 
+    if "strict" in function and not isinstance(function["strict"], bool):
+        raise ToolCallingValidationError(f"{prefix}.function.strict must be a boolean")
+    if "strict" in tool and not isinstance(tool["strict"], bool):
+        raise ToolCallingValidationError(f"{prefix}.strict must be a boolean")
     strict = function.get("strict") is True or tool.get("strict") is True
     parameters_missing = "parameters" not in function or function["parameters"] is None
     if parameters_missing:

@@ -105,6 +105,45 @@ def test_extract_function_tool_specs_rejects_non_string_description(description)
         )
 
 
+@pytest.mark.parametrize("strict", [None, "true", 1, [], {}])
+def test_extract_function_tool_specs_rejects_non_boolean_function_strict(strict):
+    with pytest.raises(
+        ToolCallingValidationError, match=r"function\.strict must be a boolean"
+    ):
+        extract_function_tool_specs(
+            [{"type": "function", "function": {"name": "lookup", "strict": strict}}]
+        )
+
+
+@pytest.mark.parametrize("strict", [None, "true", 1, [], {}])
+def test_extract_function_tool_specs_rejects_non_boolean_tool_strict(strict):
+    with pytest.raises(ToolCallingValidationError, match=r"strict must be a boolean"):
+        extract_function_tool_specs(
+            [{"type": "function", "strict": strict, "function": {"name": "lookup"}}]
+        )
+
+
+def test_extract_function_tool_specs_accepts_boolean_strict_values():
+    assert (
+        _specs({"type": "function", "function": {"name": "lookup", "strict": False}})[
+            0
+        ].strict
+        is False
+    )
+    assert (
+        _specs({"type": "function", "strict": False, "function": {"name": "lookup"}})[
+            0
+        ].strict
+        is False
+    )
+    assert (
+        _specs({"type": "function", "strict": True, "function": {"name": "lookup"}})[
+            0
+        ].strict
+        is True
+    )
+
+
 def test_parse_tool_choice_supports_only_auto_and_none_for_mvp():
     assert parse_tool_choice_value(None) is None
     assert parse_tool_choice_value("auto") == "auto"
