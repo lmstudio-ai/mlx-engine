@@ -24,8 +24,8 @@ from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     slice_prompt_kwargs,
 )
 from mlx_engine.model_kit.patches.gemma4 import (
+    image_prefill_runs as gemma4_image_prefill_runs,
     prepare_cached_suffix_prompt_kwargs as prepare_gemma4_cached_suffix_prompt_kwargs,
-    visual_prefill_prefix_len as gemma4_visual_prefill_prefix_len,
 )
 from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
@@ -786,11 +786,9 @@ class _PromptPrefill:
         self._all_tokens = list(all_tokens) if all_tokens is not None else []
         self._processed_prefix_len = len(self._all_tokens)
         self._prefix_cache_save_state = prefix_cache_save_state
-        self._visual_prefill_prefix_len = gemma4_visual_prefill_prefix_len(
+        self._gemma4_image_prefill_runs = gemma4_image_prefill_runs(
             model,
             prompt_kwargs,
-            prefix_cache_save_state.image_spans,
-            len(self._all_tokens),
         )
         # Restored exact hot caches may carry an existing row. Trimmed/disk
         # restores pass None and let prompt prep recompute it.
@@ -854,28 +852,28 @@ class _PromptPrefill:
         if remaining_tokens <= 1:
             return 0
 
-        # Apply the Gemma4 visual-prefix rule before normal cache-boundary
-        # alignment. If a restore lands before a new image, token-type padding
-        # lets the image suffix build its mask against the restored KV prefix.
-        visual_prefix_remaining = self._visual_prefill_prefix_remaining()
-        if visual_prefix_remaining is not None:
-            if visual_prefix_remaining < remaining_tokens:
-                return visual_prefix_remaining
-            return 0
-
+        next_step = 0
         saving_prompt_cache = self._prefix_cache_save_state.callback is not None
+        # Cache-producing prefill calls normally end on the 256-token prefix
+        # grid because opaque ArraysCache/SSM state is restorable only at an exact
+        # model-call endpoint. Gemma 4 has only KV/rotating-KV caches, so its
+        # image-aware adjustment may use a non-aligned endpoint instead.
         processed_remainder = self._processed_prefix_len % self.prefill_step_size
         if saving_prompt_cache and processed_remainder:
             # After a partial restore, land on the next normal prefill boundary.
             alignment_step = self.prefill_step_size - processed_remainder
             if alignment_step < remaining_tokens:
-                return min(alignment_step, remaining_tokens - 1)
+                next_step = min(alignment_step, remaining_tokens - 1)
 
-        if remaining_tokens > self.prefill_step_size:
-            return min(self.prefill_step_size, remaining_tokens - 1)
+        if next_step == 0 and remaining_tokens > self.prefill_step_size:
+            next_step = min(self.prefill_step_size, remaining_tokens - 1)
 
-        if saving_prompt_cache and any(
-            type(cache).__name__ == "ArraysCache" for cache in self.prompt_cache
+        if (
+            next_step == 0
+            and saving_prompt_cache
+            and any(
+                type(cache).__name__ == "ArraysCache" for cache in self.prompt_cache
+            )
         ):
             # Opaque state caches are restorable only at exact saved boundaries.
             max_reusable_prefix_len = self._processed_prefix_len + remaining_tokens - 1
@@ -883,18 +881,49 @@ class _PromptPrefill:
                 max_reusable_prefix_len // DEFAULT_PREFIX_CHUNK_SIZE
             ) * DEFAULT_PREFIX_CHUNK_SIZE
             if target_prefix_len > self._processed_prefix_len:
-                return target_prefix_len - self._processed_prefix_len
+                next_step = target_prefix_len - self._processed_prefix_len
 
-        return 0
+        return self._step_without_splitting_gemma4_image_run(next_step)
 
-    def _visual_prefill_prefix_remaining(self) -> int | None:
-        if self._visual_prefill_prefix_len is None:
-            return None
-        processed_prompt_len = self._processed_prefix_len - len(self._all_tokens)
-        remaining = self._visual_prefill_prefix_len - processed_prompt_len
-        if remaining <= 0:
-            return None
-        return remaining
+    def _step_without_splitting_gemma4_image_run(self, proposed_step: int) -> int:
+        if proposed_step == 0 or self._gemma4_image_prefill_runs is None:
+            return proposed_step
+
+        suffix_start = len(self._all_tokens)
+        processed_prompt_len = self._processed_prefix_len - suffix_start
+        proposed_boundary = processed_prompt_len + proposed_step
+        for image_start, image_end in self._gemma4_image_prefill_runs:
+            if image_start < proposed_boundary < image_end:
+                absolute_image_start = suffix_start + image_start
+                aligned_start = (
+                    absolute_image_start // DEFAULT_PREFIX_CHUNK_SIZE
+                ) * DEFAULT_PREFIX_CHUNK_SIZE - suffix_start
+                while aligned_start > processed_prompt_len and any(
+                    start < aligned_start < end
+                    for start, end in self._gemma4_image_prefill_runs
+                ):
+                    aligned_start -= DEFAULT_PREFIX_CHUNK_SIZE
+
+                # Prefer the nearest globally safe cache boundary before using an
+                # exact image boundary. Never exceed the configured step unless
+                # one image is itself longer.
+                if aligned_start > processed_prompt_len:
+                    safe_boundary = aligned_start
+                elif image_end - processed_prompt_len <= self.prefill_step_size:
+                    safe_boundary = image_end
+                elif processed_prompt_len < image_start:
+                    safe_boundary = image_start
+                else:
+                    # A single image longer than the configured step is the
+                    # smallest valid model call from its start.
+                    safe_boundary = image_end
+
+                safe_step = safe_boundary - processed_prompt_len
+                if safe_step >= self._inputs_embeds.shape[1]:
+                    return 0
+                return safe_step
+
+        return proposed_step
 
     def _prompt_kwargs_for_next(self, n: int) -> dict:
         # Slice locally instead of relying on model-specific n_to_process hacks.
@@ -904,7 +933,7 @@ class _PromptPrefill:
             n,
             mask_key_end=self._processed_prefix_len + n,
         )
-        return self._prepare_cached_suffix_prompt_kwargs(
+        return self._prepare_gemma4_prompt_kwargs(
             prompt_kwargs,
             self._processed_prefix_len + n,
         )
@@ -1022,19 +1051,39 @@ class _PromptPrefill:
             self._inputs_embeds.shape[1],
             mask_key_end=self._processed_prefix_len + self._inputs_embeds.shape[1],
         )
-        return self._prepare_cached_suffix_prompt_kwargs(
+        return self._prepare_gemma4_prompt_kwargs(
             prompt_kwargs,
             self._processed_prefix_len + self._inputs_embeds.shape[1],
         )
 
-    def _prepare_cached_suffix_prompt_kwargs(
+    def _prepare_gemma4_prompt_kwargs(
         self,
         prompt_kwargs: dict,
         key_len: int,
     ) -> dict:
-        if self._visual_prefill_prefix_len is None:
+        if self._gemma4_image_prefill_runs is None:
             return prompt_kwargs
-        return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
+
+        # These exact token-type runs are independent of the cache's potentially
+        # coarse image spans. Keep token types only for image queries so the mask
+        # patch need not scan an MLX array on every model call.
+        suffix_start = len(self._all_tokens)
+        query_start = self._processed_prefix_len - suffix_start
+        query_end = key_len - suffix_start
+        has_image = any(
+            image_start < query_end and query_start < image_end
+            for image_start, image_end in self._gemma4_image_prefill_runs
+        )
+        if has_image:
+            return prepare_gemma4_cached_suffix_prompt_kwargs(prompt_kwargs, key_len)
+
+        # Multimodal text slices still carry an all-zero token-type array. Drop
+        # both supported names so None remains the no-image sentinel for the
+        # patched mask builder.
+        prepared = dict(prompt_kwargs)
+        prepared.pop("mm_token_type_ids", None)
+        prepared.pop("token_type_ids", None)
+        return prepared
 
 
 class BatchGenerator:

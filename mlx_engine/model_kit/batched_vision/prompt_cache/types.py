@@ -3,7 +3,11 @@ from typing import Any, Final, Literal, TypeAlias
 
 
 # LMCache defaults to 256-token external chunks, and MLX KV caches allocate in
-# 256-token steps. This is a cache store chunk size, not vLLM's KV page size.
+# 256-token steps. Cache-producing prefill calls normally end on this grid because
+# opaque ArraysCache/SSM state is reusable only at an exact model-call endpoint.
+# Gemma 4 may instead end at an image-safe boundary; its sliceable KV records are
+# still stored on this grid. This is a cache store chunk size, not vLLM's KV
+# page size.
 DEFAULT_PREFIX_CHUNK_SIZE = 256
 RecordKind: TypeAlias = Literal["kv_delta", "rotating_delta", "state_checkpoint"]
 RECORD_KIND_KV_DELTA: Final[RecordKind] = "kv_delta"

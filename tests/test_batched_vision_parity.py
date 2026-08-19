@@ -365,13 +365,11 @@ def test_vlm_generation_trace_matches_mlx_vlm_same_inputs(case: VlmParityCase):
         assert len(engine_logits) == max_tokens + 1
         assert len(upstream_logits) == max_tokens + 1
         if case.id == "gemma4_12b" and name == "image":
-            # Gemma4 unified image prompts intentionally split prefill at the
-            # visual-prefix boundary so later text can use normal cache chunks
-            # without splitting the bidirectional visual attention span. That
-            # gives 12B a different BF16/quantized schedule than mlx-vlm's
-            # direct one-shot reference; disabling only that split restores
-            # exact logits. Keep this case focused on emitted tokens and
-            # selected logprob stability.
+            # The engine follows Transformers: full layers stay causal, and
+            # sliding layers are bidirectional only within image blocks. It also
+            # chunks without splitting an image. mlx-vlm's one-shot reference
+            # applies the visual overlay to full layers, so keep this comparison
+            # focused on emitted tokens and selected logprob stability.
             assert engine_logprobs == pytest.approx(upstream_logprobs, abs=0.125)
             continue
 
