@@ -258,20 +258,24 @@ def parse_muse_glimmer_tool_calls(
 
 
 def parse_gemma4_arguments_object(value: str) -> JsonObject | None:
-    parser = _Gemma4ValueParser(value)
-    parsed_value = parser.parse_object()
-    if parsed_value is None:
-        return None
-    parser.skip_whitespace()
-    if not parser.at_end():
-        return None
-    return parsed_value
+    for recover_unclosed_strings in (False, True):
+        parser = _Gemma4ValueParser(
+            value,
+            recover_unclosed_strings=recover_unclosed_strings,
+        )
+        parsed_value = parser.parse_object()
+        if parsed_value is not None:
+            parser.skip_whitespace()
+            if parser.at_end():
+                return parsed_value
+    return None
 
 
 class _Gemma4ValueParser:
-    def __init__(self, text: str):
+    def __init__(self, text: str, *, recover_unclosed_strings: bool):
         self._text = text
         self._position = 0
+        self._recover_unclosed_strings = recover_unclosed_strings
 
     def at_end(self) -> bool:
         return self._position >= len(self._text)
@@ -309,7 +313,9 @@ class _Gemma4ValueParser:
 
     def _parse_key(self) -> str | None:
         self.skip_whitespace()
-        string_key = self._parse_gemma_string()
+        string_key = self._parse_gemma_string(recovery_terminators=":")
+        if string_key is _PARSE_FAILURE:
+            return None
         if string_key is not None:
             return string_key
 
@@ -321,7 +327,9 @@ class _Gemma4ValueParser:
 
     def _parse_value(self) -> Any:
         self.skip_whitespace()
-        string_value = self._parse_gemma_string()
+        string_value = self._parse_gemma_string(recovery_terminators=",}]")
+        if string_value is _PARSE_FAILURE:
+            return _PARSE_FAILURE
         if string_value is not None:
             return string_value
 
@@ -361,15 +369,25 @@ class _Gemma4ValueParser:
                 return _PARSE_FAILURE
             self.skip_whitespace()
 
-    def _parse_gemma_string(self) -> str | None:
+    def _parse_gemma_string(self, *, recovery_terminators: str) -> Any:
         if not self._consume(_GEMMA4_STRING_DELIMITER):
             return None
+        value_start = self._position
         end_index = self._text.find(_GEMMA4_STRING_DELIMITER, self._position)
-        if end_index < 0:
-            return None
-        value = self._text[self._position : end_index]
-        self._position = end_index + len(_GEMMA4_STRING_DELIMITER)
-        return value
+        recovery_end = self._find_first(recovery_terminators)
+        if self._recover_unclosed_strings and (
+            end_index < 0 or 0 <= recovery_end < end_index
+        ):
+            if recovery_end < 0:
+                recovery_end = len(self._text)
+            value = self._text[value_start:recovery_end]
+            self._position = recovery_end
+            return value
+        if end_index >= 0:
+            value = self._text[value_start:end_index]
+            self._position = end_index + len(_GEMMA4_STRING_DELIMITER)
+            return value
+        return _PARSE_FAILURE
 
     def _parse_literal(self) -> Any:
         for literal_text, literal_value in (
@@ -397,6 +415,14 @@ class _Gemma4ValueParser:
 
     def _peek(self) -> str | None:
         return None if self.at_end() else self._text[self._position]
+
+    def _find_first(self, candidates: str) -> int:
+        indexes = [
+            index
+            for candidate in candidates
+            if (index := self._text.find(candidate, self._position)) >= 0
+        ]
+        return min(indexes) if indexes else -1
 
     def _consume(self, expected: str) -> bool:
         if not self._text.startswith(expected, self._position):

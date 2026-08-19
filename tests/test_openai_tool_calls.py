@@ -622,6 +622,46 @@ def test_gemma4_tool_call_string_can_contain_end_marker_text():
     assert _arguments(result[0]) == {"snippet": "before <tool_call|> after"}
 
 
+def test_gemma4_tool_call_closed_string_can_contain_recovery_terminators():
+    output = (
+        f"{GEMMA4_TOOL_CALL_START}"
+        'call:lookup{snippet:<|"|>a,b}c]<|"|>}'
+        f"{GEMMA4_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"snippet": "a,b}c]"}
+
+
+def test_gemma4_tool_call_repairs_unterminated_string_values_as_strings():
+    output = (
+        f"{GEMMA4_TOOL_CALL_START}"
+        'call:lookup{flag:<|"|>true,count:<|"|>1}'
+        f"{GEMMA4_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"flag": "true", "count": "1"}
+
+
+def test_gemma4_tool_call_repairs_unterminated_string_key():
+    output = (
+        f'{GEMMA4_TOOL_CALL_START}call:lookup{{<|"|>flag:true}}{GEMMA4_TOOL_CALL_END}'
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"flag": True}
+
+
 def test_gemma4_tool_call_sanitizes_overflow_numbers():
     output = (
         f"{GEMMA4_TOOL_CALL_START}"
