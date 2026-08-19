@@ -900,6 +900,10 @@ class _PromptPrefill:
             if target_prefix_len > self._processed_prefix_len:
                 next_step = target_prefix_len - self._processed_prefix_len
 
+        # Segment ends change the preferred step; they are not valid split points
+        # inside Gemma 4's bidirectional image attention. The current image
+        # processor caps a run at 280 soft tokens, so even the worst 1,024 -> 512
+        # crossing is bounded at 535 tokens (255 before the image plus 280).
         return self._step_without_splitting_gemma4_image_run(
             next_step,
             maximum_step=step_size,

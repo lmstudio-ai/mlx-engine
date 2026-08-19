@@ -1505,7 +1505,9 @@ def test_segmented_plan_preserves_state_cache_checkpoints_after_restore(monkeypa
     ]
 
 
-def test_dynamic_prefill_plan_uses_active_step_around_gemma4_image(monkeypatch):
+def test_dynamic_prefill_plan_keeps_gemma4_image_whole_across_transition(
+    monkeypatch,
+):
     monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
     monkeypatch.setattr(
         batcher,
@@ -1516,16 +1518,18 @@ def test_dynamic_prefill_plan_uses_active_step_around_gemma4_image(monkeypatch):
     generator = BatchGenerator(
         model=model,
         stop_criteria=lambda _token: False,
-        prefill_step_size=4,
+        prefill_step_size=1_024,
     )
-    prompt = list(range(12))
+    prompt = list(range(2_049))
+    image_start = 1_023
+    image_end = image_start + 280
     token_types = mx.zeros((1, len(prompt)), dtype=mx.int32)
-    token_types[:, 5:7] = 1
+    token_types[:, image_start:image_end] = 1
     plan = PrefillPlan(
         prompt_context_length=len(prompt),
         segments=(
-            PrefillSegment(end_context_length=4, step_size=4),
-            PrefillSegment(end_context_length=len(prompt), step_size=2),
+            PrefillSegment(end_context_length=1_024, step_size=1_024),
+            PrefillSegment(end_context_length=len(prompt), step_size=512),
         ),
     )
 
@@ -1540,13 +1544,24 @@ def test_dynamic_prefill_plan_uses_active_step_around_gemma4_image(monkeypatch):
             prefix_cache_chunks=[],
             all_tokens=[],
             next_prefix_cache_chunk_idx=0,
-            image_spans=[PromptImageSpan(start=5, end=7, image_hash="image")],
+            image_spans=[
+                PromptImageSpan(
+                    start=image_start,
+                    end=image_end,
+                    image_hash="image",
+                )
+            ],
         )
-        for _ in range(6):
+        for _ in range(4):
             generator.next()
     finally:
         generator.close()
 
-    assert [len(call["input_ids"][0]) for call in model.calls] == [4, 1, 2, 2, 2, 1]
-    assert model.calls[1]["mm_token_type_ids"] is None
-    assert model.calls[2]["mm_token_type_ids"] == [[0] * 5 + [1] * 2]
+    # The 535-token call is the worst supported crossing: up to 255 tokens from
+    # the cache grid followed by one complete 280-soft-token image run.
+    assert [len(call["input_ids"][0]) for call in model.calls] == [768, 535, 512, 234]
+    assert model.calls[0]["mm_token_type_ids"] is None
+    assert model.calls[1]["mm_token_type_ids"] == [
+        [0] * image_start + [1] * (image_end - image_start)
+    ]
+    assert model.calls[2]["mm_token_type_ids"] is None
