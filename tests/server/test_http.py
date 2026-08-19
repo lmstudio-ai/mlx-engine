@@ -1400,6 +1400,65 @@ def test_client_disconnect_stops_the_active_mlx_request():
     assert stopped_request_ids[0] != ""
 
 
+def test_client_disconnect_during_tool_buffering_stops_the_active_mlx_request(
+    monkeypatch,
+):
+    monkeypatch.setattr(server_http, "_TOOL_CALL_BUFFER_HEARTBEAT_SECONDS", 0.0)
+    generation_started = threading.Event()
+    generation_stopped = threading.Event()
+    stopped_request_ids = []
+
+    def create_generator(_model_kit, _prompt_tokens, **_kwargs):
+        generation_started.set()
+        while not generation_stopped.is_set():
+            yield GenerationResult(
+                text="buffered tool candidate",
+                tokens=[Token(id=10, text="buffered tool candidate", logprob=-0.1)],
+                top_logprobs=[],
+                stop_condition=None,
+            )
+            time.sleep(0.01)
+        yield GenerationResult(
+            text="",
+            tokens=[],
+            top_logprobs=[],
+            stop_condition=GenerationStopCondition(
+                stop_reason="user_cancelled",
+                stop_string="",
+                stop_tokens=[],
+            ),
+        )
+
+    def stop_generation(_model_kit, request_id):
+        stopped_request_ids.append(request_id)
+        generation_stopped.set()
+
+    runtime = EngineRuntime(
+        _FakeModelKit(),
+        supports_vision=False,
+        create_generator_fn=create_generator,
+        get_runtime_load_info_fn=lambda _model_kit: {},
+        stop_generation_fn=stop_generation,
+        tokenize_fn=lambda _model_kit, _prompt: [1, 2, 3],
+    )
+    body = _request_body()
+    body["tools"] = [{"type": "function", "function": {"name": "lookup"}}]
+
+    with _running_server(runtime) as port:
+        client = socket.create_connection(("127.0.0.1", port), timeout=2)
+        _send_raw_chat_request(client, body)
+        received = _recv_until(client, b"\r\n\r\n")
+        assert b"200 OK" in received
+        assert generation_started.wait(timeout=2)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        client.close()
+
+        assert generation_stopped.wait(timeout=2)
+
+    assert len(stopped_request_ids) == 1
+    assert stopped_request_ids[0] != ""
+
+
 def test_generation_session_cancellation_stops_the_exact_request():
     stopped_request_ids = []
 

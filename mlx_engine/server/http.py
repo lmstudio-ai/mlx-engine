@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import threading
+import time
 from typing import Callable, Iterator
 import uuid
 
@@ -40,6 +41,7 @@ _MAX_REQUEST_BODY_BYTES = _MAX_REQUEST_BODY_MIB * 1024 * 1024
 _REQUEST_READ_TIMEOUT_SECONDS = 30.0
 _SSE_WRITE_TIMEOUT_SECONDS = 30.0
 _MAX_TOOL_CALL_BUFFER_BYTES = 1024 * 1024
+_TOOL_CALL_BUFFER_HEARTBEAT_SECONDS = 1.0
 
 
 class _ToolAwareOutputBuffer:
@@ -327,6 +329,7 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             if tool_calling_plan.has_active_tools
             else None
         )
+        next_tool_heartbeat_at = time.monotonic() + _TOOL_CALL_BUFFER_HEARTBEAT_SECONDS
 
         for result in generator:
             completion_tokens += len(result.tokens)
@@ -337,6 +340,11 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
                     self._write_content_delta(result.text)
             if result.stop_condition is not None:
                 stop_condition = result.stop_condition
+            if tool_output_buffer is not None:
+                now = time.monotonic()
+                if now >= next_tool_heartbeat_at:
+                    self._write_sse_comment("tool-buffering")
+                    next_tool_heartbeat_at = now + _TOOL_CALL_BUFFER_HEARTBEAT_SECONDS
 
         if stop_condition is None:
             raise RuntimeError("MLX generation ended without a stop condition.")
@@ -372,6 +380,9 @@ class MlxEngineRequestHandler(BaseHTTPRequestHandler):
             )
         )
         self._write_bytes(b"data: [DONE]\n\n")
+
+    def _write_sse_comment(self, comment: str) -> None:
+        self._write_bytes(f": {comment}\n\n".encode("utf-8"))
 
     def _write_content_delta(self, text: str) -> None:
         self._write_sse_json(

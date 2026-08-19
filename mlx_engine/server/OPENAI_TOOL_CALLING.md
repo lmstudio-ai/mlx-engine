@@ -28,6 +28,6 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 
 ## Streaming behavior
 
-When tools are active, the server buffers generated text, up to 1 MiB, until generation finishes. It then parses the buffer. If a valid tool call is parsed, only the structured tool call is emitted. If no valid tool call is parsed, the buffered text is returned as ordinary assistant content.
+When tools are active, the server buffers generated text, up to 1 MiB, until generation finishes. While buffering, it emits SSE comment heartbeats so client disconnects still cancel generation. It then parses the buffer. If a valid tool call is parsed, only the structured tool call is emitted. If no valid tool call is parsed, the buffered text is returned as ordinary assistant content.
 
 If the model emits more than one valid tool call in serial mode, the server returns a stream error instead of silently dropping calls.
