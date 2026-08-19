@@ -1503,3 +1503,50 @@ def test_segmented_plan_preserves_state_cache_checkpoints_after_restore(monkeypa
         (2, 3, 768),
         (3, 4, 1_024),
     ]
+
+
+def test_dynamic_prefill_plan_uses_active_step_around_gemma4_image(monkeypatch):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _gemma4_unified_model()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=4,
+    )
+    prompt = list(range(12))
+    token_types = mx.zeros((1, len(prompt)), dtype=mx.int32)
+    token_types[:, 5:7] = 1
+    plan = PrefillPlan(
+        prompt_context_length=len(prompt),
+        segments=(
+            PrefillSegment(end_context_length=4, step_size=4),
+            PrefillSegment(end_context_length=len(prompt), step_size=2),
+        ),
+    )
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            prefill_plan=plan,
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={"mm_token_type_ids": token_types},
+            prefix_cache_chunks=[],
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[PromptImageSpan(start=5, end=7, image_hash="image")],
+        )
+        for _ in range(6):
+            generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [4, 1, 2, 2, 2, 1]
+    assert model.calls[1]["mm_token_type_ids"] is None
+    assert model.calls[2]["mm_token_type_ids"] == [[0] * 5 + [1] * 2]
