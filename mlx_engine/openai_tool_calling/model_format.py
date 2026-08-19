@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Literal
 
@@ -137,13 +138,22 @@ def parse_qwen35_tool_argument_value(value: str) -> Any:
     if stripped_value == "":
         return ""
     try:
-        return json.loads(stripped_value, parse_constant=_reject_json_constant)
+        return json.loads(
+            stripped_value,
+            parse_constant=_reject_json_constant,
+            parse_float=_parse_json_float,
+        )
     except ValueError:
         return stripped_value
 
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"Unsupported JSON constant: {value}")
+
+
+def _parse_json_float(value: str) -> float | str:
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else value
 
 
 def parse_gemma4_tool_calls(
@@ -381,7 +391,8 @@ class _Gemma4ValueParser:
         raw_number = match.group(0)
         self._position = match.end()
         if "." in raw_number or "e" in raw_number or "E" in raw_number:
-            return float(raw_number)
+            parsed_float = float(raw_number)
+            return parsed_float if math.isfinite(parsed_float) else raw_number
         return int(raw_number)
 
     def _peek(self) -> str | None:

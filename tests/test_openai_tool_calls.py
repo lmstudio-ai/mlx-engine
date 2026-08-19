@@ -505,6 +505,35 @@ def test_qwen35_tool_call_treats_non_finite_json_constants_as_text(constant):
     assert _arguments(result[0]) == {"value": constant}
 
 
+@pytest.mark.parametrize("overflow_number", ["1e10000", "-1e10000"])
+def test_qwen35_tool_call_treats_overflow_json_numbers_as_text(overflow_number):
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        f"<parameter=value>{overflow_number}</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"value": overflow_number}
+
+
+def test_qwen35_tool_call_sanitizes_nested_overflow_json_numbers():
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        '<parameter=metadata>{"score":1e10000}</parameter></function>'
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"metadata": {"score": "1e10000"}}
+
+
 def test_parser_auto_selects_first_model_format_marker():
     output = (
         f'{GEMMA4_TOOL_CALL_START}call:search{{query:<|"|>news<|"|>}}'
@@ -593,6 +622,23 @@ def test_gemma4_tool_call_string_can_contain_end_marker_text():
     assert _arguments(result[0]) == {"snippet": "before <tool_call|> after"}
 
 
+def test_gemma4_tool_call_sanitizes_overflow_numbers():
+    output = (
+        f"{GEMMA4_TOOL_CALL_START}"
+        "call:lookup{score:1e10000,nested:{score:-1e10000}}"
+        f"{GEMMA4_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {
+        "score": "1e10000",
+        "nested": {"score": "-1e10000"},
+    }
+
+
 def test_muse_glimmer_tool_call_parses_atem_invocation_as_openai_tool_call():
     output = (
         "prefix "
@@ -650,6 +696,22 @@ def test_muse_glimmer_tool_call_treats_non_finite_json_constants_as_text(constan
     )
 
     assert _arguments(result[0]) == {"value": constant}
+
+
+def test_muse_glimmer_tool_call_sanitizes_nested_overflow_json_numbers():
+    output = (
+        f"{MUSE_GLIMMER_ATEM_START}"
+        '<atem:invoke name="lookup">'
+        '<atem:parameter name="metadata">{"score":1e10000}</atem:parameter>'
+        "</atem:invoke>"
+        f"{MUSE_GLIMMER_ATEM_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"metadata": {"score": "1e10000"}}
 
 
 def test_parser_ignores_unknown_model_format_blocks():

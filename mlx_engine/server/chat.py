@@ -25,6 +25,7 @@ _CHAT_TEMPLATE_CONTROL_KEYS = {
     "max_length",
     "messages",
     "padding",
+    "parallel_tool_calls",
     "processor_kwargs",
     "return_assistant_tokens_mask",
     "return_dict",
@@ -261,6 +262,7 @@ def prepare_chat_generation_request(
     if tool_calling_plan.has_active_tools:
         template_kwargs["tools"] = tool_calling_plan.template_tools
         template_kwargs["tool_choice"] = "auto"
+        template_kwargs["parallel_tool_calls"] = False
 
     if has_assistant_prefill:
         template_kwargs["continue_final_message"] = True

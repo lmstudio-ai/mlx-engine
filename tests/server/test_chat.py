@@ -270,6 +270,7 @@ def test_tools_are_forwarded_to_template_and_model_format_parser_plan():
     assert request.tool_calling_plan.has_active_tools
     assert renderer.calls[0][1]["tools"] == tools
     assert renderer.calls[0][1]["tool_choice"] == "auto"
+    assert renderer.calls[0][1]["parallel_tool_calls"] is False
 
 
 def test_tools_use_loaded_model_type_to_select_parser_format():
@@ -576,6 +577,7 @@ def test_structured_output_with_assistant_prefill_is_rejected():
         "max_length",
         "messages",
         "padding",
+        "parallel_tool_calls",
         "processor_kwargs",
         "return_assistant_tokens_mask",
         "return_dict",
