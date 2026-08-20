@@ -264,6 +264,37 @@ def test_tool_calling_plan_accepts_valid_local_ref_tool_parameter_schema():
     assert plan.has_active_tools
 
 
+def test_tool_calling_plan_accepts_literal_ref_data_in_tool_parameter_schema():
+    plan = build_tool_calling_plan(
+        tools=[
+            _tool(
+                "lookup",
+                {
+                    "type": "object",
+                    "properties": {
+                        "const_value": {"const": {"$ref": "literal const"}},
+                        "enum_value": {"enum": [{"$ref": "literal enum"}]},
+                        "default_value": {
+                            "type": "object",
+                            "default": {"$ref": "literal default"},
+                        },
+                        "examples_value": {
+                            "type": "object",
+                            "examples": [{"$ref": "literal example"}],
+                        },
+                    },
+                },
+                strict=True,
+            )
+        ],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+    )
+
+    assert plan.has_active_tools
+
+
 @pytest.mark.parametrize(
     "parameters",
     [
@@ -273,6 +304,9 @@ def test_tool_calling_plan_accepts_valid_local_ref_tool_parameter_schema():
             "properties": {"query": {"$ref": "#/$defs/Missing"}},
             "$defs": {},
         },
+        {"type": "array", "items": {"$ref": "#/missing"}},
+        {"anyOf": [{"$ref": "#/missing"}]},
+        {"additionalProperties": {"$ref": "#/missing"}},
     ],
 )
 def test_tool_calling_plan_rejects_unresolvable_tool_parameter_refs(parameters):
