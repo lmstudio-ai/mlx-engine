@@ -243,6 +243,52 @@ def test_tool_calling_plan_allows_response_format_when_tool_choice_is_none():
     assert not plan.has_active_tools
 
 
+def test_tool_calling_plan_accepts_valid_local_ref_tool_parameter_schema():
+    plan = build_tool_calling_plan(
+        tools=[
+            _tool(
+                "lookup",
+                {
+                    "$defs": {"Query": {"type": "string"}},
+                    "type": "object",
+                    "properties": {"query": {"$ref": "#/$defs/Query"}},
+                },
+                strict=True,
+            )
+        ],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+    )
+
+    assert plan.has_active_tools
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"$ref": "#/missing"},
+        {
+            "type": "object",
+            "properties": {"query": {"$ref": "#/$defs/Missing"}},
+            "$defs": {},
+        },
+    ],
+)
+def test_tool_calling_plan_rejects_unresolvable_tool_parameter_refs(parameters):
+    with pytest.raises(ToolCallingValidationError) as error:
+        build_tool_calling_plan(
+            tools=[_tool("lookup", parameters, strict=True)],
+            tool_choice_value="auto",
+            parallel_tool_calls=False,
+            response_json_schema=None,
+        )
+
+    message = str(error.value)
+    assert "lookup" in message
+    assert "unresolvable JSON Schema reference" in message
+
+
 def test_tool_calling_plan_rejects_invalid_tool_parameter_schema():
     with pytest.raises(ToolCallingValidationError) as error:
         build_tool_calling_plan(

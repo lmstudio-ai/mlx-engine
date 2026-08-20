@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
+from referencing import Registry
+from referencing.exceptions import NoSuchResource, Unresolvable, Unretrievable
+from referencing.jsonschema import DRAFT202012
 
 JsonObject = dict[str, Any]
 ToolCallIdFactory = Callable[[], str]
@@ -191,3 +194,35 @@ def _validate_parameters_schema(tool_name: str, parameters: JsonObject) -> None:
             f"function tool `{tool_name}` parameters must be a valid JSON Schema"
             f"{location}: {error.message}"
         ) from error
+    _validate_schema_references(tool_name, parameters)
+
+
+def _validate_schema_references(tool_name: str, parameters: JsonObject) -> None:
+    resolver = (
+        Registry()
+        .with_resource(
+            "",
+            DRAFT202012.create_resource(parameters),
+        )
+        .resolver("")
+    )
+    for ref in _iter_schema_refs(parameters):
+        try:
+            resolver.lookup(ref)
+        except (NoSuchResource, Unresolvable, Unretrievable) as error:
+            raise ToolCallingValidationError(
+                f"function tool `{tool_name}` parameters contain an unresolvable "
+                f"JSON Schema reference `{ref}`: {error}"
+            ) from error
+
+
+def _iter_schema_refs(value: Any):
+    if isinstance(value, dict):
+        ref = value.get("$ref")
+        if isinstance(ref, str):
+            yield ref
+        for child in value.values():
+            yield from _iter_schema_refs(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_schema_refs(child)
