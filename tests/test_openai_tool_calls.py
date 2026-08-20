@@ -607,7 +607,7 @@ def test_gemma4_tool_call_parses_llmster_forwarded_tool_names(tool_name):
     assert _arguments(result[0]) == {"query": "weather"}
 
 
-def test_gemma4_tool_call_string_can_contain_end_marker_text():
+def test_gemma4_closed_string_can_contain_end_marker_when_boundary_is_unambiguous():
     output = (
         f"{GEMMA4_TOOL_CALL_START}"
         'call:lookup{snippet:<|"|>before <tool_call|> after<|"|>}'
@@ -634,6 +634,20 @@ def test_gemma4_tool_call_closed_string_can_contain_recovery_terminators():
     )
 
     assert _arguments(result[0]) == {"snippet": "a,b}c]"}
+
+
+def test_gemma4_tool_call_recovers_unclosed_string_before_structural_end_marker():
+    output = (
+        f"{GEMMA4_TOOL_CALL_START}"
+        'call:lookup{snippet:<|"|>before } <tool_call|> after<|"|>}'
+        f"{GEMMA4_TOOL_CALL_END}"
+    )
+
+    result = parse_model_format_tool_calls(
+        output, _specs(_tool("lookup")), id_factory=_id_factory()
+    )
+
+    assert _arguments(result[0]) == {"snippet": "before "}
 
 
 def test_gemma4_tool_call_repairs_unterminated_string_values_as_strings():

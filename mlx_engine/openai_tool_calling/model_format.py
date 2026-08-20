@@ -199,6 +199,11 @@ def _parse_gemma4_block_at(
         block_end = model_output.find(GEMMA4_TOOL_CALL_END, end_search_position)
         if block_end < 0:
             return None
+        # Gemma native call delimiters are protocol-reserved. We scan each
+        # candidate end marker and accept the first candidate that parses,
+        # including tolerant recovery for an unclosed Gemma string before the
+        # marker. This intentionally favors repairing a model that meant to end
+        # the tool call over preserving literal delimiter text in arguments.
         block_body = model_output[body_start:block_end]
         split_call = _split_gemma4_tool_call(block_body, allowed_tool_names)
         if split_call is not None:

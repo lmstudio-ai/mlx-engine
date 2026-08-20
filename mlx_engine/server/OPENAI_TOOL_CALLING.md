@@ -16,6 +16,7 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 - Text responses when tools are available but no valid tool call is parsed.
 - Exclusive tool-call turns: when a valid tool call is parsed, the response emits `tool_calls` with `finish_reason: "tool_calls"` and suppresses surrounding model text.
 - `strict: true` validates parsed tool-call arguments against the tool parameter schema after generation.
+- Native tool-call delimiter strings are reserved protocol text. In malformed Gemma calls, `<tool_call|>` may be treated as the intended call boundary and used to recover an unterminated string; literal delimiter text inside arguments is not guaranteed to round-trip.
 
 ## Intentionally unsupported for this MVP
 
