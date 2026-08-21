@@ -92,8 +92,10 @@ def test_extract_function_tool_specs_rejects_unsafe_tool_names(name):
         _specs(_tool(name))
 
 
-@pytest.mark.parametrize("parameters", [False, [], "", 0])
-def test_extract_function_tool_specs_rejects_falsy_non_object_parameters(parameters):
+@pytest.mark.parametrize("parameters", [None, False, [], "", 0])
+def test_extract_function_tool_specs_rejects_non_object_parameters_when_present(
+    parameters,
+):
     with pytest.raises(
         ToolCallingValidationError, match="parameters must be an object"
     ):
@@ -105,6 +107,57 @@ def test_extract_function_tool_specs_preserves_empty_schema():
 
     assert specs[0].parameters == {}
     assert specs[0].to_openai_tool()["function"]["parameters"] == {}
+
+
+def test_extract_function_tool_specs_uses_independent_default_parameter_schemas():
+    specs = _specs(
+        {"type": "function", "function": {"name": "lookup"}},
+        {"type": "function", "function": {"name": "search"}},
+    )
+
+    assert specs[0].parameters == {"type": "object", "properties": {}}
+    assert specs[1].parameters == {"type": "object", "properties": {}}
+    assert specs[0].parameters is not specs[1].parameters
+    specs[0].parameters["properties"]["query"] = {"type": "string"}
+    assert specs[1].parameters == {"type": "object", "properties": {}}
+
+
+def test_extract_function_tool_specs_copies_provided_parameter_schema():
+    parameters = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+    }
+    spec = _specs(_tool("lookup", parameters))[0]
+
+    parameters["properties"]["query"]["type"] = "number"
+
+    assert spec.parameters == {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+    }
+
+
+def test_function_tool_spec_exposes_copied_parameter_schema():
+    spec = _specs(
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+    )[0]
+
+    rendered_parameters = spec.to_openai_tool()["function"]["parameters"]
+    rendered_parameters["properties"]["query"]["type"] = "number"
+
+    assert spec.parameters == {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+    }
 
 
 @pytest.mark.parametrize("description", [None, False, True, [], {}, 1])

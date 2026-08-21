@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 import uuid
@@ -14,12 +15,6 @@ ToolCallIdFactory = Callable[[], str]
 SupportedToolChoice = Literal["none", "auto"]
 
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_DEFAULT_PARAMETERS_SCHEMA: JsonObject = {"type": "object", "properties": {}}
-_DEFAULT_STRICT_PARAMETERS_SCHEMA: JsonObject = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-}
 _FORCED_TOOL_CHOICE_ERROR = (
     "tool_choice='required' and named function tool_choice are not supported yet; "
     "use tool_choice='auto' or tool_choice='none'."
@@ -41,7 +36,7 @@ class FunctionToolSpec:
         function: JsonObject = {
             "name": self.name,
             "description": self.description,
-            "parameters": self.parameters,
+            "parameters": copy.deepcopy(self.parameters),
         }
         if self.strict:
             function["strict"] = True
@@ -137,6 +132,13 @@ def default_tool_call_id() -> str:
     return f"call_{uuid.uuid4().hex}"
 
 
+def _default_parameters_schema(strict: bool) -> JsonObject:
+    schema: JsonObject = {"type": "object", "properties": {}}
+    if strict:
+        schema["additionalProperties"] = False
+    return schema
+
+
 def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
     prefix = f"tools[{index}]"
     if tool.get("type") != "function":
@@ -162,11 +164,8 @@ def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
     if "strict" in tool and not isinstance(tool["strict"], bool):
         raise ToolCallingValidationError(f"{prefix}.strict must be a boolean")
     strict = function.get("strict") is True or tool.get("strict") is True
-    parameters_missing = "parameters" not in function or function["parameters"] is None
-    if parameters_missing:
-        parameters = (
-            _DEFAULT_STRICT_PARAMETERS_SCHEMA if strict else _DEFAULT_PARAMETERS_SCHEMA
-        )
+    if "parameters" not in function:
+        parameters = _default_parameters_schema(strict)
     else:
         parameters = function["parameters"]
     if not isinstance(parameters, dict):
@@ -183,7 +182,7 @@ def _parse_function_tool(tool: dict, index: int) -> FunctionToolSpec:
     return FunctionToolSpec(
         name=name,
         description=description,
-        parameters=parameters,
+        parameters=copy.deepcopy(parameters),
         strict=strict,
     )
 

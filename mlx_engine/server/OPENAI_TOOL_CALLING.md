@@ -20,7 +20,7 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 
 ## Tool parameter schema validation
 
-Tool `parameters` must be JSON Schema objects and must pass `jsonschema`'s Draft 2020-12 schema-shape validation. Because OpenAI function arguments are JSON objects, a root `type` keyword, when present, must allow `"object"`. The server intentionally checks only this root `type`; schemas that use `$ref`, `$dynamicRef`, `anyOf`, or other composition keywords are left to strict validation.
+If `parameters` is omitted, the server uses an empty object schema. If present, `parameters` must be a JSON Schema object; explicit `null` is rejected. Tool parameter schemas must pass `jsonschema`'s Draft 2020-12 schema-shape validation. Because OpenAI function arguments are JSON objects, a root `type` keyword, when present, must allow `"object"`. The server intentionally checks only this root `type`; schemas that use `$ref`, `$dynamicRef`, `anyOf`, or other composition keywords are left to strict validation.
 
 The server intentionally does not eagerly resolve `$ref` or `$dynamicRef` at request time. This matches the vLLM-style split between request validation and constrained/strict execution: in non-strict auto tool calling, schemas are prompt context; in `strict: true`, `jsonschema` resolves references only when validating a parsed tool call. If strict validation encounters an unresolvable schema reference, the server reports it as a tool-calling validation error instead of leaking a raw `jsonschema`/`referencing` exception.
 
