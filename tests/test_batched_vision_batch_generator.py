@@ -16,6 +16,10 @@ from mlx_engine.model_kit.batched_vision.batch_generator import (
     GenerationBatch,
     _PrefixCacheSaveState,
 )
+from mlx_engine.model_kit.batched_vision.prefill_plan import (
+    PrefillPlan,
+    PrefillSegment,
+)
 from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
     build_prefix_cache_chunks,
 )
@@ -1296,3 +1300,268 @@ def test_batch_generator_state_cache_lands_on_reusable_tail_boundary(monkeypatch
         (start_chunk_idx, end_chunk_idx, snapshot_len)
         for _, _, start_chunk_idx, end_chunk_idx, snapshot_len in snapshots
     ] == [(0, 7, 1792)]
+
+
+def test_batch_generator_uses_precomputed_segmented_prefill_plan(monkeypatch):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _FakeModel()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=2_048,
+    )
+    prompt = list(range(15))
+    plan = PrefillPlan(
+        prompt_context_length=len(prompt),
+        segments=(
+            PrefillSegment(end_context_length=8, step_size=4),
+            PrefillSegment(end_context_length=12, step_size=2),
+            PrefillSegment(end_context_length=15, step_size=1),
+        ),
+    )
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            prefill_plan=plan,
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=[],
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+        )
+        for _ in range(7):
+            generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [
+        4,
+        4,
+        2,
+        2,
+        1,
+        1,
+        1,
+    ]
+
+
+def test_cache_saves_do_not_inject_small_chunks_after_plan_transition(monkeypatch):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _FakeModel()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=1_024,
+    )
+    prompt = list(range(2_305))
+    plan = PrefillPlan(
+        prompt_context_length=len(prompt),
+        segments=(
+            PrefillSegment(end_context_length=768, step_size=1_024),
+            PrefillSegment(end_context_length=len(prompt), step_size=512),
+        ),
+    )
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            prefill_plan=plan,
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=build_prefix_cache_chunks(prompt, []),
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+            prompt_cache_save_callback=lambda *_args: None,
+        )
+        for _ in range(5):
+            generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [
+        768,
+        512,
+        512,
+        512,
+        1,
+    ]
+
+
+def test_batch_generator_starts_restored_request_in_later_plan_segment(monkeypatch):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    model = _FakeModel()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=2_048,
+    )
+    prompt = list(range(5))
+    plan = PrefillPlan(
+        prompt_context_length=15,
+        segments=(
+            PrefillSegment(end_context_length=8, step_size=4),
+            PrefillSegment(end_context_length=12, step_size=2),
+            PrefillSegment(end_context_length=15, step_size=1),
+        ),
+    )
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            prefill_plan=plan,
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=[],
+            cache=[_FakeScalarCache()],
+            all_tokens=list(range(10)),
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[],
+        )
+        for _ in range(4):
+            generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [2, 1, 1, 1]
+
+
+def test_segmented_plan_preserves_state_cache_checkpoints_after_restore(monkeypatch):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    model = _FakeModel()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=512,
+    )
+    full_prompt = list(range(1_025))
+    restored_prefix = full_prompt[:256]
+    prompt_suffix = full_prompt[256:]
+    plan = PrefillPlan(
+        prompt_context_length=len(full_prompt),
+        segments=(
+            PrefillSegment(end_context_length=512, step_size=512),
+            PrefillSegment(end_context_length=768, step_size=256),
+            PrefillSegment(end_context_length=1_025, step_size=128),
+        ),
+    )
+    snapshots = []
+
+    try:
+        generator.insert(
+            prompt_suffix,
+            inputs_embeds=mx.zeros(
+                (1, len(prompt_suffix), 2),
+                dtype=mx.float32,
+            ),
+            prefill_plan=plan,
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=build_prefix_cache_chunks(full_prompt, []),
+            cache=[ArraysCache()],
+            all_tokens=restored_prefix,
+            next_prefix_cache_chunk_idx=1,
+            image_spans=[],
+            prompt_cache_save_callback=lambda *args: snapshots.append(args),
+        )
+        for _ in range(5):
+            generator.next()
+    finally:
+        generator.close()
+
+    assert [len(call["input_ids"][0]) for call in model.calls] == [
+        256,
+        256,
+        128,
+        128,
+        1,
+    ]
+    assert [
+        (start_chunk_idx, end_chunk_idx, snapshot_len)
+        for _, _, start_chunk_idx, end_chunk_idx, snapshot_len in snapshots
+    ] == [
+        (1, 2, 512),
+        (2, 3, 768),
+        (3, 4, 1_024),
+    ]
+
+
+def test_dynamic_prefill_plan_keeps_gemma4_image_whole_across_transition(
+    monkeypatch,
+):
+    monkeypatch.setattr(batcher, "wired_limit", lambda _model: contextlib.nullcontext())
+    monkeypatch.setattr(
+        batcher,
+        "make_prompt_cache",
+        lambda _model: [_FakeBatchCache()],
+    )
+    model = _gemma4_unified_model()
+    generator = BatchGenerator(
+        model=model,
+        stop_criteria=lambda _token: False,
+        prefill_step_size=1_024,
+    )
+    prompt = list(range(2_049))
+    image_start = 1_023
+    image_end = image_start + 280
+    token_types = mx.zeros((1, len(prompt)), dtype=mx.int32)
+    token_types[:, image_start:image_end] = 1
+    plan = PrefillPlan(
+        prompt_context_length=len(prompt),
+        segments=(
+            PrefillSegment(end_context_length=1_024, step_size=1_024),
+            PrefillSegment(end_context_length=len(prompt), step_size=512),
+        ),
+    )
+
+    try:
+        generator.insert(
+            prompt,
+            inputs_embeds=mx.zeros((1, len(prompt), 2), dtype=mx.float32),
+            prefill_plan=plan,
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={"mm_token_type_ids": token_types},
+            prefix_cache_chunks=[],
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+            image_spans=[
+                PromptImageSpan(
+                    start=image_start,
+                    end=image_end,
+                    image_hash="image",
+                )
+            ],
+        )
+        for _ in range(4):
+            generator.next()
+    finally:
+        generator.close()
+
+    # The 535-token call is the worst supported crossing: up to 255 tokens from
+    # the cache grid followed by one complete 280-soft-token image run.
+    assert [len(call["input_ids"][0]) for call in model.calls] == [768, 535, 512, 234]
+    assert model.calls[0]["mm_token_type_ids"] is None
+    assert model.calls[1]["mm_token_type_ids"] == [
+        [0] * image_start + [1] * (image_end - image_start)
+    ]
+    assert model.calls[2]["mm_token_type_ids"] is None

@@ -22,7 +22,10 @@ from mlx_engine.model_kit.batched_model_kit_types import (
 from mlx_engine.model_kit.batched_vision.batch_generator import (
     BatchGenerator as LocalVlmBatchGenerator,
 )
-from mlx_engine.model_kit.batched_vision.context_fit import fit_batched_vlm_context
+from mlx_engine.model_kit.batched_vision.context_fit import (
+    ContextFitResult,
+    fit_batched_vlm_context_result,
+)
 from mlx_engine.model_kit.batched_vision.prompt_cache.coordinator import (
     VlmPromptCacheCoordinator,
 )
@@ -140,6 +143,7 @@ class BatchedVisionModelKit:
         self.prefill_step_size = prefill_step_size
         self._model_path = model_path
         self._effective_context_length: int | None = None
+        self._context_fit_result: ContextFitResult | None = None
         if max_seq_nums is None:
             max_seq_nums = DEFAULT_MAX_SEQ_NUMS
         elif max_seq_nums < 1:
@@ -236,6 +240,7 @@ class BatchedVisionModelKit:
 
         if not self._auto_fit_context:
             logger.info("Context auto-fit disabled; leaving context unchanged")
+            self._context_fit_result = None
             self._effective_context_length = None
         elif _requires_global_no_chunked_prefill(
             self.model,
@@ -243,11 +248,17 @@ class BatchedVisionModelKit:
             self._uses_gemma4_bidirectional_visual_attention,
         ):
             logger.info("Model requires unchunked prefill; leaving context unchanged")
+            self._context_fit_result = None
             self._effective_context_length = None
         else:
-            self._effective_context_length = fit_batched_vlm_context(
+            self._context_fit_result = fit_batched_vlm_context_result(
                 model=self.model,
                 prefill_step_size=self.prefill_step_size,
+            )
+            self._effective_context_length = (
+                None
+                if self._context_fit_result is None
+                else self._context_fit_result.context_length
             )
             if self._effective_context_length is not None:
                 self._prompt_cache_store.ensure_max_kv_size(
@@ -454,6 +465,20 @@ class BatchedVisionModelKit:
         restored = prepared_insert.restored
         full_prompt_input_ids = prepared_prompt.prompt_input_ids
         prompt_token_count = len(full_prompt_input_ids)
+        try:
+            prefill_plan = (
+                None
+                if self._context_fit_result is None
+                else self._context_fit_result.make_request_prefill_plan(
+                    prompt_context_length=prompt_token_count,
+                )
+            )
+        except ValueError as error:
+            # Multimodal preparation can expand beyond the text-token limit.
+            # Reject only this request instead of failing the generation thread.
+            request.rqueue.put(error)
+            return
+
         if restored is not None and _restore_splits_gemma4_image_span(
             model_type=self.model_type,
             cached_prefix_len=restored.cached_prefix_len,
@@ -526,9 +551,21 @@ class BatchedVisionModelKit:
                 prefill_tokens_processed=0,
             )
         )
+        if prefill_plan is not None:
+            logger.info(
+                "Request prefill plan: prompt=%s cached=%s segments=%s",
+                f"{prompt_token_count:,}",
+                f"{cached_prefix_len:,}",
+                ",".join(
+                    f"{segment.step_size}:{segment.end_context_length:,}"
+                    for segment in prefill_plan.segments
+                ),
+            )
+
         uid = batch_generator.insert(
             prompt_input_ids,
             inputs_embeds=inputs_embeds,
+            prefill_plan=prefill_plan,
             max_tokens=request.max_tokens,
             top_logprobs=request.top_logprobs,
             sampler=request.sampler,

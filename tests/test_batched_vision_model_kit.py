@@ -9,6 +9,10 @@ from mlx_engine.model_kit.batched_vision.model_kit import (
     _restore_splits_gemma4_image_span,
 )
 import mlx_engine.model_kit.batched_vision.model_kit as model_kit_module
+from mlx_engine.model_kit.batched_vision.prefill_plan import (
+    PrefillPlan,
+    PrefillSegment,
+)
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptImageSpan,
 )
@@ -94,7 +98,7 @@ def test_load_model_forces_no_trust_remote_code(monkeypatch, tmp_path):
     monkeypatch.setattr(model_kit_module.mx, "clear_cache", lambda: None)
     monkeypatch.setattr(
         model_kit_module,
-        "fit_batched_vlm_context",
+        "fit_batched_vlm_context_result",
         lambda **_kwargs: None,
     )
 
@@ -160,6 +164,7 @@ def test_insert_reports_full_prepared_prompt_length(monkeypatch):
     kit.model = SimpleNamespace(no_chunked_prefill=False)
     kit.model_type = "other_vlm"
     kit._uses_gemma4_bidirectional_visual_attention = False
+    kit._context_fit_result = None
     kit._vision_feature_memoizer = None
     kit._prompt_cache_coordinator = SimpleNamespace(
         save_prompt_cache_snapshot=lambda *_args, **_kwargs: None
@@ -270,11 +275,11 @@ def test_load_model_stores_context_fit_before_startup(monkeypatch, tmp_path):
 
     def fake_fit_context(**kwargs):
         calls["fit"] = kwargs
-        return fitted_context_length
+        return SimpleNamespace(context_length=fitted_context_length)
 
     monkeypatch.setattr(
         model_kit_module,
-        "fit_batched_vlm_context",
+        "fit_batched_vlm_context_result",
         fake_fit_context,
     )
     kit = object.__new__(BatchedVisionModelKit)
@@ -317,7 +322,7 @@ def test_load_model_skips_context_fit_when_disabled(monkeypatch, tmp_path, caplo
 
     monkeypatch.setattr(
         model_kit_module,
-        "fit_batched_vlm_context",
+        "fit_batched_vlm_context_result",
         unexpected_fit,
     )
     caplog.set_level("INFO")
@@ -334,6 +339,101 @@ def test_load_model_skips_context_fit_when_disabled(monkeypatch, tmp_path, caplo
 
     assert kit.effective_context_length is None
     assert "auto-fit disabled" in caplog.text
+
+
+def test_request_admission_builds_and_passes_prefill_plan_once(monkeypatch):
+    prompt_tokens = [10, 11, 12, 13, 14, 15]
+    plan = PrefillPlan(
+        prompt_context_length=len(prompt_tokens),
+        segments=(
+            PrefillSegment(
+                end_context_length=len(prompt_tokens),
+                step_size=2_048,
+            ),
+        ),
+    )
+    planner_calls = []
+    inserted = {}
+
+    class FakeBatchGenerator:
+        def insert(self, prompt, **kwargs):
+            inserted["prompt"] = prompt
+            inserted.update(kwargs)
+            return 7
+
+    monkeypatch.setattr(
+        model_kit_module,
+        "build_prompt_kwargs",
+        lambda *_args, **_kwargs: {"inputs_embeds": "embeddings"},
+    )
+
+    kit = object.__new__(BatchedVisionModelKit)
+    kit._shutdown = SimpleNamespace(is_set=lambda: True)
+    kit.model = SimpleNamespace(no_chunked_prefill=False)
+    kit.model_type = "qwen3_5"
+    kit._uses_gemma4_bidirectional_visual_attention = False
+    kit._context_fit_result = SimpleNamespace(
+        make_request_prefill_plan=lambda **kwargs: (
+            planner_calls.append(kwargs) or plan
+        )
+    )
+    kit._prompt_cache_store = SimpleNamespace(can_store_records=lambda: False)
+    kit._prompt_cache_coordinator = SimpleNamespace()
+    kit._vision_feature_memoizer = SimpleNamespace()
+    kit._new_detokenizer = lambda: SimpleNamespace()
+
+    response_queue = Queue()
+    request = SimpleNamespace(
+        rqueue=response_queue,
+        max_tokens=16,
+        top_logprobs=0,
+        sampler=object(),
+        logits_processors=[],
+        request_id="request",
+    )
+    prepared_insert = SimpleNamespace(
+        request=request,
+        prepared_prompt=SimpleNamespace(
+            prompt_input_ids=prompt_tokens,
+            image_spans=[],
+        ),
+        restored=None,
+    )
+    active = {}
+
+    kit._insert_prepared_request(FakeBatchGenerator(), prepared_insert, active)
+
+    assert planner_calls == [{"prompt_context_length": len(prompt_tokens)}]
+    assert inserted["prompt"] == prompt_tokens
+    assert inserted["inputs_embeds"] == "embeddings"
+    assert inserted["prefill_plan"] is plan
+    assert active[7].request_id == "request"
+
+
+def test_request_admission_rejects_oversized_prepared_prompt_without_insert():
+    error = ValueError("prepared prompt exceeds fitted context")
+    response_queue = Queue()
+    kit = object.__new__(BatchedVisionModelKit)
+    kit._shutdown = SimpleNamespace(is_set=lambda: True)
+    kit._context_fit_result = SimpleNamespace(
+        make_request_prefill_plan=lambda **_kwargs: (_ for _ in ()).throw(error)
+    )
+    prepared_insert = SimpleNamespace(
+        request=SimpleNamespace(rqueue=response_queue),
+        prepared_prompt=SimpleNamespace(
+            prompt_input_ids=list(range(10)),
+            image_spans=[],
+        ),
+        restored=None,
+    )
+
+    kit._insert_prepared_request(
+        SimpleNamespace(insert=lambda *_args, **_kwargs: pytest.fail("insert called")),
+        prepared_insert,
+        {},
+    )
+
+    assert response_queue.get_nowait() is error
 
 
 def test_load_model_skips_context_fit_for_unchunked_prefill(
@@ -358,7 +458,7 @@ def test_load_model_skips_context_fit_for_unchunked_prefill(
 
     monkeypatch.setattr(
         model_kit_module,
-        "fit_batched_vlm_context",
+        "fit_batched_vlm_context_result",
         unexpected_fit,
     )
     caplog.set_level("INFO")

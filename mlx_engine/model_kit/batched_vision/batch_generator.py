@@ -19,6 +19,7 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.types import (
     PromptImageSpan,
     PromptPrefixChunk,
 )
+from mlx_engine.model_kit.batched_vision.prefill_plan import PrefillPlan
 from mlx_engine.model_kit.batched_vision.prompt_inputs import (
     drop_prompt_kwargs_prefix,
     slice_prompt_kwargs,
@@ -79,6 +80,7 @@ class _PendingSequence:
     sampler: Callable[[mx.array], mx.array]
     logits_processors: list[LogitsProcessor]
     inputs_embeds: mx.array
+    prefill_plan: PrefillPlan | None
     cache: Optional[list[Any]]
     all_tokens: list[int]
     rope_deltas: Any | None
@@ -766,6 +768,7 @@ class _PromptPrefill:
         inputs_embeds: mx.array,
         prompt_kwargs: dict,
         prefix_cache_save_state: _PrefixCacheSaveState,
+        prefill_plan: PrefillPlan | None = None,
         prefill_step_size: Optional[int] = DEFAULT_PREFILL_STEP_SIZE,
         cache: Optional[list[Any]] = None,
         all_tokens: Optional[list[int]] = None,
@@ -777,6 +780,7 @@ class _PromptPrefill:
         self.top_logprobs = top_logprobs
         self.sampler = sampler
         self.logits_processors = logits_processors
+        self.prefill_plan = prefill_plan
         self.prefill_step_size = prefill_step_size
 
         self._input_ids = _left_pad_prompts([input_ids], max_length=len(input_ids))
@@ -839,12 +843,7 @@ class _PromptPrefill:
         return n
 
     def _next_prompt_step_size(self) -> int:
-        """Return the next chunked prefill size.
-
-        When disk checkpointing is active, a restored prefix can start between
-        normal prefill boundaries, so the first step may be short to land back
-        on the regular step grid.
-        """
+        """Return the next chunk from the request's precomputed schedule."""
         if self.prefill_step_size is None:
             return 0
 
@@ -852,21 +851,39 @@ class _PromptPrefill:
         if remaining_tokens <= 1:
             return 0
 
+        step_size = self.prefill_step_size
+        segment_start = 0
+        segment_end = self._processed_prefix_len + remaining_tokens
+        if self.prefill_plan is not None:
+            segment_start, segment = self.prefill_plan.segment_and_start_for_context(
+                self._processed_prefix_len
+            )
+            step_size = segment.step_size
+            segment_end = segment.end_context_length
+
+        segment_capacity = max(0, segment_end - self._processed_prefix_len)
+        next_chunk_size = min(
+            step_size,  # Normal maximum chunk size.
+            segment_capacity,  # Tokens until the step-size policy changes.
+            remaining_tokens - 1,  # Preserve a final model call for logits.
+        )
         next_step = 0
         saving_prompt_cache = self._prefix_cache_save_state.callback is not None
-        # Cache-producing prefill calls normally end on the 256-token prefix
-        # grid because opaque ArraysCache/SSM state is restorable only at an exact
+        # Cache-producing prefill calls normally end on the active segment's grid
+        # because opaque ArraysCache/SSM state is restorable only at an exact
         # model-call endpoint. Gemma 4 has only KV/rotating-KV caches, so its
         # image-aware adjustment may use a non-aligned endpoint instead.
-        processed_remainder = self._processed_prefix_len % self.prefill_step_size
-        if saving_prompt_cache and processed_remainder:
-            # After a partial restore, land on the next normal prefill boundary.
-            alignment_step = self.prefill_step_size - processed_remainder
-            if alignment_step < remaining_tokens:
-                next_step = min(alignment_step, remaining_tokens - 1)
+        processed_remainder = (self._processed_prefix_len - segment_start) % step_size
+        if saving_prompt_cache and processed_remainder and next_chunk_size > 0:
+            # After a partial restore, land on the next active segment boundary.
+            alignment_step = step_size - processed_remainder
+            if alignment_step <= next_chunk_size and alignment_step < remaining_tokens:
+                next_step = alignment_step
 
-        if next_step == 0 and remaining_tokens > self.prefill_step_size:
-            next_step = min(self.prefill_step_size, remaining_tokens - 1)
+        final_context_length = self._processed_prefix_len + remaining_tokens
+        crosses_segment = final_context_length > segment_end
+        if next_step == 0 and (remaining_tokens > step_size or crosses_segment):
+            next_step = next_chunk_size
 
         if (
             next_step == 0
@@ -883,9 +900,21 @@ class _PromptPrefill:
             if target_prefix_len > self._processed_prefix_len:
                 next_step = target_prefix_len - self._processed_prefix_len
 
-        return self._step_without_splitting_gemma4_image_run(next_step)
+        # Segment ends change the preferred step; they are not valid split points
+        # inside Gemma 4's bidirectional image attention. The current image
+        # processor caps a run at 280 soft tokens, so even the worst 1,024 -> 512
+        # crossing is bounded at 535 tokens (255 before the image plus 280).
+        return self._step_without_splitting_gemma4_image_run(
+            next_step,
+            maximum_step=step_size,
+        )
 
-    def _step_without_splitting_gemma4_image_run(self, proposed_step: int) -> int:
+    def _step_without_splitting_gemma4_image_run(
+        self,
+        proposed_step: int,
+        *,
+        maximum_step: int,
+    ) -> int:
         if proposed_step == 0 or self._gemma4_image_prefill_runs is None:
             return proposed_step
 
@@ -909,7 +938,7 @@ class _PromptPrefill:
                 # one image is itself longer.
                 if aligned_start > processed_prompt_len:
                     safe_boundary = aligned_start
-                elif image_end - processed_prompt_len <= self.prefill_step_size:
+                elif image_end - processed_prompt_len <= maximum_step:
                     safe_boundary = image_end
                 elif processed_prompt_len < image_start:
                     safe_boundary = image_start
@@ -1132,6 +1161,7 @@ class BatchGenerator:
         *,
         inputs_embeds: mx.array,
         sampler: Callable[[mx.array], mx.array],
+        prefill_plan: PrefillPlan | None = None,
         logits_processors: list[LogitsProcessor],
         prompt_kwargs: dict,
         prefix_cache_chunks: list[PromptPrefixChunk],
@@ -1158,6 +1188,7 @@ class BatchGenerator:
                 # Stateful processors are request-owned; callers must not share them.
                 logits_processors=list(logits_processors),
                 inputs_embeds=inputs_embeds,
+                prefill_plan=prefill_plan,
                 cache=cache,
                 all_tokens=list(all_tokens),
                 rope_deltas=rope_deltas,
@@ -1238,6 +1269,7 @@ class BatchGenerator:
                 inputs_embeds=sequence.inputs_embeds,
                 prompt_kwargs=sequence.prompt_kwargs,
                 prefix_cache_save_state=sequence.prefix_cache_save_state,
+                prefill_plan=sequence.prefill_plan,
                 prefill_step_size=self.prefill_step_size,
                 cache=sequence.cache,
                 all_tokens=sequence.all_tokens,

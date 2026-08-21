@@ -84,8 +84,12 @@ def _profile(
     activation_dtype_bytes=2,
     prefill_step_size=2_048,
     rotating_peak_bytes=0,
+    rotating_constant_bytes=None,
+    rotating_bytes_per_prefill_token=0,
     fixed_ssm_bytes=0,
 ):
+    if rotating_constant_bytes is None:
+        rotating_constant_bytes = rotating_peak_bytes
     return CacheFitProfile(
         family=family,
         allocation_step=256,
@@ -95,7 +99,8 @@ def _profile(
         query_attention_heads=query_attention_heads,
         activation_dtype_bytes=activation_dtype_bytes,
         prefill_step_size=prefill_step_size,
-        rotating_peak_bytes=rotating_peak_bytes,
+        rotating_constant_bytes=rotating_constant_bytes,
+        rotating_bytes_per_prefill_token=rotating_bytes_per_prefill_token,
         fixed_ssm_bytes=fixed_ssm_bytes,
         max_context_length=max_context_length,
     )
@@ -157,6 +162,8 @@ def test_probe_uses_rotating_prefill_peak(monkeypatch):
     profile = _probe_profile(monkeypatch, [kv_cache, rotating_cache])
 
     rotating_bytes_per_token = rotating_cache.nbytes // rotating_cache.keys.shape[2]
+    assert profile.rotating_constant_bytes == rotating_bytes_per_token * (1_024 - 1)
+    assert profile.rotating_bytes_per_prefill_token == rotating_bytes_per_token
     assert profile.rotating_peak_bytes == rotating_bytes_per_token * (1_024 + 2_048 - 1)
 
 
@@ -293,7 +300,7 @@ def test_fit_raises_a_small_result_to_minimum(caplog):
     assert "using the 4,096 token minimum" in caplog.text
 
 
-def test_runtime_reserve_uses_five_percent_or_three_gib():
+def test_runtime_reserve_is_three_gib_on_all_working_sets():
     percentage_result = calculate_context_fit(
         _profile(max_context_length=4_096),
         working_set_bytes=80 * GIB,
@@ -305,8 +312,8 @@ def test_runtime_reserve_uses_five_percent_or_three_gib():
         baseline_bytes=0,
     )
 
-    assert percentage_result.runtime_reserve_bytes == 4 * GIB
-    assert percentage_result.safe_ceiling_bytes == 76 * GIB
+    assert percentage_result.runtime_reserve_bytes == 3 * GIB
+    assert percentage_result.safe_ceiling_bytes == 77 * GIB
     assert minimum_result.runtime_reserve_bytes == 3 * GIB
     assert minimum_result.safe_ceiling_bytes == 13 * GIB
 
@@ -449,6 +456,116 @@ def test_fit_scales_across_memory_tiers(working_set_gib, expected_context):
     )
 
     assert result.context_length == expected_context
+
+
+def test_dynamic_fit_keeps_reserve_when_large_model_exceeds_safe_ceiling():
+    profile = _profile(
+        family="qwen3_5",
+        max_context_length=262_144,
+        full_kv_bytes_per_token=65_536,
+        prompt_input_bytes_per_token=10_240,
+        query_attention_heads=24,
+        fixed_ssm_bytes=153_944_064,
+    )
+
+    result = context_fit.calculate_dynamic_context_fit(
+        profile,
+        # Actual M5 recommended working set and loaded-model baseline.
+        working_set_bytes=19_069_665_280,
+        baseline_bytes=16_055_717_354,
+        maximum_prefill_step_size=2_048,
+    )
+    plan = result.make_request_prefill_plan(prompt_context_length=4_096)
+
+    assert result.runtime_reserve_bytes == 3 * GIB
+    assert result.step_context_limits == ((2_048, 0), (1_024, 0), (512, 0))
+    assert result.context_length == 4_096
+    assert [
+        (segment.step_size, segment.end_context_length) for segment in plan.segments
+    ] == [(512, 4_096)]
+
+
+def test_dynamic_fit_builds_request_specific_prefill_segments():
+    profile = _profile(
+        max_context_length=262_144,
+        full_kv_bytes_per_token=20_480,
+        prompt_input_bytes_per_token=5_632,
+        query_attention_heads=16,
+        rotating_constant_bytes=209_510_400,
+        rotating_bytes_per_prefill_token=204_800,
+    )
+
+    result = context_fit.calculate_dynamic_context_fit(
+        profile,
+        working_set_bytes=27 * GIB,
+        baseline_bytes=15_611_655_610,
+        maximum_prefill_step_size=2_048,
+    )
+    plan = result.make_request_prefill_plan(prompt_context_length=result.context_length)
+
+    assert result.step_context_limits == (
+        (2_048, 104_192),
+        (1_024, 165_632),
+        (512, 231_680),
+    )
+    assert result.context_length == 231_680
+    assert [
+        (segment.step_size, segment.end_context_length) for segment in plan.segments
+    ] == [
+        (2_048, 95_488),
+        (1_024, 158_208),
+        (512, 231_680),
+    ]
+
+
+def test_dynamic_fit_keeps_short_request_at_largest_step():
+    profile = _profile(
+        max_context_length=262_144,
+        full_kv_bytes_per_token=20_480,
+        prompt_input_bytes_per_token=5_632,
+        query_attention_heads=16,
+        rotating_constant_bytes=209_510_400,
+        rotating_bytes_per_prefill_token=204_800,
+    )
+    result = context_fit.calculate_dynamic_context_fit(
+        profile,
+        working_set_bytes=27 * GIB,
+        baseline_bytes=15_611_655_610,
+        maximum_prefill_step_size=2_048,
+    )
+
+    plan = result.make_request_prefill_plan(prompt_context_length=50_000)
+
+    assert [
+        (segment.step_size, segment.end_context_length) for segment in plan.segments
+    ] == [(2_048, 50_000)]
+
+
+def test_dynamic_fit_rejects_prompt_above_reported_context():
+    profile = _profile(max_context_length=100_000)
+    result = context_fit.calculate_dynamic_context_fit(
+        profile,
+        working_set_bytes=10 * GIB,
+        baseline_bytes=0,
+        maximum_prefill_step_size=2_048,
+    )
+
+    with pytest.raises(ValueError, match="exceeding the fitted"):
+        result.make_request_prefill_plan(
+            prompt_context_length=result.context_length + 1
+        )
+
+
+def test_dynamic_fit_respects_custom_maximum_prefill_step():
+    result = context_fit.calculate_dynamic_context_fit(
+        _profile(max_context_length=100_000),
+        working_set_bytes=10 * GIB,
+        baseline_bytes=0,
+        maximum_prefill_step_size=1_024,
+    )
+
+    assert result.prefill_step_sizes == (1_024, 512)
+    assert [step for step, _limit in result.step_context_limits] == [1_024, 512]
 
 
 def test_one_token_probe_uses_token_zero_and_reports_fit(monkeypatch):
