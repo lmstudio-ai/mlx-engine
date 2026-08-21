@@ -264,6 +264,46 @@ def test_tool_calling_plan_accepts_valid_local_ref_tool_parameter_schema():
     assert plan.has_active_tools
 
 
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {},
+        {"type": "object"},
+        {"type": ["object", "null"]},
+        {"anyOf": [{"type": "object"}, {"type": "null"}]},
+    ],
+)
+def test_tool_calling_plan_accepts_object_argument_tool_parameter_schemas(parameters):
+    plan = build_tool_calling_plan(
+        tools=[_tool("lookup", parameters, strict=True)],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+    )
+
+    assert plan.has_active_tools
+
+
+@pytest.mark.parametrize(
+    "root_type",
+    ["array", "string", "number", "integer", "boolean", "null", ["array", "string"]],
+)
+def test_tool_calling_plan_rejects_explicit_non_object_root_parameter_schema(
+    root_type,
+):
+    with pytest.raises(ToolCallingValidationError) as error:
+        build_tool_calling_plan(
+            tools=[_tool("lookup", {"type": root_type}, strict=True)],
+            tool_choice_value="auto",
+            parallel_tool_calls=False,
+            response_json_schema=None,
+        )
+
+    message = str(error.value)
+    assert "lookup" in message
+    assert "root type must allow 'object'" in message
+
+
 def test_tool_calling_plan_accepts_literal_ref_data_in_tool_parameter_schema():
     plan = build_tool_calling_plan(
         tools=[

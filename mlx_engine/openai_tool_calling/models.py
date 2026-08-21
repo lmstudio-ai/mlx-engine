@@ -197,3 +197,16 @@ def _validate_parameters_schema(tool_name: str, parameters: JsonObject) -> None:
             f"function tool `{tool_name}` parameters must be a valid JSON Schema"
             f"{location}: {error.message}"
         ) from error
+    _validate_parameters_root_type(tool_name, parameters)
+
+
+def _validate_parameters_root_type(tool_name: str, parameters: JsonObject) -> None:
+    root_type = parameters.get("type")
+    if root_type is None or root_type == "object":
+        return
+    if isinstance(root_type, list) and "object" in root_type:
+        return
+    raise ToolCallingValidationError(
+        f"function tool `{tool_name}` parameters root type must allow 'object'; "
+        "mlx-engine tool calls use JSON object arguments."
+    )
