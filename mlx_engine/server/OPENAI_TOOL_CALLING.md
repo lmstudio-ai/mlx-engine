@@ -37,12 +37,14 @@ This avoids maintaining a partial JSON Schema reference walker and avoids falsel
 
 ## Parser selection and maintenance
 
-Parser selection follows the loaded runtime metadata before falling back to text scanning:
+Parser selection is anchored to the renderer used for the request before falling back to broader runtime metadata. For vision requests, a processor chat template wins over separately loaded model-tokenizer metadata because the processor is what renders the prompt. Within each source, known chat-template markers are checked before parser metadata so the parser follows the format the renderer can actually emit.
 
-1. tokenizer or processor `tool_parser_type` metadata, when present;
-2. parser function module names exposed by `mlx-lm` tokenizer wrappers;
-3. `mlx-vlm` chat-template parser inference, when available;
-4. known chat-template markers;
+Source order is:
+
+1. actual renderer chat-template markers;
+2. actual renderer `tool_parser_type` / parser function metadata;
+3. renderer tokenizer chat-template or parser metadata;
+4. separately loaded model-tokenizer chat-template or parser metadata;
 5. loaded `model_type`; and
 6. first generated tool-call marker when no runtime hint is known.
 

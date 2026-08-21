@@ -11,6 +11,7 @@ from mlx_engine.server.chat import (
     normalize_messages,
     prepare_chat_generation_request,
 )
+from mlx_engine.tool_protocols import MUSE_GLIMMER_ATEM_START
 
 
 _RED_PNG_B64 = (
@@ -330,6 +331,29 @@ def test_tools_use_loaded_chat_template_markers_before_model_type():
     )
 
     assert request.tool_calling_plan.model_format == "gemma4"
+
+
+def test_vision_tools_use_processor_chat_template_before_model_tokenizer_metadata():
+    processor = _FakeRenderer()
+    processor.chat_template = f"{MUSE_GLIMMER_ATEM_START}<atem:invoke"
+    tokenizer_renderer = _FakeRenderer()
+    tokenizer_renderer.init_kwargs = {"tool_parser_type": "qwen3_coder"}
+    model_kit = _FakeVisionModelKit(processor)
+    model_kit.tokenizer = _FakeTokenizerWrapper(tokenizer_renderer)
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+        ),
+        model_kit=model_kit,
+        supports_vision=True,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.model_format == "muse_glimmer"
+    assert processor.calls[0][1]["tools"][0]["function"]["name"] == "lookup"
 
 
 def test_assistant_prefill_is_rejected_with_active_tools():

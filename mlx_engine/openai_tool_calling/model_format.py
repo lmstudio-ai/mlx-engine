@@ -103,13 +103,16 @@ def resolve_model_tool_call_format(
     *,
     supports_vision: bool,
 ) -> ModelToolCallFormat:
-    for parser_type in _runtime_parser_types(model_kit, supports_vision=supports_vision):
-        if model_format := model_tool_call_format_from_parser_type(parser_type):
-            return model_format
-
-    for chat_template in _runtime_chat_templates(model_kit, supports_vision=supports_vision):
-        if model_format := model_tool_call_format_from_chat_template(chat_template):
-            return model_format
+    for parser_types, chat_templates in _runtime_format_sources(
+        model_kit,
+        supports_vision=supports_vision,
+    ):
+        for chat_template in chat_templates:
+            if model_format := model_tool_call_format_from_chat_template(chat_template):
+                return model_format
+        for parser_type in parser_types:
+            if model_format := model_tool_call_format_from_parser_type(parser_type):
+                return model_format
 
     return model_tool_call_format_from_model_type(getattr(model_kit, "model_type", None))
 
@@ -167,19 +170,37 @@ def get_model_tool_call_format_spec(
     return _FORMAT_SPEC_BY_NAME[model_format]
 
 
-def _runtime_parser_types(
+def _runtime_format_sources(
     model_kit: object,
     *,
     supports_vision: bool,
-) -> list[str]:
-    parser_types = []
-    if tokenizer := getattr(model_kit, "tokenizer", None):
-        parser_types.extend(_tokenizer_parser_types(tokenizer))
-    if supports_vision and (processor := getattr(model_kit, "processor", None)):
-        parser_types.extend(_processor_parser_types(processor))
+) -> list[tuple[list[str], list[object]]]:
+    if supports_vision:
+        return _vision_runtime_format_sources(model_kit)
+    tokenizer = getattr(model_kit, "tokenizer", None)
+    return [] if tokenizer is None else [_tokenizer_format_source(tokenizer)]
+
+
+def _vision_runtime_format_sources(
+    model_kit: object,
+) -> list[tuple[list[str], list[object]]]:
+    sources: list[tuple[list[str], list[object]]] = []
+    processor = getattr(model_kit, "processor", None)
+    if processor is not None:
+        processor_template = getattr(processor, "chat_template", None)
+        if processor_template is not None:
+            sources.append((_processor_parser_types(processor), [processor_template]))
         if processor_tokenizer := getattr(processor, "tokenizer", None):
-            parser_types.extend(_tokenizer_parser_types(processor_tokenizer))
-    return _dedupe(parser_types)
+            sources.append(_tokenizer_format_source(processor_tokenizer))
+        if processor_template is None:
+            sources.append((_processor_parser_types(processor), []))
+    if tokenizer := getattr(model_kit, "tokenizer", None):
+        sources.append(_tokenizer_format_source(tokenizer))
+    return sources
+
+
+def _tokenizer_format_source(tokenizer: object) -> tuple[list[str], list[object]]:
+    return (_tokenizer_parser_types(tokenizer), _tokenizer_chat_templates(tokenizer))
 
 
 def _tokenizer_parser_types(tokenizer: object) -> list[str]:
@@ -211,21 +232,6 @@ def _processor_parser_types(processor: object) -> list[str]:
     return parser_types
 
 
-def _runtime_chat_templates(
-    model_kit: object,
-    *,
-    supports_vision: bool,
-) -> list[object]:
-    chat_templates: list[object] = []
-    if tokenizer := getattr(model_kit, "tokenizer", None):
-        chat_templates.extend(_tokenizer_chat_templates(tokenizer))
-    if supports_vision and (processor := getattr(model_kit, "processor", None)):
-        chat_templates.append(getattr(processor, "chat_template", None))
-        if processor_tokenizer := getattr(processor, "tokenizer", None):
-            chat_templates.extend(_tokenizer_chat_templates(processor_tokenizer))
-    return [template for template in chat_templates if template is not None]
-
-
 def _tokenizer_chat_templates(tokenizer: object) -> list[object]:
     return [
         getattr(tokenizer, "chat_template", None),
@@ -246,10 +252,6 @@ def _infer_mlx_vlm_tool_parser_type(processor: object) -> str | None:
     except Exception:
         return None
     return inferred if isinstance(inferred, str) else None
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(values))
 
 
 def _normalize_key(value: str | None) -> str:
