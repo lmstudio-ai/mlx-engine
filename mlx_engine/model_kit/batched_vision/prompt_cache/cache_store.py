@@ -91,27 +91,38 @@ class VlmPromptCacheStore:
     - Touched LRU keys are committed physical records.
     """
 
-    def __init__(self, max_kv_size: int | None = None):
+    def __init__(
+        self,
+        max_kv_size: int | None = None,
+        enable_disk_cache: bool = True,
+    ):
         base_dir = Path("/tmp")
         self._base_dir = base_dir
         self._max_kv_size = max_kv_size
-        self._blob_store = TemporarySafetensorBlobStore(base_dir)
-        self._empirical_budget_set = False
+        self._blob_store: TemporarySafetensorBlobStore | None = (
+            TemporarySafetensorBlobStore(base_dir) if enable_disk_cache else None
+        )
+        self._empirical_budget_set = not enable_disk_cache
         self._layout: PromptCacheLayout | None = None
         self._record_metadata_by_key: dict[str, PromptCacheRecordMetadata] = {}
         self._key_sizes: dict[str, int] = {}
         self._lru_keys: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
-        self._max_cache_store_bytes = provisional_cache_store_budget_bytes(base_dir)
+        self._max_cache_store_bytes = (
+            provisional_cache_store_budget_bytes(base_dir) if enable_disk_cache else 0
+        )
         self._restore_hit_tokens = 0
         self._restore_miss_tokens = 0
         self._cache_evictions = 0
         self._cache_evicted_bytes = 0
         self._last_cache_usage_log_time = 0.0
-        logger.info(
-            "VLM prompt cache disk store: lifetime=model_load storage=temporary "
-            "cleanup=model_unload_or_process_exit"
-        )
+        if enable_disk_cache:
+            logger.info(
+                "VLM prompt cache disk store: lifetime=model_load storage=temporary "
+                "cleanup=model_unload_or_process_exit"
+            )
+        else:
+            logger.info("VLM prompt cache disk store disabled")
 
     def ensure_max_kv_size(self, max_kv_size: int) -> None:
         """Keep the larger configured or fitted context as the budget target."""
@@ -227,10 +238,11 @@ class VlmPromptCacheStore:
         record_keys: list[str],
         layout: PromptCacheLayout,
     ) -> list[Any]:
+        blob_store = self._require_blob_store()
         prompt_cache: list[Any] = [None] * len(layout.layer_kinds)
         for record_key in record_keys:
             try:
-                record_prompt_cache = self._blob_store.load_record(record_key)
+                record_prompt_cache = blob_store.load_record(record_key)
             except Exception:
                 self._evict_key(record_key)
                 raise
@@ -320,19 +332,20 @@ class VlmPromptCacheStore:
         """Commit a pending save from the cache I/O thread."""
         if not self.can_store_records():
             return
+        blob_store = self._require_blob_store()
         if self._layout is None:
             self._layout = pending_save.cache_layout
 
         try:
             for record in pending_save.records:
-                if self._blob_store.exists(record.key):
+                if blob_store.exists(record.key):
                     self._record_metadata_by_key[record.key] = record.metadata
                     self._touch_cache_entry(record.key)
                     continue
 
                 # The I/O thread waits, writes, then publishes/account each record.
                 mx.eval(list(record.snapshot_arrays.values()))
-                self._blob_store.put(
+                blob_store.put(
                     record.key,
                     record.snapshot_arrays,
                     record.safetensor_metadata,
@@ -369,10 +382,14 @@ class VlmPromptCacheStore:
             chunk_sizes_by_key[chunk_key] = sum(
                 record_sizes_by_key.get(record_key, 0) for record_key in record_keys
             )
-            chunk_records_available_by_key[chunk_key] = bool(record_keys) and all(
-                record_key in record_sizes_by_key
-                and self._blob_store.exists(record_key)
-                for record_key in record_keys
+            chunk_records_available_by_key[chunk_key] = (
+                self._blob_store is not None
+                and bool(record_keys)
+                and all(
+                    record_key in record_sizes_by_key
+                    and self._blob_store.exists(record_key)
+                    for record_key in record_keys
+                )
             )
 
         return PromptCacheStoreStats(
@@ -395,7 +412,8 @@ class VlmPromptCacheStore:
         self._key_sizes.clear()
         self._lru_keys.clear()
         self._total_bytes = 0
-        self._blob_store.close()
+        if self._blob_store is not None:
+            self._blob_store.close()
 
     def _prepare_record_save(
         self,
@@ -437,7 +455,7 @@ class VlmPromptCacheStore:
         )
 
     def _touch_cache_entry(self, key: str) -> None:
-        total_size = self._blob_store.size(key)
+        total_size = self._require_blob_store().size(key)
         previous_size = self._key_sizes.get(key, 0)
         self._key_sizes[key] = total_size
         self._total_bytes += total_size - previous_size
@@ -522,8 +540,13 @@ class VlmPromptCacheStore:
         return PromptCacheRestorePlanner(
             layout=self._require_layout(),
             record_metadata_by_key=self._record_metadata_by_key,
-            record_exists=self._blob_store.exists,
+            record_exists=self._require_blob_store().exists,
         )
+
+    def _require_blob_store(self) -> TemporarySafetensorBlobStore:
+        if self._blob_store is None:
+            raise RuntimeError("prompt cache disk store is disabled")
+        return self._blob_store
 
     def _require_layout(self) -> PromptCacheLayout:
         if self._layout is None:
@@ -538,4 +561,4 @@ class VlmPromptCacheStore:
         self._cache_evictions += 1
         self._cache_evicted_bytes += evicted_bytes
 
-        self._blob_store.delete(key)
+        self._require_blob_store().delete(key)

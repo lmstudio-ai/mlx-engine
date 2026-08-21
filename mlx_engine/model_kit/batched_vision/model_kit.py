@@ -131,6 +131,7 @@ class BatchedVisionModelKit:
         trust_remote_code: bool = False,
         seed: int | None = None,
         auto_fit_context: bool = True,
+        enable_disk_cache: bool = True,
     ):
         # External requests and internal generation events share one queue so
         # restore completions wake the generation thread without polling.
@@ -164,7 +165,10 @@ class BatchedVisionModelKit:
         self._uses_gemma4_bidirectional_visual_attention = (
             config_uses_bidirectional_visual_attention(self.config)
         )
-        self._prompt_cache_store = VlmPromptCacheStore(max_kv_size=max_kv_size)
+        self._prompt_cache_store = VlmPromptCacheStore(
+            max_kv_size=max_kv_size,
+            enable_disk_cache=enable_disk_cache,
+        )
         self._cache_io_thread = PromptCacheIOThread(
             cache_store=self._prompt_cache_store,
             generation_queue=self._requests,
