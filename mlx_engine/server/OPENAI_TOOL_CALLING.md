@@ -33,7 +33,20 @@ This avoids maintaining a partial JSON Schema reference walker and avoids falsel
 - `response_format` with active tools. Use `tool_choice: "none"` if structured output should take precedence over provided tools.
 - Assistant prefill with active tools or structured output. Plain no-tool requests still support assistant prefill.
 - Strict constrained decoding for tool arguments. `strict: true` is validation only; invalid generated arguments produce a stream error.
-- Mixed model-format dialects in one response. The server selects the parser from the loaded model type when known, otherwise from the first tool-call marker in the generated text.
+- Mixed model-format dialects in one response. The server selects one parser per request from loaded parser metadata, chat-template markers, model type, or finally the first tool-call marker in generated text.
+
+## Parser selection and maintenance
+
+Parser selection follows the loaded runtime metadata before falling back to text scanning:
+
+1. tokenizer or processor `tool_parser_type` metadata, when present;
+2. parser function module names exposed by `mlx-lm` tokenizer wrappers;
+3. `mlx-vlm` chat-template parser inference, when available;
+4. known chat-template markers;
+5. loaded `model_type`; and
+6. first generated tool-call marker when no runtime hint is known.
+
+The server keeps a small local format registry for the supported LSEP formats. That registry owns the parser identity, start/end markers, model aliases, template markers, and optional upstream `mlx-lm`/`mlx-vlm` parser module fallback. Local parsing remains the source of the server contract; upstream parsers are lazy optional fallbacks and their output is normalized into the same OpenAI `tool_calls` shape before strict validation.
 
 ## Streaming behavior
 

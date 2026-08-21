@@ -13,6 +13,7 @@ from mlx_engine.openai_tool_calling.models import (
 )
 from mlx_engine.openai_tool_calling.model_format import (
     ModelToolCallFormat,
+    model_tool_call_format_from_model_type,
     parse_model_format_tool_calls,
 )
 
@@ -47,6 +48,7 @@ def build_tool_calling_plan(
     parallel_tool_calls: bool,
     response_json_schema: str | None,
     model_type: str | None = None,
+    model_format: ModelToolCallFormat | None = None,
 ) -> ToolCallingPlan:
     tool_choice = parse_tool_choice_value(tool_choice_value)
     tool_specs = [] if tool_choice == "none" else extract_function_tool_specs(tools)
@@ -65,16 +67,5 @@ def build_tool_calling_plan(
 
     return ToolCallingPlan(
         tool_specs=tool_specs,
-        model_format=_model_format_from_model_type(model_type),
+        model_format=model_format or model_tool_call_format_from_model_type(model_type),
     )
-
-
-def _model_format_from_model_type(model_type: str | None) -> ModelToolCallFormat:
-    normalized_model_type = str(model_type or "")
-    if normalized_model_type.startswith("qwen3_5"):
-        return "qwen35"
-    if normalized_model_type.startswith("gemma4"):
-        return "gemma4"
-    if normalized_model_type == "muse_glimmer":
-        return "muse_glimmer"
-    return "auto"

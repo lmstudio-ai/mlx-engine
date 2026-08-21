@@ -698,6 +698,39 @@ def test_qwen35_tool_call_parses_multiple_calls_in_emission_order():
     assert _arguments(result[1]) == {"query": "weather"}
 
 
+def test_parser_uses_upstream_mlx_parser_as_fallback(monkeypatch):
+    class FakeUpstreamQwenParser:
+        @staticmethod
+        def parse_tool_call(text, tools):
+            assert text == "native-body"
+            assert tools[0]["function"]["name"] == "lookup"
+            return {"name": "lookup", "arguments": {"query": "weather"}}
+
+    def fake_import_module(module_name):
+        if module_name == "mlx_lm.tool_parsers.qwen3_coder":
+            return FakeUpstreamQwenParser
+        raise ModuleNotFoundError(module_name)
+
+    monkeypatch.setattr(
+        "mlx_engine.openai_tool_calling.model_parsers.upstream."
+        "importlib.import_module",
+        fake_import_module,
+    )
+    output = f"{QWEN35_TOOL_CALL_START}native-body{QWEN35_TOOL_CALL_END}"
+
+    result = parse_model_format_tool_calls(
+        output,
+        _specs(_tool("lookup")),
+        id_factory=_id_factory(),
+        model_format="qwen35",
+    )
+
+    assert len(result) == 1
+    assert result[0]["id"] == "call_test_0"
+    assert result[0]["function"]["name"] == "lookup"
+    assert _arguments(result[0]) == {"query": "weather"}
+
+
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
 def test_qwen35_tool_call_treats_non_finite_json_constants_as_text(constant):
     output = (

@@ -292,6 +292,46 @@ def test_tools_use_loaded_model_type_to_select_parser_format():
     assert request.tool_calling_plan.model_format == "muse_glimmer"
 
 
+def test_tools_use_loaded_tokenizer_parser_type_before_model_type():
+    renderer = _FakeRenderer()
+    renderer.init_kwargs = {"tool_parser_type": "gemma4"}
+    model_kit = _FakeTextModelKit(renderer)
+    model_kit.model_type = "muse_glimmer"
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+        ),
+        model_kit=model_kit,
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.model_format == "gemma4"
+
+
+def test_tools_use_loaded_chat_template_markers_before_model_type():
+    renderer = _FakeRenderer()
+    renderer.chat_template = "<|tool_call> call:name{} <tool_call|>"
+    model_kit = _FakeTextModelKit(renderer)
+    model_kit.model_type = "muse_glimmer"
+
+    request = prepare_chat_generation_request(
+        _base_request(
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+        ),
+        model_kit=model_kit,
+        supports_vision=False,
+        tokenize=lambda _model_kit, _prompt: [],
+    )
+
+    assert request.tool_calling_plan.model_format == "gemma4"
+
+
 def test_assistant_prefill_is_rejected_with_active_tools():
     renderer = _FakeRenderer()
 

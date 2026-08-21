@@ -9,16 +9,16 @@ import llguidance.numpy
 
 import mlx.core as mx
 
+from mlx_engine.openai_tool_calling.model_format import (
+    get_model_tool_call_format_spec,
+    runtime_matches_tool_call_format,
+)
 from mlx_engine.tool_protocols import (
     GEMMA4_TOOL_DECLARATION_END,
     GEMMA4_TOOL_DECLARATION_START,
-    MUSE_GLIMMER_ATEM_END,
-    MUSE_GLIMMER_ATEM_START,
     MUSE_GLIMMER_EOM,
     MUSE_GLIMMER_EOT,
     QWEN35_FUNCTION_START,
-    QWEN35_TOOL_CALL_END,
-    QWEN35_TOOL_CALL_START,
     QWEN35_TOOLS_END,
     QWEN35_TOOLS_START,
     Gemma4ToolContext,
@@ -47,6 +47,9 @@ _MUSE_GLIMMER_SYSTEM_END = "<|eot|>"
 _MUSE_GLIMMER_FUNCTION_SCHEMAS_START = "// Function schemas"
 _TOOL_WHITESPACE = (" ", "\n", "\t", "\r")
 _LLG_TOKENIZER_CACHE: dict[tuple[int, int, tuple[int, ...]], Any] = {}
+_GEMMA4_TOOL_FORMAT = get_model_tool_call_format_spec("gemma4")
+_QWEN35_TOOL_FORMAT = get_model_tool_call_format_spec("qwen35")
+_MUSE_GLIMMER_TOOL_FORMAT = get_model_tool_call_format_spec("muse_glimmer")
 
 
 def create_gemma4_tool_context_from_prompt(
@@ -56,7 +59,11 @@ def create_gemma4_tool_context_from_prompt(
     model_type: str | None,
 ) -> Gemma4ToolContext | None:
     """Return Gemma4 tool context only when the rendered prompt declares tools."""
-    if not str(model_type or "").startswith("gemma4"):
+    if not runtime_matches_tool_call_format(
+        model_type=model_type,
+        tokenizer=tokenizer,
+        model_format="gemma4",
+    ):
         return None
 
     prompt_text = tokenizer.decode(prompt_tokens)
@@ -77,11 +84,15 @@ def create_qwen35_tool_context_from_prompt(
     model_type: str | None,
 ) -> Qwen35ToolContext | None:
     """Return Qwen3.5 tool context only for rendered native tool prompts."""
-    if not str(model_type or "").startswith("qwen3_5"):
+    if not runtime_matches_tool_call_format(
+        model_type=model_type,
+        tokenizer=tokenizer,
+        model_format="qwen35",
+    ):
         return None
-    if tokenizer.tool_call_start != QWEN35_TOOL_CALL_START:
+    if tokenizer.tool_call_start != _QWEN35_TOOL_FORMAT.start_marker:
         return None
-    if tokenizer.tool_call_end != QWEN35_TOOL_CALL_END:
+    if tokenizer.tool_call_end != _QWEN35_TOOL_FORMAT.end_marker:
         return None
     if (
         len(tokenizer.tool_call_start_tokens) != 1
@@ -91,7 +102,7 @@ def create_qwen35_tool_context_from_prompt(
 
     prompt_text = tokenizer.decode(prompt_tokens)
     if (
-        QWEN35_TOOL_CALL_START not in prompt_text
+        _QWEN35_TOOL_FORMAT.start_marker not in prompt_text
         or QWEN35_FUNCTION_START not in prompt_text
     ):
         return None
@@ -113,7 +124,11 @@ def create_muse_glimmer_tool_context_from_prompt(
     model_type: str | None,
 ) -> MuseGlimmerToolContext | None:
     """Return Muse Glimmer context for a prompt with native ATEM tools."""
-    if model_type != "muse_glimmer":
+    if not runtime_matches_tool_call_format(
+        model_type=model_type,
+        tokenizer=tokenizer,
+        model_format="muse_glimmer",
+    ):
         return None
 
     prompt_text = tokenizer.decode(prompt_tokens)
@@ -530,7 +545,7 @@ def create_muse_glimmer_tool_logits_processor(
     context: MuseGlimmerToolContext,
 ) -> NativeToolReasoningGuardLogitsProcessor:
     tool_call_start_token_ids = _encode_token_ids(
-        tokenizer, MUSE_GLIMMER_ATEM_START.removesuffix(">")
+        tokenizer, _MUSE_GLIMMER_TOOL_FORMAT.start_marker.removesuffix(">")
     )
     end_of_message_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOM)[0]
     end_of_turn_token_id = _encode_token_ids(tokenizer, MUSE_GLIMMER_EOT)[0]
@@ -560,7 +575,7 @@ def create_muse_glimmer_tool_logits_processor(
 def _muse_glimmer_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
     return rf"""%llguidance {{}}
-start: ">\n" invoke (WS invoke)* WS "{MUSE_GLIMMER_ATEM_END}"
+start: ">\n" invoke (WS invoke)* WS "{_MUSE_GLIMMER_TOOL_FORMAT.end_marker}"
 invoke: "<atem:invoke name=\"" tool "\">" WS parameter* "</atem:invoke>"
 tool: {tool_choice}
 parameter: "<atem:parameter name=\"" PARAM_NAME "\">" param_value WS
@@ -574,7 +589,7 @@ WS: /[ \t\n\r]*/
 def _gemma4_llguidance_grammar(tool_names: tuple[str, ...]) -> str:
     tool_choice = " | ".join(json.dumps(tool_name) for tool_name in tool_names)
     return rf"""%llguidance {{}}
-start: "call:" tool object WS <tool_call|>
+start: "call:" tool object WS {_GEMMA4_TOOL_FORMAT.end_marker}
 tool: {tool_choice}
 object: "{{" WS (member (WS "," WS member)*)? WS "}}"
 member: key WS ":" WS value
