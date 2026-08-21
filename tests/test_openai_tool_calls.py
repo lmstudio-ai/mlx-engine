@@ -272,8 +272,20 @@ def test_tool_calling_plan_accepts_literal_ref_data_in_tool_parameter_schema():
                 {
                     "type": "object",
                     "properties": {
-                        "const_value": {"const": {"$ref": "literal const"}},
-                        "enum_value": {"enum": [{"$ref": "literal enum"}]},
+                        "const_value": {
+                            "const": {
+                                "$ref": "literal const",
+                                "$dynamicRef": "literal dynamic const",
+                            }
+                        },
+                        "enum_value": {
+                            "enum": [
+                                {
+                                    "$ref": "literal enum",
+                                    "$dynamicRef": "literal dynamic enum",
+                                }
+                            ]
+                        },
                         "default_value": {
                             "type": "object",
                             "default": {"$ref": "literal default"},
@@ -304,23 +316,46 @@ def test_tool_calling_plan_accepts_literal_ref_data_in_tool_parameter_schema():
             "properties": {"query": {"$ref": "#/$defs/Missing"}},
             "$defs": {},
         },
-        {"type": "array", "items": {"$ref": "#/missing"}},
-        {"anyOf": [{"$ref": "#/missing"}]},
-        {"additionalProperties": {"$ref": "#/missing"}},
+        {"type": "object", "properties": {"query": {"$dynamicRef": "#/missing"}}},
     ],
 )
-def test_tool_calling_plan_rejects_unresolvable_tool_parameter_refs(parameters):
+def test_tool_calling_plan_accepts_unresolved_schema_refs_at_request_time(parameters):
+    plan = build_tool_calling_plan(
+        tools=[_tool("lookup", parameters, strict=True)],
+        tool_choice_value="auto",
+        parallel_tool_calls=False,
+        response_json_schema=None,
+    )
+
+    assert plan.has_active_tools
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"$ref": "#/missing"},
+        {
+            "type": "object",
+            "properties": {"query": {"$ref": "#/$defs/Missing"}},
+            "$defs": {},
+        },
+        {"type": "object", "properties": {"query": {"$dynamicRef": "#/missing"}}},
+    ],
+)
+def test_tool_calling_plan_reports_unresolvable_strict_schema_refs(parameters):
+    plan = _plan(_tool("lookup", parameters, strict=True))
+    output = (
+        f"{QWEN35_TOOL_CALL_START}<function=lookup>"
+        "<parameter=query>weather</parameter></function>"
+        f"{QWEN35_TOOL_CALL_END}"
+    )
+
     with pytest.raises(ToolCallingValidationError) as error:
-        build_tool_calling_plan(
-            tools=[_tool("lookup", parameters, strict=True)],
-            tool_choice_value="auto",
-            parallel_tool_calls=False,
-            response_json_schema=None,
-        )
+        plan.parse_output(output)
 
     message = str(error.value)
     assert "lookup" in message
-    assert "unresolvable JSON Schema reference" in message
+    assert "could not resolve the parameters schema reference" in message
 
 
 def test_tool_calling_plan_rejects_invalid_tool_parameter_schema():

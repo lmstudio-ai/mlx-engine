@@ -18,6 +18,14 @@ This document describes the current `/v1/chat/completions` tool-calling contract
 - `strict: true` validates parsed tool-call arguments against the tool parameter schema after generation.
 - Native tool-call delimiter strings are reserved protocol text. In malformed Gemma calls, `<tool_call|>` may be treated as the intended call boundary and used to recover an unterminated string; literal delimiter text inside arguments is not guaranteed to round-trip.
 
+## Tool parameter schema validation
+
+Tool `parameters` must be JSON objects and must pass `jsonschema`'s Draft 2020-12 schema-shape validation.
+
+The server intentionally does not eagerly resolve `$ref` or `$dynamicRef` at request time. This matches the vLLM-style split between request validation and constrained/strict execution: in non-strict auto tool calling, schemas are prompt context; in `strict: true`, `jsonschema` resolves references only when validating a parsed tool call. If strict validation encounters an unresolvable schema reference, the server reports it as a tool-calling validation error instead of leaking a raw `jsonschema`/`referencing` exception.
+
+This avoids maintaining a partial JSON Schema reference walker and avoids falsely rejecting valid schemas where literal instance data contains keys named `$ref`, such as values under `const`, `enum`, `default`, or `examples`.
+
 ## Intentionally unsupported for this MVP
 
 - `parallel_tool_calls: true` with active tools. The server rejects the request instead of truncating extra calls.

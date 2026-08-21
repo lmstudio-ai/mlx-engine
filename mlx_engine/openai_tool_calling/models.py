@@ -7,9 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
-from referencing import Registry
-from referencing.exceptions import NoSuchResource, Unresolvable, Unretrievable
-from referencing.jsonschema import DRAFT202012
+from referencing.exceptions import Unresolvable
 
 JsonObject = dict[str, Any]
 ToolCallIdFactory = Callable[[], str]
@@ -114,6 +112,11 @@ def validate_strict_tool_calls(
                 f"Strict tool call arguments for function `{tool_spec.name}` do not "
                 f"match the parameters schema{location}: {error.message}"
             ) from error
+        except Unresolvable as error:
+            raise ToolCallingValidationError(
+                f"Strict tool call arguments for function `{tool_spec.name}` could "
+                f"not resolve the parameters schema reference: {error}"
+            ) from error
 
 
 def _tool_call_arguments_object(tool_name: str, function: JsonObject) -> JsonObject:
@@ -194,71 +197,3 @@ def _validate_parameters_schema(tool_name: str, parameters: JsonObject) -> None:
             f"function tool `{tool_name}` parameters must be a valid JSON Schema"
             f"{location}: {error.message}"
         ) from error
-    _validate_schema_references(tool_name, parameters)
-
-
-def _validate_schema_references(tool_name: str, parameters: JsonObject) -> None:
-    resolver = (
-        Registry()
-        .with_resource(
-            "",
-            DRAFT202012.create_resource(parameters),
-        )
-        .resolver("")
-    )
-    for ref in _iter_schema_refs(parameters):
-        try:
-            resolver.lookup(ref)
-        except (NoSuchResource, Unresolvable, Unretrievable) as error:
-            raise ToolCallingValidationError(
-                f"function tool `{tool_name}` parameters contain an unresolvable "
-                f"JSON Schema reference `{ref}`: {error}"
-            ) from error
-
-
-_SCHEMA_VALUE_KEYWORDS = frozenset(
-    {
-        "additionalProperties",
-        "contains",
-        "contentSchema",
-        "else",
-        "if",
-        "items",
-        "not",
-        "propertyNames",
-        "then",
-        "unevaluatedItems",
-        "unevaluatedProperties",
-    }
-)
-_SCHEMA_ARRAY_KEYWORDS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
-_SCHEMA_MAP_KEYWORDS = frozenset(
-    {"$defs", "definitions", "dependentSchemas", "patternProperties", "properties"}
-)
-
-
-def _iter_schema_refs(schema: Any):
-    if not isinstance(schema, dict):
-        return
-
-    ref = schema.get("$ref")
-    if isinstance(ref, str):
-        yield ref
-
-    # Walk only JSON Schema keyword positions. Keywords like const, enum,
-    # default, and examples contain literal instance data where "$ref" is not a
-    # schema reference.
-    for keyword in _SCHEMA_VALUE_KEYWORDS:
-        yield from _iter_schema_refs(schema.get(keyword))
-
-    for keyword in _SCHEMA_ARRAY_KEYWORDS:
-        values = schema.get(keyword)
-        if isinstance(values, list):
-            for value in values:
-                yield from _iter_schema_refs(value)
-
-    for keyword in _SCHEMA_MAP_KEYWORDS:
-        values = schema.get(keyword)
-        if isinstance(values, dict):
-            for value in values.values():
-                yield from _iter_schema_refs(value)
