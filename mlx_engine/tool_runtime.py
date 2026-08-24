@@ -90,14 +90,13 @@ def create_qwen35_tool_context_from_prompt(
         model_format="qwen35",
     ):
         return None
-    if tokenizer.tool_call_start != _QWEN35_TOOL_FORMAT.start_marker:
+    tool_call_start_tokens = getattr(tokenizer, "tool_call_start_tokens", ()) or ()
+    tool_call_end_tokens = getattr(tokenizer, "tool_call_end_tokens", ()) or ()
+    if getattr(tokenizer, "tool_call_start", None) != _QWEN35_TOOL_FORMAT.start_marker:
         return None
-    if tokenizer.tool_call_end != _QWEN35_TOOL_FORMAT.end_marker:
+    if getattr(tokenizer, "tool_call_end", None) != _QWEN35_TOOL_FORMAT.end_marker:
         return None
-    if (
-        len(tokenizer.tool_call_start_tokens) != 1
-        or len(tokenizer.tool_call_end_tokens) != 1
-    ):
+    if len(tool_call_start_tokens) != 1 or len(tool_call_end_tokens) != 1:
         return None
 
     prompt_text = tokenizer.decode(prompt_tokens)

@@ -62,6 +62,16 @@ class _TokenizerWithoutQwenTools(_Tokenizer):
         self.tool_call_end = None
 
 
+class _TemplateOnlyTokenizer:
+    chat_template = QWEN35_TOOL_PROMPT
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def decode(self, _token_ids):
+        return self.text
+
+
 def test_gemma4_context_extracts_declared_tool_names():
     context = create_gemma4_tool_context_from_prompt(
         tokenizer=_Tokenizer(GEMMA4_TOOL_PROMPT),
@@ -266,6 +276,16 @@ def test_qwen35_context_requires_native_tool_markers():
         tokenizer=_TokenizerWithoutQwenTools(QWEN35_TOOL_PROMPT),
         prompt_tokens=[1, 2, 3],
         model_type="qwen3_5_vl",
+    )
+
+    assert context is None
+
+
+def test_qwen35_context_skips_template_only_tokenizers_without_native_markers():
+    context = create_qwen35_tool_context_from_prompt(
+        tokenizer=_TemplateOnlyTokenizer(QWEN35_TOOL_PROMPT),
+        prompt_tokens=[1, 2, 3],
+        model_type="qwen2_5_vl",
     )
 
     assert context is None
