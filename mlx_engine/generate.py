@@ -9,7 +9,7 @@ from mlx_engine.model_kit.batched_vision import (
     BatchedVisionModelKit,
 )
 from mlx_engine.model_kit.batched_model_kit_types import RequestCancelled
-from typing import Iterator, List, Optional, TypeAlias
+from typing import Any, Iterator, List, Optional, TypeAlias
 import json
 import logging
 from pathlib import Path
@@ -23,6 +23,8 @@ from mlx_vlm.structured import build_json_schema_logits_processor
 from mlx_vlm.utils import load_model as mlx_vlm_load_model
 
 from mlx_engine.model_kit.model_kit import ModelKit
+from mlx_engine.model_kit.distributed_model_kit import DistributedModelKit
+from mlx_engine.utils.mlx_lm_stream import prepare_mlx_lm_generation_stream
 from mlx_engine.utils.token import Token
 from mlx_engine.utils.eot_tokens import sanitize_eos_tokens
 from mlx_engine.utils.top_logprobs import summarize_top_logprobs
@@ -72,8 +74,10 @@ from mlx_engine.utils.sampling import create_sampler
 
 logger = logging.getLogger(__name__)
 
-SequentialGenerationKit: TypeAlias = ModelKit
-BatchedGenerationKit: TypeAlias = BatchedModelKit | BatchedVisionModelKit
+SequentialGenerationKit: TypeAlias = ModelKit | DistributedModelKit
+BatchedGenerationKit: TypeAlias = (
+    BatchedModelKit | BatchedVisionModelKit | DistributedModelKit
+)
 LoadedModelKit: TypeAlias = SequentialGenerationKit | BatchedGenerationKit
 
 
@@ -205,6 +209,8 @@ def load_model(
     prefill_step_size: Optional[int] = None,
     auto_fit_context: bool = True,
     enable_disk_cache: bool = True,
+    distributed: bool = False,
+    distributed_group: Any = None,
 ) -> LoadedModelKit:
     """
     Load a language model or vision-language model from the specified path.
@@ -227,6 +233,10 @@ def load_model(
             Defaults to PROMPT_PROCESSING_CHUNK_SIZE when None.
         auto_fit_context (bool): Whether batched models should fit context length to available memory.
         enable_disk_cache (bool): Whether batched models should cache prompt states on disk.
+        distributed (bool): Use tensor-parallel text inference across MLX ranks.
+            Distributed loads use the configured context limit and memory-only caching;
+            auto_fit_context and enable_disk_cache apply to local batched loads.
+        distributed_group: Optional initialized MLX distributed group.
 
     Returns:
         LoadedModelKit: An initialized model instance:
@@ -240,6 +250,38 @@ def load_model(
     """
     set_seed(seed)
     prefill_step_size = validate_prefill_step_size(prefill_step_size)
+    if distributed:
+        if vocab_only:
+            raise ValueError("Distributed loading does not support vocab_only")
+        if any(
+            value is not None for value in (kv_bits, kv_group_size, quantized_kv_start)
+        ):
+            raise ValueError(
+                "Distributed loading does not currently support KV cache quantization"
+            )
+        logger.info(
+            "Creating DistributedModelKit model_path=%s max_kv_size=%s max_seq_nums=%s prefill_step_size=%s distributed_group_provided=%s",
+            model_path,
+            max_kv_size,
+            max_seq_nums,
+            prefill_step_size,
+            distributed_group is not None,
+        )
+        model_kit = DistributedModelKit(
+            model_path,
+            prefill_step_size=prefill_step_size,
+            max_kv_size=max_kv_size,
+            max_seq_nums=max_seq_nums,
+            trust_remote_code=trust_remote_code,
+            distributed_group=distributed_group,
+        )
+        logger.info("Sanitizing EOS tokens for DistributedModelKit")
+        sanitize_eos_tokens(model_kit)
+        logger.info("Starting DistributedModelKit")
+        model_kit.start()
+        logger.info("DistributedModelKit start completed")
+        return model_kit
+
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
     parallel_requested = max_seq_nums is not None and max_seq_nums > 1
@@ -426,6 +468,13 @@ def create_generator(
     Raises:
         ValueError: If top_logprobs exceeds MAX_TOP_LOGPROBS or if any parameters are invalid
     """
+    if isinstance(model_kit, DistributedModelKit):
+        if model_kit.uses_distributed_batching():
+            return _batched_generation(model_kit, prompt_tokens, **kwargs)
+        return model_kit.run_generator_on_model_thread(
+            description=f"sequential-generation request_id={kwargs.get('request_id')}",
+            callback=lambda: _sequential_generation(model_kit, prompt_tokens, **kwargs),
+        )
     if isinstance(model_kit, (BatchedModelKit, BatchedVisionModelKit)):
         return _batched_generation(model_kit, prompt_tokens, **kwargs)
     return _SequentialModelKitGenerator(model_kit, prompt_tokens, kwargs)
@@ -590,6 +639,13 @@ def _sequential_generation(
         else:
             mlx_lm_callback = None
 
+        if isinstance(model_kit, DistributedModelKit):
+            prepare_mlx_lm_generation_stream(
+                reason="sequential-generation",
+                request_id=request_id,
+                distributed_group=model_kit.group,
+                use_default_stream=True,
+            )
         stream = stream_generate(
             model=model_kit.model,
             tokenizer=tokenizer,
@@ -691,13 +747,34 @@ def _batched_generation(
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
     request_id: str | None = None,
+    chat_messages: Optional[List[dict[str, str]]] = None,
+    chat_template_kwargs: Optional[dict[str, Any]] = None,
 ) -> Iterator[GenerationResult]:
+    is_distributed_batched = isinstance(model_kit, DistributedModelKit)
+    if is_distributed_batched:
+        if images_b64 is not None and len(images_b64) > 0:
+            raise ValueError(
+                "Distributed batched generation does not support images yet"
+            )
+        if speculative_decoding_toggle is True or num_draft_tokens is not None:
+            raise ValueError(
+                "Distributed batched generation does not support speculative decoding yet"
+            )
+        if json_schema is not None:
+            raise ValueError(
+                "Distributed batched generation does not support structured JSON output yet"
+            )
+        if seed is not None and not model_kit.supports_request_level_seed():
+            raise ValueError(
+                "Distributed batched generation does not support request-level seeds yet"
+            )
+
     # We need a request_id so that we can communicate with the batched backend
     if request_id is None or request_id == "":
         logger.warning(
             "Received a generation request without a request_id! Please send a request_id"
         )
-        request_id = uuid.uuid4()
+        request_id = str(uuid.uuid4())
 
     input_tokens = prompt_tokens
     if prompt_progress_reporter is None:
@@ -796,15 +873,34 @@ def _batched_generation(
                 )
             )
 
-        stream = model_kit.generate(
-            prompt_tokens=input_tokens,
-            request_id=request_id,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            prompt_progress_callback=prompt_progress_callback,
-            top_logprobs=top_logprobs,
-        )
+        generate_kwargs = {
+            "prompt_tokens": input_tokens,
+            "request_id": request_id,
+            "max_tokens": max_tokens,
+            "sampler": sampler,
+            "logits_processors": logits_processors,
+            "prompt_progress_callback": prompt_progress_callback,
+            "top_logprobs": top_logprobs,
+        }
+        if is_distributed_batched:
+            generate_kwargs.update(
+                {
+                    "sampling": {
+                        "temperature": temp,
+                        "topP": top_p,
+                        "topK": top_k,
+                        "minP": min_p,
+                        "seed": seed,
+                    },
+                    "repetition_penalty": repetition_penalty,
+                    "repetition_context_size": repetition_context_size,
+                    "min_tokens_to_keep": min_tokens_to_keep,
+                    "stop_strings": [] if stop_strings is None else stop_strings,
+                    "chat_messages": chat_messages,
+                    "chat_template_kwargs": chat_template_kwargs,
+                }
+            )
+        stream = model_kit.generate(**generate_kwargs)
 
     while True:
         try:
@@ -845,7 +941,8 @@ def _batched_generation(
                 token_buffer,
                 top_logprobs_buffer,
             )
-            model_kit.remove(request_id)
+            if generation_result.finish_reason is None:
+                model_kit.remove(request_id)
             break  # stop generation
 
         # If we currently have generated a partial match with a stop sequence, or detected an
@@ -893,7 +990,10 @@ def stop_generation(
         logger.error("request_id cannot be empty in stop request")
         return
 
-    if isinstance(model_kit, (BatchedModelKit, BatchedVisionModelKit)):
+    if isinstance(model_kit, (BatchedModelKit, BatchedVisionModelKit)) or (
+        isinstance(model_kit, DistributedModelKit)
+        and model_kit.uses_distributed_batching()
+    ):
         model_kit.remove(request_id)
         return
 
