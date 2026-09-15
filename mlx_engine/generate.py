@@ -760,10 +760,6 @@ def _batched_generation(
             raise ValueError(
                 "Distributed batched generation does not support speculative decoding yet"
             )
-        if json_schema is not None:
-            raise ValueError(
-                "Distributed batched generation does not support structured JSON output yet"
-            )
         if seed is not None and not model_kit.supports_request_level_seed():
             raise ValueError(
                 "Distributed batched generation does not support request-level seeds yet"
@@ -885,6 +881,7 @@ def _batched_generation(
         if is_distributed_batched:
             generate_kwargs.update(
                 {
+                    "json_schema": json_schema,
                     "sampling": {
                         "temperature": temp,
                         "topP": top_p,

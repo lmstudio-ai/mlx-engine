@@ -34,7 +34,7 @@ from mlx_engine.utils.token import Token
 
 logger = logging.getLogger(__name__)
 
-SCHEDULER_PROTOCOL_VERSION = 1
+SCHEDULER_PROTOCOL_VERSION = 2
 SCHEDULER_MESSAGE_GENERATE = "generate"
 SCHEDULER_MESSAGE_CANCEL = "cancel"
 SCHEDULER_MESSAGE_SHUTDOWN = "shutdown"
@@ -57,6 +57,7 @@ class DistributedSchedulerGenerationRequest:
     repetition_penalty: Optional[float]
     repetition_context_size: Optional[int]
     min_tokens_to_keep: Optional[int]
+    json_schema: Optional[str] = None
 
 
 @dataclass
@@ -941,6 +942,7 @@ class DistributedModelKit:
         min_tokens_to_keep: Optional[int],
         chat_messages: Optional[List[dict[str, str]]] = None,
         chat_template_kwargs: Optional[dict[str, Any]] = None,
+        json_schema: Optional[str] = None,
     ) -> Iterable[BatchedGenerationResponse]:
         if not self.uses_distributed_batching():
             raise RuntimeError("Distributed batched generation is not enabled")
@@ -984,6 +986,7 @@ class DistributedModelKit:
                 repetition_penalty=repetition_penalty,
                 repetition_context_size=repetition_context_size,
                 min_tokens_to_keep=min_tokens_to_keep,
+                json_schema=json_schema,
             )
         )
 
@@ -1295,6 +1298,7 @@ class DistributedModelKit:
             "repetitionPenalty": item.repetition_penalty,
             "repetitionContextSize": item.repetition_context_size,
             "minTokensToKeep": item.min_tokens_to_keep,
+            "jsonSchema": item.json_schema,
         }
 
     def _scheduler_message_to_worker_item(
@@ -1326,6 +1330,19 @@ class DistributedModelKit:
         repetition_penalty = message["repetitionPenalty"]
         repetition_context_size = message["repetitionContextSize"]
         prompt_tokens = message["promptTokens"]
+        logits_processors = setup_repetition_logits_processors(
+            repetition_penalty, repetition_context_size, prompt_tokens, prompt_tokens
+        )
+        json_schema = message.get("jsonSchema")
+        if json_schema is not None:
+            from outlines.processors.structured import JSONLogitsProcessor
+            from mlx_engine.utils.outlines_transformer_tokenizer import OutlinesTransformerTokenizer
+
+            logits_processors.append(JSONLogitsProcessor(
+                json_schema,
+                OutlinesTransformerTokenizer(self.tokenizer._tokenizer),
+                tensor_library_name="mlx",
+            ))
         return DistributedSchedulerGenerationRequest(
             response_queue=None,
             prompt_tokens=prompt_tokens,
@@ -1339,12 +1356,8 @@ class DistributedModelKit:
                 message["minTokensToKeep"],
                 sampling["topK"],
             ),
-            logits_processors=setup_repetition_logits_processors(
-                repetition_penalty,
-                repetition_context_size,
-                prompt_tokens,
-                prompt_tokens,
-            ),
+            logits_processors=logits_processors,
+            json_schema=json_schema,
             top_logprobs=0,
             max_tokens=message["maxTokens"],
             stop_strings=message.get("stopStrings", []),

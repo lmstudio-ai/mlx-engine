@@ -39,7 +39,7 @@ def init_distributed_with_retry(timeout_seconds: float):
         import mlx.core as mx
 
         logger.info("Calling distributed worker init")
-        group = mx.distributed.init()
+        group = mx.distributed.init(strict=True, backend="jaccl")
         logger.info(
             "Distributed worker init completed rank %s/%s",
             group.rank(),
@@ -61,8 +61,7 @@ def init_distributed_with_retry(timeout_seconds: float):
             [
                 sys.executable,
                 "-I",
-                "-m",
-                "mlx_engine.distributed_worker",
+                os.path.abspath(__file__),
                 *sys.argv[1:],
             ],
         )

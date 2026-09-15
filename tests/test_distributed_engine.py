@@ -125,7 +125,6 @@ def test_scheduler_wire_roundtrip_preserves_sampling(temperature, penalty):
     "options",
     [
         {"images_b64": ["image"]},
-        {"json_schema": "{}"},
         {"speculative_decoding_toggle": True},
         {"num_draft_tokens": 2},
         {"seed": 0},
@@ -185,3 +184,34 @@ def test_distributed_request_options_remain_wire_serializable(request_id):
             "template": request["chat_template_kwargs"],
         }
     )
+
+
+def test_scheduler_roundtrip_reconstructs_json_constraint(monkeypatch):
+    from types import SimpleNamespace
+    import outlines.processors.structured as structured
+    import mlx_engine.utils.outlines_transformer_tokenizer as tokenizer_module
+
+    schema = json.dumps({"type": "object", "properties": {"title": {"type": "string"}}})
+    tokenizer = object()
+    captured = []
+    def make_processor(received_schema, received_tokenizer, *, tensor_library_name):
+        captured.append((received_schema, received_tokenizer, tensor_library_name))
+        return "json-constraint"
+
+    monkeypatch.setattr(structured, "JSONLogitsProcessor", make_processor)
+    monkeypatch.setattr(tokenizer_module, "OutlinesTransformerTokenizer", lambda value: value)
+    kit = object.__new__(DistributedModelKit)
+    kit.tokenizer = SimpleNamespace(_tokenizer=tokenizer)
+    request = DistributedSchedulerGenerationRequest(
+        response_queue=Queue(), prompt_tokens=[1], prompt_segments=None,
+        segment_types=None, request_id="json-title", sampler=None,
+        logits_processors=[], top_logprobs=0, max_tokens=32, stop_strings=[],
+        sampling={"temperature": 0, "topP": 1, "topK": 0, "minP": 0, "seed": None},
+        repetition_penalty=None, repetition_context_size=20, min_tokens_to_keep=1,
+        json_schema=schema,
+    )
+    message = json.loads(json.dumps(kit._scheduler_item_to_message(request)))
+    worker = kit._scheduler_message_to_worker_item(message)
+    assert worker.json_schema == schema
+    assert worker.logits_processors[-1] == "json-constraint"
+    assert captured == [(schema, tokenizer, "mlx")]
