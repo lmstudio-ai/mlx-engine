@@ -17,6 +17,13 @@ __all__ = [
 from pathlib import Path
 import os
 
+# Outlines can open its cache during import, so configure it before loading dependencies.
+_lmstudio_home = os.environ.get("LMS_LMSTUDIO_HOME")
+if _lmstudio_home and not os.environ.get("OUTLINES_CACHE_DIR"):
+    os.environ["OUTLINES_CACHE_DIR"] = str(
+        Path(_lmstudio_home) / ".internal" / "outlines"
+    )
+
 from .utils.disable_hf_download import patch_huggingface_hub
 from .utils.register_models import register_models
 from .utils.logger import setup_logging
@@ -37,17 +44,3 @@ from .generate import (
 patch_huggingface_hub()
 register_models()
 setup_logging()
-
-
-def _set_outlines_cache_dir(cache_dir: Path | str):
-    """
-    Set the cache dir for Outlines.
-
-    Outlines reads the OUTLINES_CACHE_DIR environment variable to
-    determine where to read/write its cache files
-    """
-    cache_dir = Path(cache_dir).expanduser().resolve()
-    os.environ["OUTLINES_CACHE_DIR"] = str(cache_dir)
-
-
-_set_outlines_cache_dir(Path("~/.cache/lm-studio/.internal/outlines"))
