@@ -26,12 +26,6 @@ Download LM Studio from [here](https://lmstudio.ai/download?os=mac)
 
 <br/>
 
-## Outlines cache
-
-LM Studio passes its resolved home in `LMS_LMSTUDIO_HOME`. The engine uses
-`<home>/.internal/outlines` for the Outlines cache. An explicit `OUTLINES_CACHE_DIR`
-takes precedence. Without either variable, Outlines uses its default cache location.
-
 ## Standalone Demo
 
 ### Prerequisites
