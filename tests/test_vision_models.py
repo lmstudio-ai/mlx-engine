@@ -1277,7 +1277,7 @@ Toucan.<|im_end|>
         """Test Qwen3.5 35B-A3B MoE model with vision"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{self.description_prompt}<|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner(
-            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            "mlx-community/Qwen3.5-35B-A3B-4bit",
             prompt,
         )
 
@@ -1286,7 +1286,7 @@ Toucan.<|im_end|>
         """Test Qwen3.5 35B-A3B MoE model with only text"""
         prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{self.text_only_prompt}<|im_end|>\n<|im_start|>assistant\n"
         self.toucan_test_runner(
-            "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+            "mlx-community/Qwen3.5-35B-A3B-4bit",
             prompt,
             text_only=True,
         )

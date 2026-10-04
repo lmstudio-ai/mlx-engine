@@ -35,7 +35,7 @@ from tests.patched_model_test_utils import (
 REAL_MODEL_CASES = [
     pytest.param("lmstudio-community/Qwen3.5-2B-MLX-4bit", id="dense"),
     pytest.param(
-        "lmstudio-community/Qwen3.5-35B-A3B-MLX-4bit",
+        "mlx-community/Qwen3.5-35B-A3B-4bit",
         marks=pytest.mark.heavy,
         id="moe",
     ),

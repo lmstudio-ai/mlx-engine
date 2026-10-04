@@ -2,6 +2,7 @@ import contextlib
 from types import SimpleNamespace
 
 import mlx.core as mx
+import mlx.nn as nn
 import pytest
 from mlx_vlm.models.cache import (
     BatchKVCache,
@@ -186,33 +187,48 @@ def test_batch_generator_uses_vlm_prompt_cache_factory():
     assert type(prompt_cache[0]) is KVCache
 
 
-def test_prefill_and_decode_honor_model_logits_to_keep(monkeypatch):
-    monkeypatch.setattr(
-        batcher,
-        "make_prompt_cache",
-        lambda _model: [_FakeBatchCache()],
-    )
-    model = _FakeModel()
-    model.supports_logits_to_keep = True
-    prompt_prefill = batcher._PromptPrefill(
-        model=model,
-        uid=1,
-        input_ids=[1, 2, 3],
-        max_tokens=1,
-        top_logprobs=0,
-        sampler=_argmax_sampler,
-        logits_processors=[],
-        inputs_embeds=mx.zeros((1, 3, 2), dtype=mx.float32),
-        prompt_kwargs={},
-        prefix_cache_save_state=_prefix_cache_save_states(1)[0],
+def test_prefill_and_decode_pass_logits_to_keep_without_capability_flag():
+    """Current mlx-vlm models accept the hint without the removed capability flag."""
+
+    class TrailingLogitsModel(nn.Module):
+        def __call__(self, input_ids, *, logits_to_keep, **kwargs):
+            batch_size, sequence_length = input_ids.shape
+            return SimpleNamespace(
+                logits=_bump(
+                    _logits(batch_size, min(sequence_length, logits_to_keep)), 3
+                )
+            )
+
+    generator = BatchGenerator(
+        model=TrailingLogitsModel(),
+        stop_criteria=lambda _token: False,
+        max_tokens=2,
         prefill_step_size=2,
     )
+    responses = []
+    try:
+        generator.insert(
+            [1, 2, 3],
+            inputs_embeds=mx.zeros((1, 3, 2), dtype=mx.float32),
+            sampler=_argmax_sampler,
+            logits_processors=[],
+            prompt_kwargs={},
+            prefix_cache_chunks=[],
+            image_spans=[],
+            cache=[KVCache()],
+            all_tokens=[],
+            next_prefix_cache_chunk_idx=0,
+        )
+        for _ in range(6):
+            _, generated = generator.next()
+            responses.extend(generated)
+            if len(responses) > 0 and responses[-1].finish_reason is not None:
+                break
+    finally:
+        generator.close()
 
-    assert prompt_prefill.prompt_step() == 2
-    generation_batch, _ = prompt_prefill.generate(lambda _token: False)
-    generation_batch.next()
-
-    assert [call["logits_to_keep"] for call in model.calls] == [1, 1, 1]
+    assert [response.token for response in responses] == [3, 3]
+    assert responses[-1].finish_reason == "length"
 
 
 def test_prompt_prefill_materializes_decode_boundary(monkeypatch):
