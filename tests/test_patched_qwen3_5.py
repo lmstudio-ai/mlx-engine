@@ -180,140 +180,56 @@ def test_vlm_qwen3_5_attention_text_fast_path_uses_qwen3_next(monkeypatch):
     assert calls == [("qwen3_next", self_obj, "x", "mask", "cache")]
 
 
-def test_vlm_qwen3_5_attention_target_verify_uses_original_vlm(monkeypatch):
-    calls = []
-
-    def fake_qwen3_next_call(*args, **kwargs):
-        raise AssertionError("Qwen3Next fast path should not be used")
-
-    def fake_original_call(
-        self,
-        x,
-        mask=None,
-        cache=None,
-        position_ids=None,
-        position_embeddings=None,
-        **kwargs,
-    ):
-        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
-        return "target-verify"
-
-    self_obj = object()
-    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
-    monkeypatch.setattr(
-        qwen3_5_patches,
-        "OriginalVlmQwen3_5AttentionCall",
-        fake_original_call,
+def make_vlm_text_config():
+    return vlm_qwen3_5_language.TextConfig.from_dict(
+        {
+            **QWEN3_5_TEXT_CONFIG,
+            "rope_parameters": {
+                "type": "default",
+                "mrope_section": [6, 5, 5],
+                "rope_theta": 1000.0,
+                "partial_rotary_factor": 0.5,
+            },
+        }
     )
 
-    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
-        self_obj,
-        "x",
-        mask="mask",
-        cache="cache",
-        target_verify=True,
+
+@pytest.mark.parametrize(
+    "case", ["position_ids", "position_embeddings", "left_padded_decode"]
+)
+def test_vlm_qwen3_5_attention_fallback_matches_upstream(case):
+    mx.random.seed(0)
+    config = make_vlm_text_config()
+    layer = vlm_qwen3_5_language.Qwen3_5Attention(config)
+    inputs = mx.random.normal((1, 1, config.hidden_size))
+    position_ids = mx.zeros((3, 1, 1), dtype=mx.int32)
+    patched_cache = KVCache()
+    reference_cache = KVCache()
+    if case == "left_padded_decode":
+        patched_cache = BatchKVCache([1])
+        reference_cache = BatchKVCache([1])
+        prefill = mx.random.normal((1, 3, config.hidden_size))
+        prefill_positions = mx.broadcast_to(mx.arange(3), (3, 1, 3))
+        for cache in (patched_cache, reference_cache):
+            qwen3_5_patches.OriginalVlmQwen3_5AttentionCall(
+                layer,
+                prefill,
+                mask="causal",
+                cache=cache,
+                position_ids=prefill_positions,
+            )
+        kwargs = {"mask": "left_padded_decode"}
+    elif case == "position_embeddings":
+        kwargs = {"position_embeddings": layer.rotary_emb(inputs, position_ids)}
+    else:
+        kwargs = {"position_ids": position_ids}
+
+    actual = layer(inputs, cache=patched_cache, **kwargs)
+    expected = qwen3_5_patches.OriginalVlmQwen3_5AttentionCall(
+        layer, inputs, cache=reference_cache, **kwargs
     )
-
-    assert result == "target-verify"
-    assert calls == [
-        (self_obj, "x", "mask", "cache", None, None, {"target_verify": True})
-    ]
-
-
-def test_vlm_qwen3_5_attention_left_padded_decode_uses_original_vlm(monkeypatch):
-    calls = []
-
-    def fake_qwen3_next_call(*args, **kwargs):
-        raise AssertionError("Qwen3Next fast path should not be used")
-
-    def fake_original_call(
-        self,
-        x,
-        mask=None,
-        cache=None,
-        position_ids=None,
-        position_embeddings=None,
-        **kwargs,
-    ):
-        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
-        return "left-padded-decode"
-
-    self_obj = object()
-    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
-    monkeypatch.setattr(
-        qwen3_5_patches,
-        "OriginalVlmQwen3_5AttentionCall",
-        fake_original_call,
-    )
-
-    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
-        self_obj,
-        "x",
-        mask="left_padded_decode",
-        cache="cache",
-    )
-
-    assert result == "left-padded-decode"
-    assert calls == [
-        (
-            self_obj,
-            "x",
-            "left_padded_decode",
-            "cache",
-            None,
-            None,
-            {"target_verify": False},
-        )
-    ]
-
-
-def test_vlm_qwen3_5_attention_position_embeddings_uses_original_vlm(monkeypatch):
-    calls = []
-    position_embeddings = ("cos", "sin")
-
-    def fake_qwen3_next_call(*args, **kwargs):
-        raise AssertionError("Qwen3Next fast path should not be used")
-
-    def fake_original_call(
-        self,
-        x,
-        mask=None,
-        cache=None,
-        position_ids=None,
-        position_embeddings=None,
-        **kwargs,
-    ):
-        calls.append((self, x, mask, cache, position_ids, position_embeddings, kwargs))
-        return "position-embeddings"
-
-    self_obj = object()
-    monkeypatch.setattr(Qwen3NextAttention, "__call__", fake_qwen3_next_call)
-    monkeypatch.setattr(
-        qwen3_5_patches,
-        "OriginalVlmQwen3_5AttentionCall",
-        fake_original_call,
-    )
-
-    result = qwen3_5_patches._patched_vlm_qwen3_5_attention_call(
-        self_obj,
-        "x",
-        mask="mask",
-        cache="cache",
-        position_embeddings=position_embeddings,
-    )
-
-    assert result == "position-embeddings"
-    assert calls == [
-        (
-            self_obj,
-            "x",
-            "mask",
-            "cache",
-            None,
-            position_embeddings,
-            {"target_verify": False},
-        )
-    ]
+    mx.eval(actual, expected)
+    assert max_abs_diff(actual, expected) == 0.0
 
 
 class _FakeVlmGatedDeltaNet:
@@ -385,92 +301,31 @@ def test_vlm_qwen3_5_gated_delta_fast_path_skips_upstream_decode_conv(monkeypatc
     assert calls[0][1]["use_kernel"] is True
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"target_verify": True},
-        {"gdn_sink": []},
-    ],
-)
-def test_vlm_qwen3_5_gated_delta_special_cases_use_original_vlm(
-    monkeypatch,
-    kwargs,
-):
-    calls = []
-
-    def fake_original_call(self, inputs, **call_kwargs):
-        calls.append((self, inputs, call_kwargs))
-        return "original"
-
-    monkeypatch.setattr(
-        qwen3_5_patches,
-        "OriginalVlmQwen3_5GatedDeltaNetCall",
-        fake_original_call,
-    )
-
-    layer = _FakeVlmGatedDeltaNet()
-    inputs = mx.ones((1, 1, layer.hidden_size))
-
-    result = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
-        layer,
-        inputs,
-        **kwargs,
-    )
-
-    assert result == "original"
-    assert calls == [
-        (
-            layer,
-            inputs,
-            {
-                "mask": None,
-                "cache": None,
-                "gdn_sink": kwargs.get("gdn_sink"),
-                "target_verify": kwargs.get("target_verify", False),
-            },
+@pytest.mark.parametrize("case", ["prefill", "uncached", "ragged_decode"])
+def test_vlm_qwen3_5_gated_delta_fallback_matches_upstream(case):
+    mx.random.seed(0)
+    config = make_vlm_text_config()
+    layer = vlm_qwen3_5_language.Qwen3_5GatedDeltaNet(config)
+    layer.eval()
+    sequence_length = 3 if case == "prefill" else 1
+    inputs = mx.random.normal((1, sequence_length, config.hidden_size))
+    patched_cache = None
+    reference_cache = None
+    if case != "uncached":
+        left_padding = [0] if case == "ragged_decode" else None
+        patched_cache = vlm_qwen3_5_language.ArraysCache(
+            2, left_padding=left_padding
         )
-    ]
-
-
-def test_vlm_qwen3_5_gated_delta_ragged_cache_uses_original_vlm(monkeypatch):
-    calls = []
-
-    class CacheWithLengths(list):
-        lengths = mx.array([1])
-
-    def fake_original_call(self, inputs, **call_kwargs):
-        calls.append((self, inputs, call_kwargs))
-        return "ragged"
-
-    monkeypatch.setattr(
-        qwen3_5_patches,
-        "OriginalVlmQwen3_5GatedDeltaNetCall",
-        fake_original_call,
-    )
-
-    layer = _FakeVlmGatedDeltaNet()
-    inputs = mx.ones((1, 1, layer.hidden_size))
-    cache = CacheWithLengths([None, None])
-
-    result = qwen3_5_patches._patched_vlm_qwen3_5_gated_delta_net_call(
-        layer,
-        inputs,
-        cache=cache,
-    )
-
-    assert result == "ragged"
-    assert calls == [
-        (
-            layer,
-            inputs,
-            {
-                "mask": None,
-                "cache": cache,
-                "gdn_sink": None,
-                "target_verify": False,
-            },
+        reference_cache = vlm_qwen3_5_language.ArraysCache(
+            2, left_padding=left_padding
         )
-    ]
+
+    actual = layer(inputs, cache=patched_cache)
+    expected = qwen3_5_patches.OriginalVlmQwen3_5GatedDeltaNetCall(
+        layer, inputs, cache=reference_cache
+    )
+    mx.eval(actual, expected)
+    assert max_abs_diff(actual, expected) == 0.0
 
 
 @pytest.mark.parametrize(

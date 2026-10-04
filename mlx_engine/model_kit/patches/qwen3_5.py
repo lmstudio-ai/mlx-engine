@@ -73,13 +73,10 @@ def _vlm_qwen3_5_gated_delta_net_fast_path(
     cache: Optional[Any],
     use_kernel: bool | None = None,
 ) -> mx.array:
-    """Pre-target-verify Qwen3.5 GDN path for ordinary decode.
+    """Qwen3.5 GDN fast path for ordinary decode.
 
-    Upstream mlx-vlm added target-verification and ragged-batch helpers to this
-    layer. Those are needed for MTP/ragged server decode, but the decode-only
-    conv/projection helpers are slower for mlx-engine's common batch-size-one
-    path. This preserves the older plain path when no target-verify state is in
-    play.
+    Keep the plain conv/projection path for mlx-engine's common batch-size-one
+    decode, while leaving prefill and ragged caches to mlx-vlm.
     """
     B, S, _ = inputs.shape
 
@@ -532,12 +529,10 @@ def _patched_vlm_qwen3_5_attention_call(
     cache: Optional[Any] = None,
     position_ids: Optional[mx.array] = None,
     position_embeddings: Optional[tuple[mx.array, mx.array]] = None,
-    target_verify: bool = False,
 ) -> mx.array:
     if (
         position_ids is not None
         or position_embeddings is not None
-        or target_verify
         or (isinstance(mask, str) and mask == "left_padded_decode")
     ):
         return OriginalVlmQwen3_5AttentionCall(
@@ -547,7 +542,6 @@ def _patched_vlm_qwen3_5_attention_call(
             cache=cache,
             position_ids=position_ids,
             position_embeddings=position_embeddings,
-            target_verify=target_verify,
         )
 
     return Qwen3NextAttention.__call__(self, x, mask, cache)
@@ -558,13 +552,9 @@ def _patched_vlm_qwen3_5_gated_delta_net_call(
     inputs: mx.array,
     mask: Optional[mx.array] = None,
     cache: Optional[Any] = None,
-    gdn_sink: Optional[list] = None,
-    target_verify: bool = False,
 ) -> mx.array:
     if (
-        target_verify
-        or gdn_sink is not None
-        or inputs.shape[1] != 1
+        inputs.shape[1] != 1
         or cache is None
         or _has_vlm_qwen3_5_ragged_cache_state(cache)
     ):
@@ -573,8 +563,6 @@ def _patched_vlm_qwen3_5_gated_delta_net_call(
             inputs,
             mask=mask,
             cache=cache,
-            gdn_sink=gdn_sink,
-            target_verify=target_verify,
         )
 
     return _vlm_qwen3_5_gated_delta_net_fast_path(
