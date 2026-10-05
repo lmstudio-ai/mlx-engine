@@ -187,8 +187,8 @@ def test_batch_generator_uses_vlm_prompt_cache_factory():
     assert type(prompt_cache[0]) is KVCache
 
 
-def test_prefill_and_decode_pass_logits_to_keep_without_capability_flag():
-    """Current mlx-vlm models accept the hint without the removed capability flag."""
+def test_prefill_and_decode_pass_logits_to_keep():
+    """Every prefill and decode forward passes the logits_to_keep hint."""
 
     class TrailingLogitsModel(nn.Module):
         def __call__(self, input_ids, *, logits_to_keep, **kwargs):

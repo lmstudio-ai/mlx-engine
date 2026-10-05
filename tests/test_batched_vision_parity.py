@@ -490,9 +490,9 @@ def test_vlm_continuous_batching_matches_independent_requests(case: VlmParityCas
     finally:
         unload(model_kit)
 
-    # mlx-vlm 94e06ec3 removed forced FP32 language-weight promotion for Gemma4.
-    # E2B's BF16 padded-batch drift measured 0.1875 across three runs per app layer;
-    # allow 0.25 only for this case, while keeping token IDs exact.
+    # Logprobs are BF16 at logit scale, so a few rounding steps can exceed 0.125.
+    # Gemma4 E2B padded-batch drift has measured up to 0.1875 on some machines;
+    # allow 0.25 for that case only. Token IDs must still match exactly.
     logprob_abs_tol = 0.25 if case.id == "gemma4" else 0.125
     for name, _, _ in prompt_specs:
         _assert_token_trace_matches(

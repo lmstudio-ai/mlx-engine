@@ -138,7 +138,7 @@ def _clear_qwen3_5_text_rope_state(model: nn.Module, prompt_kwargs: dict) -> Non
 
 
 def _with_logits_to_keep(kwargs: dict) -> dict:
-    # mlx-vlm models consume or ignore this hint; the capability flag was removed.
+    # mlx-vlm language models either use this hint or accept and ignore it.
     return {**kwargs, "logits_to_keep": 1}
 
 
