@@ -313,12 +313,8 @@ def test_vlm_qwen3_5_gated_delta_fallback_matches_upstream(case):
     reference_cache = None
     if case != "uncached":
         left_padding = [0] if case == "ragged_decode" else None
-        patched_cache = vlm_qwen3_5_language.ArraysCache(
-            2, left_padding=left_padding
-        )
-        reference_cache = vlm_qwen3_5_language.ArraysCache(
-            2, left_padding=left_padding
-        )
+        patched_cache = vlm_qwen3_5_language.ArraysCache(2, left_padding=left_padding)
+        reference_cache = vlm_qwen3_5_language.ArraysCache(2, left_padding=left_padding)
 
     actual = layer(inputs, cache=patched_cache)
     expected = qwen3_5_patches.OriginalVlmQwen3_5GatedDeltaNetCall(
