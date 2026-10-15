@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Tuple
 
 import mlx.core as mx
-from mlx_lm.generate import BatchGenerator, SequenceStateMachine
+from mlx_lm.generate import BatchGenerator, make_stop_sequences
 from mlx_lm.server import LRUPromptCache
 from mlx_lm.utils import _download, load_model, load_tokenizer
 
@@ -1450,7 +1450,7 @@ class DistributedModelKit:
             all_tokens=[cached_prefix],
             samplers=[request.sampler],
             logits_processors=[request.logits_processors],
-            state_machines=[self._make_sequence_state_machine(request.stop_strings)],
+            stop_sequences=[make_stop_sequences(self.tokenizer, request.stop_strings)],
         )
 
         self._batch_results[uid] = {
@@ -1531,20 +1531,6 @@ class DistributedModelKit:
             return [prompt_tokens], []
 
         return segments, segment_types
-
-    def _make_sequence_state_machine(
-        self, stop_strings: list[str]
-    ) -> SequenceStateMachine:
-        transitions = {
-            "normal": [((token,), None) for token in self.tokenizer.eos_token_ids]
-        }
-        for stop_string in stop_strings:
-            stop_tokens = tuple(
-                self.tokenizer.encode(stop_string, add_special_tokens=False)
-            )
-            if len(stop_tokens) > 0:
-                transitions["normal"].append((stop_tokens, None))
-        return SequenceStateMachine(transitions, initial="normal")
 
     def _generate(self) -> None:
         logger.info(
