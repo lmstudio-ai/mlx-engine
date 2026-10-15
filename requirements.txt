@@ -26,7 +26,7 @@ llguidance==1.9.1
 markdown-it-py==4.2.0
 mdurl==0.1.2
 mlx==0.32.3
-mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@87b7b583a697537aa68f47130b40884700b5f55f
+mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@06e03f7ce7c059ad105483a9dded0bb338cbaf53
 mlx-metal==0.32.3
 mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@573562df9fd9259047e3dc793e6b48be23389221
 nest-asyncio==1.6.0
