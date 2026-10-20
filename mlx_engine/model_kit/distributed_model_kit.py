@@ -1254,6 +1254,11 @@ class DistributedModelKit:
             self._share_scheduler_message(self._scheduler_item_to_message(local_item))
             return local_item
 
+        # The coordinator waits for work on its queue while idle. Wait here too:
+        # entering the RDMA collective early spins a CPU core until it arrives.
+        # Active batches use timeout=None and keep their existing cadence.
+        if timeout is not None:
+            time.sleep(timeout)
         message = self._share_scheduler_message(None)
         if message is not None:
             logger.info(
