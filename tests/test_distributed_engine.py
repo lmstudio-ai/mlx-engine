@@ -1,16 +1,62 @@
 import json
 from queue import Queue
+from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
 
 import mlx_engine.generate as generate_module
+import mlx_engine.model_kit.distributed_model_kit as distributed_module
 from mlx_engine.model_kit.distributed_model_kit import (
     DistributedModelKit,
     DistributedSchedulerGenerationRequest,
 )
 from mlx_engine.utils.generation_helpers import setup_repetition_logits_processors
 from mlx_engine.utils.sampling import create_sampler
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("trust_remote_code", [None, False, True])
+def test_cluster_tokenizer_requires_explicit_trust(
+    monkeypatch, tmp_path, rank, trust_remote_code
+):
+    marker = tmp_path / "custom-code-executed"
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {"auto_map": {"AutoTokenizer": ["custom_tokenizer.CustomTokenizer", None]}}
+        )
+    )
+    (tmp_path / "custom_tokenizer.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "raise RuntimeError('custom tokenizer code executed')\n"
+    )
+    # Avoid model weights and RDMA while retaining the real tokenizer loader.
+    monkeypatch.setattr(
+        distributed_module,
+        "load_model",
+        lambda *args, **kwargs: (SimpleNamespace(shard=lambda group: None), {}),
+    )
+    group = SimpleNamespace(rank=lambda: rank, size=lambda: 2)
+    options = (
+        {} if trust_remote_code is None else {"trust_remote_code": trust_remote_code}
+    )
+    kit = DistributedModelKit.__new__(DistributedModelKit)
+    try:
+        expected_error = RuntimeError if trust_remote_code is True else ValueError
+        expected_message = (
+            "custom tokenizer code executed"
+            if trust_remote_code is True
+            else "trust_remote_code"
+        )
+        with pytest.raises(expected_error, match=expected_message):
+            kit.__init__(
+                tmp_path, prefill_step_size=512, distributed_group=group, **options
+            )
+        assert marker.exists() is (trust_remote_code is True)
+    finally:
+        kit.shutdown()
 
 
 def test_distributed_load_preserves_app_interface(monkeypatch, tmp_path):

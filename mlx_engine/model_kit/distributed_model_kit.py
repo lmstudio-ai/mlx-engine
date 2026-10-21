@@ -104,6 +104,7 @@ def _model_snapshot_summary(model_path: Path) -> str:
 def _instrumented_tensor_sharded_load(
     repo: str | Path,
     tensor_group: Any,
+    trust_remote_code: bool,
 ) -> tuple[Any, Any]:
     rank = tensor_group.rank()
     size = tensor_group.size()
@@ -167,7 +168,7 @@ def _instrumented_tensor_sharded_load(
     logger.info("[sharded_load] rank %s/%s loading tokenizer", rank, size)
     tokenizer = load_tokenizer(
         model_path,
-        {"trust_remote_code": True},
+        {"trust_remote_code": trust_remote_code},
         eos_token_ids=config.get("eos_token_id", None),
     )
     logger.info(
@@ -264,6 +265,7 @@ class DistributedModelKit:
         self._model_thread_requests: Queue | None = None
         self._shutdown = threading.Event()
         self.prefill_step_size = prefill_step_size
+        self.trust_remote_code = trust_remote_code
         self.max_kv_size = max_kv_size
         self.max_seq_nums = (
             1 if max_seq_nums is None or max_seq_nums < 1 else max_seq_nums
@@ -330,6 +332,7 @@ class DistributedModelKit:
             self.model, self.tokenizer = _instrumented_tensor_sharded_load(
                 self.model_path,
                 tensor_group=self.group,
+                trust_remote_code=self.trust_remote_code,
             )
         log_mlx_stream_state(
             reason="distributed-model-load-finished",
