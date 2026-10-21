@@ -4,6 +4,10 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
+from mlx_lm.models.llama import Model, ModelArgs
+from mlx_lm.tokenizer_utils import TokenizerWrapper
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 import mlx_engine.generate as generate_module
 import mlx_engine.model_kit.distributed_model_kit as distributed_module
@@ -13,6 +17,76 @@ from mlx_engine.model_kit.distributed_model_kit import (
 )
 from mlx_engine.utils.generation_helpers import setup_repetition_logits_processors
 from mlx_engine.utils.sampling import create_sampler
+
+
+@pytest.mark.parametrize(
+    "stop_strings, expected_text, stop_reason",
+    [(["END"], "X", "stop_string"), ([], "XEND", "eos_token")],
+)
+def test_distributed_output_trims_complete_stop_strings(
+    monkeypatch, tmp_path, stop_strings, expected_text, stop_reason
+):
+    vocabulary = {"<eos>": 0, "P": 1, "X": 2, "E": 3, "N": 4, "D": 5, "<unk>": 6}
+    backend = Tokenizer(models.WordLevel(vocabulary, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.Split("", behavior="isolated")
+    backend.decoder = decoders.Fuse()
+    tokenizer = TokenizerWrapper(
+        PreTrainedTokenizerFast(
+            tokenizer_object=backend, eos_token="<eos>", unk_token="<unk>"
+        )
+    )
+
+    class ScriptedModel(Model):
+        def __call__(self, inputs, cache=None):
+            # Exercise real attention/cache and batch generation with deterministic output.
+            super().__call__(inputs, cache=cache)
+            next_tokens = mx.array([0, 2, 3, 4, 5, 0, 0])[inputs]
+            return mx.where(
+                mx.arange(len(vocabulary)) == next_tokens[..., None], 100.0, -100.0
+            )
+
+    model = ScriptedModel(
+        ModelArgs(
+            model_type="llama",
+            hidden_size=16,
+            num_hidden_layers=1,
+            intermediate_size=32,
+            num_attention_heads=1,
+            rms_norm_eps=1e-5,
+            vocab_size=len(vocabulary),
+        )
+    )
+    (tmp_path / "config.json").write_text('{"model_type":"llama"}')
+    monkeypatch.setattr(
+        distributed_module,
+        "_instrumented_tensor_sharded_load",
+        lambda *args, **kwargs: (model, tokenizer),
+    )
+    # Replace only cross-device communication; retain the scheduler and public generator.
+    monkeypatch.setattr(
+        DistributedModelKit, "_share_scheduler_message", lambda self, message: message
+    )
+    kit = DistributedModelKit(
+        tmp_path,
+        prefill_step_size=32,
+        distributed_group=SimpleNamespace(rank=lambda: 0, size=lambda: 2),
+    )
+    try:
+        kit.start()
+        results = list(
+            generate_module.create_generator(
+                kit,
+                [vocabulary["P"]],
+                request_id="stop-regression",
+                temp=0,
+                max_tokens=10,
+                stop_strings=stop_strings,
+            )
+        )
+        assert "".join(result.text for result in results) == expected_text
+        assert results[-1].stop_condition.stop_reason == stop_reason
+    finally:
+        kit.shutdown()
 
 
 @pytest.mark.parametrize("rank", [0, 1])

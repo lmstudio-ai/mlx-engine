@@ -1634,7 +1634,12 @@ class DistributedModelKit:
 
                     if response_queue is not None:
                         detokenizer = result["detokenizer"]
-                        if response.finish_reason != "stop":
+                        # The outer stop-string processor needs the complete text to trim it.
+                        # Only suppress actual EOS tokens, not the last token of a user stop.
+                        if (
+                            response.finish_reason != "stop"
+                            or response.token not in self.tokenizer.eos_token_ids
+                        ):
                             detokenizer.add_token(response.token)
                         if response.finish_reason is not None:
                             detokenizer.finalize()
