@@ -3,6 +3,7 @@
 import pytest
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 from mlx_lm.generate import generate_step
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache, make_prompt_cache
 from mlx_lm.models.qwen3_5 import Model, ModelArgs
@@ -322,6 +323,57 @@ def test_vlm_qwen3_5_gated_delta_fallback_matches_upstream(case):
     )
     mx.eval(actual, expected)
     assert max_abs_diff(actual, expected) == 0.0
+
+
+@pytest.mark.parametrize("vision_path", ["native_vlm", "vision_addon"])
+@pytest.mark.parametrize("projection_scale", [1.0, 0.01], ids=["ordinary", "small_qk"])
+def test_qwen3_5_vision_gated_delta_matches_upstream_across_decode(
+    vision_path, projection_scale, monkeypatch
+):
+    """Vision prefill/decode outputs and recurrent cache must match upstream."""
+    mx.random.seed(0)
+    config = make_vlm_text_config()
+    if vision_path == "native_vlm":
+        layer = vlm_qwen3_5_language.Qwen3_5DecoderLayer(config, layer_idx=0)
+    else:
+        layer = make_model(num_hidden_layers=1).language_model.model.layers[0]
+
+    # Small Q/K projections expose normalization-epsilon differences.
+    layer.linear_attn.in_proj_qkv.weight *= projection_scale
+    reference_layer = vlm_qwen3_5_language.Qwen3_5DecoderLayer(config, layer_idx=0)
+    reference_layer.load_weights(tree_flatten(layer.parameters()))
+    layer.eval()
+    reference_layer.eval()
+    patched_cache = vlm_qwen3_5_language.ArraysCache(2)
+    reference_cache = vlm_qwen3_5_language.ArraysCache(2)
+    inputs = mx.random.normal((1, 5, config.hidden_size))
+
+    for step_inputs in (inputs[:, :3], inputs[:, 3:4], inputs[:, 4:]):
+        position_ids = mx.zeros((3, 1, step_inputs.shape[1]), dtype=mx.int32)
+        actual = layer(step_inputs, cache=patched_cache, position_ids=position_ids)
+        # Restore the real upstream computation for the reference, not a mock.
+        with monkeypatch.context() as reference_context:
+            reference_context.setattr(
+                vlm_qwen3_5_language.Qwen3_5GatedDeltaNet,
+                "__call__",
+                qwen3_5_patches.OriginalVlmQwen3_5GatedDeltaNetCall,
+            )
+            expected = reference_layer(
+                step_inputs, cache=reference_cache, position_ids=position_ids
+            )
+        mx.eval(actual, expected, patched_cache.state, reference_cache.state)
+        assert mx.allclose(actual, expected, rtol=1e-5, atol=1e-7).item(), (
+            f"Vision output mismatch (max diff {max_abs_diff(actual, expected):.6g})"
+        )
+        for actual_state, expected_state in zip(
+            patched_cache.state, reference_cache.state
+        ):
+            assert mx.allclose(
+                actual_state, expected_state, rtol=1e-5, atol=1e-8
+            ).item(), (
+                "Vision cache mismatch "
+                f"(max diff {max_abs_diff(actual_state, expected_state):.6g})"
+            )
 
 
 @pytest.mark.parametrize(
