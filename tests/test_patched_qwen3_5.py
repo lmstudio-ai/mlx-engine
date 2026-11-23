@@ -668,6 +668,26 @@ def test_vlm_qwen3_5_text_prefill_fast_path_matches_original_vlm():
     )
 
 
+def test_vlm_qwen3_5_text_fast_path_projects_only_kept_logits():
+    """The text fast path must honor logits_to_keep like mlx-vlm does."""
+    mx.random.seed(0)
+    language_model = vlm_qwen3_5_language.LanguageModel(make_vlm_text_config())
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    tokens = mx.array([[0, 1, 2, 3]])
+
+    full_logits = language_model(tokens, cache=make_prompt_cache(language_model))
+    kept_logits = language_model(
+        tokens, cache=make_prompt_cache(language_model), logits_to_keep=1
+    )
+    mx.eval(full_logits.logits, kept_logits.logits)
+
+    assert kept_logits.logits.shape == (1, 1, full_logits.logits.shape[-1])
+    assert mx.allclose(
+        kept_logits.logits, full_logits.logits[:, -1:], rtol=1e-5, atol=1e-5
+    ).item()
+
+
 def test_vlm_qwen3_5_text_mask_uses_original_vlm():
     """Masked VLM Qwen3.5 text must keep original mlx-vlm RoPE behavior."""
     model_path = get_real_model_path("lmstudio-community/Qwen3.5-2B-MLX-4bit")
