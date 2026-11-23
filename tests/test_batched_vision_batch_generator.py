@@ -4,9 +4,11 @@ from types import SimpleNamespace
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
+from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
 from mlx_vlm.models.cache import (
     BatchKVCache,
     BatchRotatingKVCache,
+    CacheList,
     KVCache,
     RotatingKVCache,
 )
@@ -26,6 +28,32 @@ from mlx_engine.model_kit.batched_vision.prompt_cache.chunks import (
 )
 from mlx_engine.model_kit.batched_vision.prompt_cache.types import PromptImageSpan
 from mlx_engine.tool_runtime import Gemma4ReasoningGuardLogitsProcessor
+
+
+@pytest.mark.parametrize(
+    ("make_attention", "batch_type"),
+    [
+        (KVCache, BatchKVCache),
+        (lambda: RotatingKVCache(max_size=8, keep=0), BatchRotatingKVCache),
+    ],
+)
+def test_extend_cache_promotes_scalar_cache_lists(make_attention, batch_type):
+    def scalar_cache(length):
+        cache = CacheList(make_attention(), VlmArraysCache(1))
+        keys = mx.zeros((1, 2, length, 4))
+        cache[0].update_and_fetch(keys, keys)
+        cache[1][0] = mx.zeros((1, 3))
+        return [cache]
+
+    prompt_cache = scalar_cache(5)
+    assert batcher._is_scalar_prompt_cache(prompt_cache)
+
+    extended = batcher._extend_cache(prompt_cache, scalar_cache(3))
+
+    assert not batcher._is_scalar_prompt_cache(extended)
+    assert isinstance(extended[0][0], batch_type)
+    assert extended[0][0].keys.shape[0] == 2
+    assert extended[0][1][0].shape[0] == 2
 
 
 def _argmax_sampler(logprobs):
