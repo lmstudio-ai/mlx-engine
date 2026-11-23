@@ -195,6 +195,44 @@ def make_vlm_text_config():
     )
 
 
+def test_qwen3_5_vision_addon_mrope_attention_matches_upstream_yarn():
+    """The add-on's MRoPE attention must apply YaRN scaling like mlx-vlm."""
+    mx.random.seed(0)
+    rope_parameters = {
+        "type": "yarn",
+        "mrope_section": [6, 5, 5],
+        "rope_theta": 1000.0,
+        "partial_rotary_factor": 0.5,
+        "factor": 4.0,
+        "original_max_position_embeddings": 256,
+    }
+    layer = make_model(
+        num_hidden_layers=1,
+        full_attention_interval=1,
+        rope_parameters=dict(rope_parameters),
+    ).language_model.model.layers[0]
+    config = vlm_qwen3_5_language.TextConfig.from_dict(
+        {
+            **QWEN3_5_TEXT_CONFIG,
+            "full_attention_interval": 1,
+            "rope_parameters": dict(rope_parameters),
+        }
+    )
+    reference_layer = vlm_qwen3_5_language.Qwen3_5DecoderLayer(config, layer_idx=0)
+    reference_layer.load_weights(tree_flatten(layer.parameters()))
+    assert not layer.is_linear and not reference_layer.is_linear
+
+    inputs = mx.random.normal((1, 4, config.hidden_size))
+    # Positions past original_max_position_embeddings, where YaRN matters.
+    position_ids = mx.broadcast_to(mx.arange(600, 604), (3, 1, 4))
+    actual = layer(inputs, cache=KVCache(), position_ids=position_ids)
+    expected = reference_layer(inputs, cache=KVCache(), position_ids=position_ids)
+    mx.eval(actual, expected)
+    assert mx.allclose(actual, expected, rtol=1e-4, atol=1e-4).item(), (
+        f"YaRN MRoPE mismatch (max diff {max_abs_diff(actual, expected):.6g})"
+    )
+
+
 @pytest.mark.parametrize(
     "case", ["position_ids", "position_embeddings", "left_padded_decode"]
 )

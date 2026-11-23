@@ -195,6 +195,7 @@ class PatchedDecoderLayer(DecoderLayer):
                 max_position_embeddings=args.max_position_embeddings,
                 base=rope_params["rope_theta"],
                 mrope_section=rope_params["mrope_section"],
+                rope_parameters=rope_params,
             )
 
     def __call__(
