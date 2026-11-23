@@ -36,7 +36,7 @@ from mlx_lm.models.base import (
 from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.qwen3_next import Qwen3NextAttention
-from mlx_vlm.models.base import LanguageModelOutput
+from mlx_vlm.models.base import LanguageModelOutput, project_logits
 from mlx_vlm.models.qwen3_5 import language as vlm_qwen3_5_language
 from mlx_vlm.models.qwen3_5.language import (
     LanguageModel as VlmQwen3_5LanguageModel,
@@ -195,6 +195,7 @@ class PatchedDecoderLayer(DecoderLayer):
                 max_position_embeddings=args.max_position_embeddings,
                 base=rope_params["rope_theta"],
                 mrope_section=rope_params["mrope_section"],
+                rope_parameters=rope_params,
             )
 
     def __call__(
@@ -667,10 +668,12 @@ def _patched_vlm_qwen3_5_language_model_call(
             inputs_embeds=inputs_embeds,
             position_ids=None,
         )
-        if self.args.tie_word_embeddings:
-            out = self.model.embed_tokens.as_linear(out)
-        else:
-            out = self.lm_head(out)
+        projection = (
+            self.model.embed_tokens.as_linear
+            if self.args.tie_word_embeddings
+            else self.lm_head
+        )
+        out = project_logits(out, projection, kwargs.get("logits_to_keep"))
         return LanguageModelOutput(
             logits=out,
             hidden_states=None,

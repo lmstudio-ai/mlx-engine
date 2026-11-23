@@ -195,6 +195,44 @@ def make_vlm_text_config():
     )
 
 
+def test_qwen3_5_vision_addon_mrope_attention_matches_upstream_yarn():
+    """The add-on's MRoPE attention must apply YaRN scaling like mlx-vlm."""
+    mx.random.seed(0)
+    rope_parameters = {
+        "type": "yarn",
+        "mrope_section": [6, 5, 5],
+        "rope_theta": 1000.0,
+        "partial_rotary_factor": 0.5,
+        "factor": 4.0,
+        "original_max_position_embeddings": 256,
+    }
+    layer = make_model(
+        num_hidden_layers=1,
+        full_attention_interval=1,
+        rope_parameters=dict(rope_parameters),
+    ).language_model.model.layers[0]
+    config = vlm_qwen3_5_language.TextConfig.from_dict(
+        {
+            **QWEN3_5_TEXT_CONFIG,
+            "full_attention_interval": 1,
+            "rope_parameters": dict(rope_parameters),
+        }
+    )
+    reference_layer = vlm_qwen3_5_language.Qwen3_5DecoderLayer(config, layer_idx=0)
+    reference_layer.load_weights(tree_flatten(layer.parameters()))
+    assert not layer.is_linear and not reference_layer.is_linear
+
+    inputs = mx.random.normal((1, 4, config.hidden_size))
+    # Positions past original_max_position_embeddings, where YaRN matters.
+    position_ids = mx.broadcast_to(mx.arange(600, 604), (3, 1, 4))
+    actual = layer(inputs, cache=KVCache(), position_ids=position_ids)
+    expected = reference_layer(inputs, cache=KVCache(), position_ids=position_ids)
+    mx.eval(actual, expected)
+    assert mx.allclose(actual, expected, rtol=1e-4, atol=1e-4).item(), (
+        f"YaRN MRoPE mismatch (max diff {max_abs_diff(actual, expected):.6g})"
+    )
+
+
 @pytest.mark.parametrize(
     "case", ["position_ids", "position_embeddings", "left_padded_decode"]
 )
@@ -628,6 +666,26 @@ def test_vlm_qwen3_5_text_prefill_fast_path_matches_original_vlm():
     assert diff == 0.0, (
         f"VLM Qwen3.5 text prefill fast path changed logits (max diff {diff:.6f})."
     )
+
+
+def test_vlm_qwen3_5_text_fast_path_projects_only_kept_logits():
+    """The text fast path must honor logits_to_keep like mlx-vlm does."""
+    mx.random.seed(0)
+    language_model = vlm_qwen3_5_language.LanguageModel(make_vlm_text_config())
+    language_model._position_ids = None
+    language_model._rope_deltas = None
+    tokens = mx.array([[0, 1, 2, 3]])
+
+    full_logits = language_model(tokens, cache=make_prompt_cache(language_model))
+    kept_logits = language_model(
+        tokens, cache=make_prompt_cache(language_model), logits_to_keep=1
+    )
+    mx.eval(full_logits.logits, kept_logits.logits)
+
+    assert kept_logits.logits.shape == (1, 1, full_logits.logits.shape[-1])
+    assert mx.allclose(
+        kept_logits.logits, full_logits.logits[:, -1:], rtol=1e-5, atol=1e-5
+    ).item()
 
 
 def test_vlm_qwen3_5_text_mask_uses_original_vlm():

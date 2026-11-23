@@ -32,6 +32,8 @@ from mlx_vlm.generate import (
     DEFAULT_COMPLETION_BATCH_SIZE,
     DEFAULT_MAX_TOKENS,
     DEFAULT_PREFILL_STEP_SIZE,
+    _extend_cache,
+    _is_batch_cache_entry,
     _left_pad_prompts,
     wired_limit,
 )
@@ -88,27 +90,10 @@ class _PendingSequence:
     prefix_cache_save_state: _PrefixCacheSaveState
 
 
-def _batch_single_cache(cache: list[Any]) -> list[Any]:
-    """Convert one scalar restored cache into a batch-size-one cache."""
-    batch_cache = []
-    for layer_cache in cache:
-        if not hasattr(layer_cache, "merge"):
-            raise ValueError(
-                f"{type(layer_cache)} does not yet support batching with history"
-            )
-        batch_cache.append(layer_cache.merge([layer_cache]))
-    return batch_cache
-
-
 def _is_scalar_prompt_cache(prompt_cache: list[Any]) -> bool:
     """Return True for ordinary one-request caches, not batch-aware caches."""
-    return any(not hasattr(cache, "filter") for cache in prompt_cache)
-
-
-def _ensure_batch_cache(prompt_cache: list[Any]) -> list[Any]:
-    if _is_scalar_prompt_cache(prompt_cache):
-        return _batch_single_cache(prompt_cache)
-    return prompt_cache
+    # Upstream's check also looks inside CacheList entries.
+    return not all(_is_batch_cache_entry(cache) for cache in prompt_cache)
 
 
 def _sync_scalar_rope_deltas(model: nn.Module, prompt_cache: list[Any], rope_deltas):
@@ -140,19 +125,6 @@ def _clear_qwen3_5_text_rope_state(model: nn.Module, prompt_kwargs: dict) -> Non
 def _with_logits_to_keep(kwargs: dict) -> dict:
     # mlx-vlm language models either use this hint or accept and ignore it.
     return {**kwargs, "logits_to_keep": 1}
-
-
-def _extend_cache(cache_a, cache_b):
-    if not cache_a:
-        return cache_b
-    if not cache_b:
-        return cache_a
-    # Stay scalar for one row; promote only when another row actually joins.
-    cache_a = _ensure_batch_cache(cache_a)
-    cache_b = _ensure_batch_cache(cache_b)
-    for ca, cb in zip(cache_a, cache_b):
-        ca.extend(cb)
-    return cache_a
 
 
 def _normalize_rope_deltas(rope_deltas: Any) -> Any:
@@ -524,6 +496,7 @@ class GenerationBatch:
         prefilled_count = len(prefilled)
 
         self._rows.extend(prefilled._rows)
+        # Stay scalar for one row; upstream promotes when another row joins.
         self.prompt_cache = _extend_cache(self.prompt_cache, prefilled.prompt_cache)
         next_top_logprobs_k = max(
             (row.top_logprobs for row in self._rows),
