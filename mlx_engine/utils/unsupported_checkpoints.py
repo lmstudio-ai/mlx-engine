@@ -1,8 +1,9 @@
 """Fail fast on checkpoint layouts that the MLX engine cannot load."""
 
 import json
-import struct
 from pathlib import Path
+
+from safetensors import safe_open
 
 # mlx-lm saves Inkling 2 Mini (`inkling2_loop`) with tensor names under
 # `model.language_model.`. mlx-vlm, which loads all vision models here, only
@@ -20,10 +21,8 @@ def _weight_names(model_path: Path) -> list[str]:
         return list(json.loads(index_path.read_text())["weight_map"])
     names = []
     for path in sorted(model_path.glob("*.safetensors")):
-        with path.open("rb") as file:
-            (header_length,) = struct.unpack("<Q", file.read(8))
-            header = json.loads(file.read(header_length))
-        names.extend(name for name in header if name != "__metadata__")
+        with safe_open(path, framework="numpy") as file:
+            names.extend(file.keys())
     return names
 
 
