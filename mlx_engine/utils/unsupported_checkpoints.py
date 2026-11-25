@@ -11,7 +11,7 @@ from safetensors import safe_open
 # otherwise fail with a long list of unrecognized parameters.
 _MLX_LM_INKLING2_PREFIX = "model.language_model."
 UNSUPPORTED_INKLING2_MESSAGE = (
-    "Unsupported Inkling 2 Mini format, try lmstudio-community/Inkling-2-Mini-MLX-8bit."
+    "Unsupported Inkling 2 Mini format, try lmstudio-community/Inkling-2-Mini-MLX-4bit."
 )
 
 
