@@ -1,0 +1,36 @@
+"""Fail fast on checkpoint layouts that the MLX engine cannot load."""
+
+import json
+import struct
+from pathlib import Path
+
+# mlx-lm saves Inkling 2 Mini (`inkling2_loop`) with tensor names under
+# `model.language_model.`. mlx-vlm, which loads all vision models here, only
+# reads the original checkpoint names and its own converted names, so it would
+# otherwise fail with a long list of unrecognized parameters.
+_MLX_LM_INKLING2_PREFIX = "model.language_model."
+UNSUPPORTED_INKLING2_MESSAGE = (
+    "Unsupported Inkling 2 Mini format, try lmstudio-community/Inkling-2-Mini-MLX-8bit."
+)
+
+
+def _weight_names(model_path: Path) -> list[str]:
+    index_path = model_path / "model.safetensors.index.json"
+    if index_path.exists():
+        return list(json.loads(index_path.read_text())["weight_map"])
+    names = []
+    for path in sorted(model_path.glob("*.safetensors")):
+        with path.open("rb") as file:
+            (header_length,) = struct.unpack("<Q", file.read(8))
+            header = json.loads(file.read(header_length))
+        names.extend(name for name in header if name != "__metadata__")
+    return names
+
+
+def raise_if_unsupported_checkpoint(model_path: Path, config_json: dict) -> None:
+    if config_json.get("model_type") != "inkling2_loop":
+        return
+    if any(
+        name.startswith(_MLX_LM_INKLING2_PREFIX) for name in _weight_names(model_path)
+    ):
+        raise ValueError(UNSUPPORTED_INKLING2_MESSAGE)

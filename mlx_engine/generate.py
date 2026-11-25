@@ -35,6 +35,7 @@ from mlx_engine.utils.generation_result import (
     construct_user_cancelled_result,
 )
 from mlx_engine.utils.set_seed import set_seed
+from mlx_engine.utils.unsupported_checkpoints import raise_if_unsupported_checkpoint
 from mlx_engine.utils.speculative_decoding import (
     determine_draft_model_for_generation,
     configure_num_draft_tokens_in_generate_args,
@@ -242,6 +243,8 @@ def load_model(
     prefill_step_size = validate_prefill_step_size(prefill_step_size)
     model_path = Path(model_path)
     config_json = json.loads((model_path / "config.json").read_text())
+    if not vocab_only:
+        raise_if_unsupported_checkpoint(model_path, config_json)
     parallel_requested = max_seq_nums is not None and max_seq_nums > 1
 
     def warn_if_parallel(reason: str) -> None:
